@@ -32,7 +32,19 @@ export async function getAvailableDiscounts(req: Request, res: Response, next: N
     const { venueId, orderId } = req.params
     const customerId = req.query.customerId as string | undefined
 
-    const discounts = await discountTpvService.getAvailableDiscounts(venueId, orderId, customerId)
+    const disponibles = await discountTpvService.getAvailableDiscounts(venueId, orderId, customerId)
+    // hz:b37dd7ea:D51: una cortesía que quien llama no puede dar (`checkCortesiaEnDescuento` pide `orders:comp`) sale marcada para
+    // que la TPV la pinte en gris. La misma regla del candado (dueño de la org, SUPERADMIN, comodines); campo opcional y aditivo.
+    // Codex r2: si la pregunta falla, la lista sale igual con la cortesía en gris (falla cerrado), nunca un 500 para toda la hoja.
+    const puedeRegalar =
+      !disponibles.some(d => d.type === DiscountType.COMP) ||
+      (await tienePermisoEnVenue(req, 'orders:comp').catch(error => {
+        logger.warn('D51: no se pudo saber si quien llama da cortesías; van en gris', { venueId, orderId, error })
+        return false
+      }))
+    const discounts = puedeRegalar
+      ? disponibles
+      : disponibles.map(d => (d.type === DiscountType.COMP ? { ...d, missingPermission: 'orders:comp' } : d))
 
     res.status(200).json({
       success: true,

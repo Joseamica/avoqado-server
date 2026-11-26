@@ -1,56 +1,80 @@
 {
   "pagina": "tpv/mesas/descuento-en-la-cuenta-de-la-mesa",
   "sourceRepo": "avoqado-tpv",
-  "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660",
-  "version": "2.16.0",
+  "sourceRef": "a48295a1fd9273c36459a29e6a5d59a6a5122791",
+  "version": "2.22.4",
   "pasos": [
     {
       "paso": 1,
       "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableCheckoutScreen.kt",
-      "linea": 325,
+      "linea": 355,
       "cita": "title = \"Cobrar · ${session.label}\","
     },
     {
       "paso": 2,
       "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableCheckoutScreen.kt",
-      "linea": 389,
+      "linea": 428,
       "cita": "text = \"+ Agregar descuento\","
     },
     {
       "paso": 3,
       "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/DiscountPickerSheet.kt",
-      "linea": 64,
+      "linea": 68,
       "cita": "Text(text = \"Descuentos disponibles\", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)"
     },
     {
       "paso": 3,
       "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableCheckoutScreen.kt",
-      "linea": 326,
-      "cita": "subtitle = \"Restante ${moneyDisplay(state.remaining)}\","
+      "linea": 360,
+      "cita": "\"Restante ${moneyDisplay(state.remaining)}\""
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/DiscountPickerSheet.kt",
+      "linea": 103,
+      "cita": "enabled = discount.razonApagado == null && !isApplying,"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/data/TablesRepository.kt",
+      "linea": 813,
+      "cita": "bloqueadaPor = it.missingPermission?.let { p -> textoDePermiso(p, \"Lo aplica alguien con otro permiso\") },"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/core/data/network/PermisoRequerido.kt",
+      "linea": 13,
+      "cita": "\"orders:comp\" -> \"Esta cortesía la da un gerente con su sesión\""
+    },
+    {
+      "paso": 3,
+      "archivo": "avoqado-server/src/controllers/tpv/discount.tpv.controller.ts",
+      "linea": 41,
+      "cita": "(await tienePermisoEnVenue(req, 'orders:comp').catch(error => {"
     },
     {
       "paso": 4,
       "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableCheckoutScreen.kt",
-      "linea": 603,
+      "linea": 679,
       "cita": "contentDescription = \"Quitar $label\","
     },
     {
       "paso": 5,
       "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableCheckoutScreen.kt",
-      "linea": 249,
-      "cita": "onPayCash = { viewModel.payCash(chargeableAmount) },"
+      "linea": 273,
+      "cita": "onPayCash = { viewModel.payCash(chargeableAmount, restanteDeLaPantalla = restanteDelBoton) },"
     }
   ],
   "permisos": [
     {
       "permiso": "discounts:apply",
       "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/data/api/TablesApiService.kt",
-      "linea": 203
+      "linea": 204
     },
     {
       "permiso": "discounts:apply",
       "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/data/api/TablesApiService.kt",
-      "linea": 238
+      "linea": 240
     },
     {
       "permiso": "discounts:apply",
@@ -74,38 +98,44 @@
     {
       "afirmacion": "Quitar descuento siempre online",
       "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableCheckoutScreen.kt",
-      "linea": 120
+      "linea": 137
     }
   ],
   "rutas": [
     {
       "ruta": "Sin descuentos",
       "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/DiscountPickerSheet.kt",
-      "linea": 76
+      "linea": 88
     },
     {
       "ruta": "Autorización de gerente",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/domain/model/AvailableDiscount.kt",
+      "linea": 26
+    },
+    {
+      "ruta": "Cortesía sin permiso de cortesías (en gris)",
       "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/DiscountPickerSheet.kt",
-      "linea": 132
+      "linea": 145
     }
   ],
   "aparato": {
     "estado": "PROBADO",
-    "aparato": "PAX del laboratorio del Alien (serial 2841548417), puede-cobrar en 0; sólo efectivo",
-    "version": "2.22.3-sandbox (main d082376e), copia de QA com.jaac.avoqado_tpv.sandbox.d36 compilada en la nube (assembleSandboxDebug), contra el SERVIDOR aislado (develop 6409b3562 con #633, base av-db-25-d36) en :3004",
-    "apkSha256": "9038c41cc8dd5180677d80736cf1b24870af21460388a2ea4d310d6fd7266f3d",
-    "fecha": "2026-11-25",
+    "aparato": "PAX del laboratorio del Alien (serial 2841548417), puede-cobrar en 0; sin cobro (sólo descuentos)",
+    "version": "2.22.4-sandbox (fix/d51-cortesia-en-gris a48295a1), copia de QA com.jaac.avoqado_tpv.sandbox.d51 compilada en la nube (assembleSandboxDebug), contra un SERVIDOR aislado (develop 2e17f1b2f + D51, base propia sembrada) en :3009",
+    "apkSha256": "68d3f44313673fbf50b47d764d79958f6d5281952c173c1a4ab093eec2ac5633",
+    "fecha": "2026-11-26",
     "fotos": [
-      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/tpv/tpv-45-pagar.png",
-      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/tpv/tpv-46-descuentos.png",
-      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/tpv/tpv-47-aplicado.png",
-      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/tpv/tpv-48-quitado.png",
-      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/tpv/tpv-49-efectivo.png"
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d51/pax/03-mesero-pagar.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d51/pax/04-mesero-cortesia-en-gris.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d51/pax/06-mesero-aplica-el-10.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d51/pax/08-gerente-cortesia-activa.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d51/pax/09-gerente-cortesia-aplicada.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d51/pax/11-sin-red-lista-de-descuentos.png"
     ],
     "filasCreadas": [
-      "Mesa M2: orden ORD-0000000000024 de $58.50 (−$6.50) en efectivo"
+      "Base desechable avq_d51: Mesa M2, orden ORD-973 ($229.00): FULLTEST-D51 Diez −$22.90 (mesero) y FULLTEST-D51 Cortesia −$206.10 (gerente); sin cobro"
     ],
-    "nota": "25-nov (D36): Mesas → M2 → Abrir mesa y ordenar → Flan Napolitano → Enviar ronda → Pagar · $65.00 → «+ Agregar descuento» → «Descuentos disponibles» → FULLTEST-D38 9DSKI (−$6.50, 10%) → se aplica (Restante $58.50) → el botón − («Quitar FULLTEST-D38 9DSKI») lo quita → otra vez → Efectivo → «Cobro registrado». No se probó: «Requiere autorización de gerente», cargo por servicio, sin red."
+    "nota": "26-nov (D51): mesero (waiter@) › Mesas › M2 › Ver cuenta › Pagar · $229.00 › «+ Agregar descuento» › «Descuentos disponibles»: «FULLTEST-D51 Cortesia» apagada con candado y «Esta cortesía la da un gerente con su sesión»; tocarla no manda nada (0 POST discounts/apply en el log); «FULLTEST-D51 Diez» (−$22.90) se aplica (Restante $206.10). Gerente (manager@) › misma mesa: la cortesía sale activa (−$229.00) y se aplica (Total $0.00). Sin red (M5): la hoja dice «Sin conexión: la lista de descuentos necesita internet.». No se probó: la TPV vieja contra el SERVIDOR nuevo (ignora el campo; ver prueba de repositorio)."
   },
   "codex": {
     "lote": 4,

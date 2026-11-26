@@ -5747,6 +5747,12 @@
         "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
       }
     ],
+    "avoqado-tpv:app/src/main/java/com/jaac/avoqado_tpv/core/data/network/PermisoRequerido.kt": [
+      {
+        "pagina": "tpv/mesas/descuento-en-la-cuenta-de-la-mesa",
+        "sourceRef": "a48295a1fd9273c36459a29e6a5d59a6a5122791"
+      }
+    ],
     "avoqado-tpv:app/src/main/java/com/jaac/avoqado_tpv/core/data/workers/PaymentSyncWorker.kt": [
       {
         "pagina": "tpv/cobro/cobrar-en-efectivo",
@@ -5994,7 +6000,7 @@
       },
       {
         "pagina": "tpv/mesas/descuento-en-la-cuenta-de-la-mesa",
-        "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660"
+        "sourceRef": "a48295a1fd9273c36459a29e6a5d59a6a5122791"
       },
       {
         "pagina": "tpv/mesas/fusionar-cuentas",
@@ -6821,6 +6827,10 @@
         "sourceRef": "4c92a98fab1256782524e72748f44bfe99e2052d"
       },
       {
+        "pagina": "tpv/mesas/descuento-en-la-cuenta-de-la-mesa",
+        "sourceRef": "a48295a1fd9273c36459a29e6a5d59a6a5122791"
+      },
+      {
         "pagina": "tpv/mesas/mover-mesa",
         "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660"
       },
@@ -6832,7 +6842,13 @@
     "avoqado-tpv:app/src/main/java/com/jaac/avoqado_tpv/features/tables/data/api/TablesApiService.kt": [
       {
         "pagina": "tpv/mesas/descuento-en-la-cuenta-de-la-mesa",
-        "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660"
+        "sourceRef": "a48295a1fd9273c36459a29e6a5d59a6a5122791"
+      }
+    ],
+    "avoqado-tpv:app/src/main/java/com/jaac/avoqado_tpv/features/tables/domain/model/AvailableDiscount.kt": [
+      {
+        "pagina": "tpv/mesas/descuento-en-la-cuenta-de-la-mesa",
+        "sourceRef": "a48295a1fd9273c36459a29e6a5d59a6a5122791"
       }
     ],
     "avoqado-tpv:app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/AssignWaiterSheet.kt": [
@@ -6850,7 +6866,7 @@
     "avoqado-tpv:app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/DiscountPickerSheet.kt": [
       {
         "pagina": "tpv/mesas/descuento-en-la-cuenta-de-la-mesa",
-        "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660"
+        "sourceRef": "a48295a1fd9273c36459a29e6a5d59a6a5122791"
       }
     ],
     "avoqado-tpv:app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/MergeOrdersSheet.kt": [
@@ -6880,7 +6896,7 @@
       },
       {
         "pagina": "tpv/mesas/descuento-en-la-cuenta-de-la-mesa",
-        "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660"
+        "sourceRef": "a48295a1fd9273c36459a29e6a5d59a6a5122791"
       }
     ],
     "avoqado-tpv:app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableCheckoutViewModel.kt": [
@@ -7039,6 +7055,12 @@
         "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660"
       }
     ],
+    "avoqado-tpv:avoqado-server/src/controllers/tpv/discount.tpv.controller.ts": [
+      {
+        "pagina": "tpv/mesas/descuento-en-la-cuenta-de-la-mesa",
+        "sourceRef": "a48295a1fd9273c36459a29e6a5d59a6a5122791"
+      }
+    ],
     "avoqado-tpv:avoqado-server/src/routes/dashboard.routes.ts": [
       {
         "pagina": "tpv/sesion/pin-incorrecto",
@@ -7112,7 +7134,7 @@
       },
       {
         "pagina": "tpv/mesas/descuento-en-la-cuenta-de-la-mesa",
-        "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660"
+        "sourceRef": "a48295a1fd9273c36459a29e6a5d59a6a5122791"
       },
       {
         "pagina": "tpv/mesas/fusionar-cuentas",
