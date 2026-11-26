@@ -10,7 +10,7 @@
  */
 import { randomUUID } from 'crypto'
 import prisma from '@/utils/prismaClient'
-import { getOrder } from '@/services/mobile/order.mobile.service'
+import { getOrder, payCashOrder } from '@/services/mobile/order.mobile.service'
 import { redeemPointsToOrder } from '@/services/mobile/loyalty.mobile.service'
 
 jest.mock('@/communication/sockets', () => ({
@@ -22,6 +22,8 @@ jest.mock('@/communication/sockets/managers/socketManager', () => {
   return { __esModule: true, default: manager, socketManager: manager }
 })
 jest.mock('@/communication/rabbitmq/publisher', () => ({ publishCommand: jest.fn() }))
+jest.mock('@/services/dashboard/activity-log.service', () => ({ logAction: jest.fn() }))
+jest.mock('@/services/wallet/notifyPassUpdated.service', () => ({ notifyCustomerPassUpdated: jest.fn().mockResolvedValue({ notified: 0 }) }))
 
 const venueId = `itest-d39-${randomUUID()}`
 let staffId: string
@@ -40,6 +42,8 @@ beforeAll(async () => {
 afterAll(async () => {
   if (!venueId) return
   await prisma.terminalPaymentRequest.deleteMany({ where: { venueId } })
+  await prisma.paymentAllocation.deleteMany({ where: { order: { venueId } } })
+  await prisma.payment.deleteMany({ where: { venueId } })
   await prisma.order.deleteMany({ where: { venueId } })
   await prisma.loyaltyTransaction.deleteMany({ where: { customer: { venueId } } })
   await prisma.activityLog.deleteMany({ where: { venueId } })
@@ -135,18 +139,16 @@ describe('D39 · canje en una cuenta de «Pagar después»', () => {
     expect(await canjesDe(orderId)).toBe(0)
   })
 
-  it('un canje que dejaría la cuenta de «Pagar después» en $0.00: 400 y nada se quema (Codex r4 #4)', async () => {
+  it('D39 r10 (de raíz): un canje que deja la cuenta de «Pagar después» en $0.00 entra, y «Cerrar cuenta ($0.00)» (un cobro de $0) la cierra', async () => {
     const { orderId, customerId, version } = await cuentaDePagarDespues(500, 20)
     await expect(
       redeemPointsToOrder(venueId, orderId, customerId, 200, staffId, { monto: 20, puntos: 200, deLaCabecera: true, version }),
-    ).rejects.toMatchObject({ statusCode: 400, code: 'LOYALTY_REDEEM_WOULD_ZERO' })
-    expect(await puntosDe(customerId)).toBe(500)
-    expect(await canjesDe(orderId)).toBe(0)
-    expect(Number((await prisma.order.findUniqueOrThrow({ where: { id: orderId } })).total)).toBe(20)
-    // Uno que deja algo por cobrar sí entra.
-    await expect(
-      redeemPointsToOrder(venueId, orderId, customerId, 190, staffId, { monto: 19, puntos: 190, deLaCabecera: true, version }),
-    ).resolves.toMatchObject({ pointsRedeemed: 190 })
+    ).resolves.toMatchObject({ pointsRedeemed: 200 })
+    expect(await puntosDe(customerId)).toBe(300)
+    expect(Number((await prisma.order.findUniqueOrThrow({ where: { id: orderId } })).total)).toBe(0)
+    // Lo que hace el botón de Pedidos: el mismo cobro de $0 con el que Mesas cierra una cortesía.
+    await payCashOrder(venueId, orderId, { amount: 0, tip: 0, staffId, idempotencyKey: `cero-${orderId}` })
+    expect((await prisma.order.findUniqueOrThrow({ where: { id: orderId } })).paymentStatus).toBe('PAID')
   })
 
   it('sin versión (Mesas, apps viejas): canjea como siempre', async () => {

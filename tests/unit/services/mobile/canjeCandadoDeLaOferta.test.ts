@@ -317,73 +317,26 @@ describe('D39 · la versión de la cuenta y el cobro en la terminal', () => {
   })
 })
 
-describe('D39 · un fiado SIN MESA no se deja en $0.00 con puntos (Codex r4 #4, r5 #3, r7 #2 y r8 #4)', () => {
+describe('D39 r10 (de raíz, founder 25-nov): el canje ya no tiene freno de $0.00', () => {
   beforeEach(() => jest.clearAllMocks())
 
-  it('el total ya recalculado queda en $0 en un fiado («Pagar después») sin mesa, venga de donde venga: 400 y se deshace con la transacción', async () => {
-    for (const source of ['AVOQADO_ANDROID', 'AVOQADO_IOS', 'TPV', 'POS', 'APP', 'WEB', null]) {
-      ;(recalculateOrderTotals as jest.Mock).mockResolvedValueOnce({ total: 0 })
-      const tx = txFalso({ ...cuenta(50), payLater: true, tableId: null, source })
-      await expect(
-        redeemPointsToOrderInTransaction(tx, 'v1', 'o1', 'c1', 500, undefined, config as any, { monto: 50, puntos: 500 }),
-      ).rejects.toMatchObject({ statusCode: 400, code: 'LOYALTY_REDEEM_WOULD_ZERO' })
-    }
-  })
-
-  it('r7 #2 y r8 #4: lo que no es fiado (la TIENDA EN LÍNEA, una cuenta de mostrador) sí queda en $0, como antes de D39, lo canjee quien lo canjee', async () => {
-    for (const payLater of [false, null])
-      for (const source of ['WEB', 'AVOQADO_ANDROID', 'TPV', null]) {
-        ;(recalculateOrderTotals as jest.Mock).mockResolvedValueOnce({ total: 0 })
-        await expect(
-          redeemPointsToOrderInTransaction(
-            txFalso({ ...cuenta(50), payLater, tableId: null, source }),
-            'v1',
-            'o1',
-            'c1',
-            500,
-            undefined,
-            config as any,
-            { monto: 50, puntos: 500 },
-          ),
-        ).resolves.toMatchObject({ pointsToBurn: 500 })
-      }
-  })
-
-  it('con un cargo fijo el total sigue arriba de $0: canjea', async () => {
-    ;(recalculateOrderTotals as jest.Mock).mockResolvedValueOnce({ total: 5 })
-    await expect(
-      redeemPointsToOrderInTransaction(
-        txFalso({ ...cuenta(50), payLater: true, tableId: null, source: 'AVOQADO_ANDROID' }),
-        'v1',
-        'o1',
-        'c1',
-        500,
-        undefined,
-        config as any,
-        {
-          monto: 50,
-          puntos: 500,
-        },
-      ),
-    ).resolves.toMatchObject({ pointsToBurn: 500 })
-  })
-
-  it('r5 #3: un fiado que se movió a una MESA conserva `payLater` y en Mesas se sigue cerrando en $0, como antes', async () => {
-    ;(recalculateOrderTotals as jest.Mock).mockResolvedValueOnce({ total: 0 })
-    await expect(
-      redeemPointsToOrderInTransaction(
-        txFalso({ ...cuenta(50), payLater: true, tableId: 'mesa-1', source: 'AVOQADO_ANDROID' }),
-        'v1',
-        'o1',
-        'c1',
-        500,
-        undefined,
-        config as any,
-        {
-          monto: 50,
-          puntos: 500,
-        },
-      ),
-    ).resolves.toMatchObject({ pointsToBurn: 500 })
+  it('un fiado sin mesa, una cuenta de mesa o de la tienda queda en $0.00 si los puntos la cubren: Pedidos la cierra con «Cerrar cuenta ($0.00)», como Mesas', async () => {
+    for (const payLater of [true, false, null])
+      for (const tableId of [null, 'mesa-1'])
+        for (const source of ['AVOQADO_ANDROID', 'TPV', 'POS', 'APP', 'WEB', null]) {
+          ;(recalculateOrderTotals as jest.Mock).mockResolvedValueOnce({ total: 0 })
+          await expect(
+            redeemPointsToOrderInTransaction(
+              txFalso({ ...cuenta(50), payLater, tableId, source }),
+              'v1',
+              'o1',
+              'c1',
+              500,
+              undefined,
+              config as any,
+              { monto: 50, puntos: 500 },
+            ),
+          ).resolves.toMatchObject({ pointsToBurn: 500 })
+        }
   })
 })

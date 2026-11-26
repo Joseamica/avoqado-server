@@ -104,11 +104,6 @@ export type OfertaEsperada = {
   version?: number
 }
 
-/** D39: un fiado («Pagar después») sin mesa no se deja en $0.00 con puntos: no tendría con qué cerrarse en «Pedidos». */
-export const CANJE_DEJARIA_EN_CERO =
-  'Con esos puntos la cuenta quedaría en $0.00, y una cuenta sin mesa en $0.00 no se puede cerrar. Canjea menos puntos.'
-export const CANJE_DEJARIA_EN_CERO_CODE = 'LOYALTY_REDEEM_WOULD_ZERO'
-
 /** D39 (Codex r1 #4): un canje no baja la cuenta mientras la terminal tiene un cobro con el importe de antes. */
 export const CANJE_CON_COBRO_EN_LA_TERMINAL =
   'Hay un cobro con tarjeta en curso en la terminal para esta cuenta: espera a que termine para canjear puntos.'
@@ -361,8 +356,6 @@ export async function redeemPointsToOrderInTransaction(
       status: true,
       customerId: true,
       version: true,
-      tableId: true,
-      payLater: true,
     },
   })
   if (!order) throw new NotFoundError('Orden no encontrada')
@@ -470,14 +463,8 @@ export async function redeemPointsToOrderInTransaction(
   })
 
   const totals = await recalculateOrderTotals(orderId, 0, Number(order.paidAmount || 0), tx)
-  // D39 (Codex r1 #5, r2 #6, r3 #5, r4 #4, r5 #3, r7 #2 y r8 #4): un FIADO («Pagar después», `payLater = true`) SIN MESA que el canje deja
-  // en $0.00 no tiene con qué cerrarse (Pedidos sólo cobra con saldo). Se decide con el total YA recalculado (un cobro por servicio en %
-  // baja con la base; uno fijo, no), y se deshace todo con la transacción. Se mira `payLater` y no el origen: la API acepta cualquier
-  // origen al crear. Un fiado que se movió a una mesa sigue como siempre (Mesas la cierra en $0), y lo que no es fiado (la TIENDA EN
-  // LÍNEA, que cierra su folio en $0; una cuenta de mostrador) queda como antes de D39, lo canjee quien lo canjee.
-  if (order.payLater === true && order.tableId == null && totals.total <= 0) {
-    throw new BadRequestError(CANJE_DEJARIA_EN_CERO, CANJE_DEJARIA_EN_CERO_CODE)
-  }
+  // D39 r10 (founder, «Sí, de raíz»): sin freno de $0.00. Una cuenta que los puntos cubren se cierra con un cobro de $0 («Cerrar
+  // cuenta ($0.00)» en Pedidos, como Mesas cierra una cortesía).
   return { pointsToBurn, discountAmount, newBalance, transaction, row, totals }
 }
 

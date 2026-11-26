@@ -59,7 +59,12 @@ export const redeemPoints = async (req: Request, res: Response, next: NextFuncti
       return res.json({ success: true, data })
     }
     if (!staffId) throw new UnauthorizedError('Autenticación requerida')
-    const payload = montoEsperado === undefined ? { points } : { points, expectedDiscountAmount: montoEsperado }
+    // D39 r10: la versión viaja en la llave igual que en la ruta sin llave (sólo cuenta junto con el monto, como allá).
+    const payload = {
+      points,
+      ...(montoEsperado !== undefined ? { expectedDiscountAmount: montoEsperado } : {}),
+      ...(versionEsperada !== undefined ? { expectedVersion: versionEsperada } : {}),
+    }
     const parsed = manifestSchema.safeParse({ action: 'redeemLoyaltyPoints', refs: { orderId, customerId }, payload })
     if (!parsed.success || parsed.data.action !== 'redeemLoyaltyPoints')
       throw new BadRequestError('Datos de operación inválidos', 'HTTP_OPERATION_INVALID')
@@ -75,7 +80,12 @@ export const redeemPoints = async (req: Request, res: Response, next: NextFuncti
         undefined,
         manifest.payload.expectedDiscountAmount === undefined
           ? undefined
-          : { monto: manifest.payload.expectedDiscountAmount, puntos: manifest.payload.points, deLaCabecera: true },
+          : {
+              monto: manifest.payload.expectedDiscountAmount,
+              puntos: manifest.payload.points,
+              deLaCabecera: true,
+              ...(manifest.payload.expectedVersion !== undefined ? { version: manifest.payload.expectedVersion } : {}),
+            },
       )
       const auditData = { customerId: manifest.refs.customerId, points: r.pointsToBurn, discountAmount: r.discountAmount }
       return {

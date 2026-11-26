@@ -3102,8 +3102,8 @@ test('D18 candado de la oferta: si la cuenta cambió, 409 final LOYALTY_OFFER_CH
   })
   const c = await prisma.customer.create({ data: { venueId, firstName: 'Candado', loyaltyPoints: 20000 } }),
     o = await plainOrder()
-  // La tablet sólo conoce a la clienta de la CABECERA de la cuenta (Codex android r10 #1). Es una cuenta de MESA: el canje final la
-  // deja en $0, y sólo Mesas cierra en $0 (D39 r5 #3: sin mesa, el SERVIDOR no deja una cuenta del POS en $0).
+  // La tablet sólo conoce a la clienta de la CABECERA de la cuenta (Codex android r10 #1). Es una cuenta de MESA (el canje final la deja
+  // en $0; desde D39 r10 también una sin mesa, que Pedidos cierra con «Cerrar cuenta ($0.00)»).
   await prisma.order.update({ where: { id: o.id }, data: { customerId: c.id, tableId: (await emptyTable()).id } })
   // Otra caja dejó la cuenta con $1 por descontar; la tablet todavía enseña 1000 puntos por $10.
   await prisma.order.update({ where: { id: o.id }, data: { discountAmount: 99 } })
