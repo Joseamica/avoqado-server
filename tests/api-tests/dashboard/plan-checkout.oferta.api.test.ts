@@ -448,6 +448,72 @@ describe('GET /plan → POST /plan/checkout con la versión del editor (B2, Task
     expect(mockCustomerRetrieve).not.toHaveBeenCalled()
   })
 
+  it('🔴 Codex b2-code r2 #7: con una v2 dañada (o el puntero ilegible), GET /plan lee la suscripción con el tope corto y sin cotizacion; con Stripe lento, 200 degradado tras UNA llamada; con una v1 dañada, la llamada de hoy', async () => {
+    prismaMock.venueFeature.findMany.mockResolvedValue([
+      { ...pruebaRegalada(-24), id: 'vf_pro', stripeSubscriptionId: 'sub_hoy', endDate: null },
+    ])
+    const periodo = Math.floor((Date.now() + 20 * DIA) / 1000)
+    const deHoy = {
+      id: 'sub_hoy',
+      object: 'subscription',
+      customer: 'cus_1',
+      status: 'active',
+      created: periodo - 60 * 86_400,
+      cancel_at_period_end: false,
+      cancel_at: null,
+      trial_end: null,
+      default_payment_method: 'pm_de_hoy',
+      metadata: {},
+      discounts: [],
+      items: {
+        data: [{ current_period_end: periodo, price: { id: 'price_key_pro_m', unit_amount: PRO_M_HOY, recurring: { interval: 'month' } } }],
+      },
+    }
+    const lecturas = jest.spyOn(stripeService, 'retrievePlanSubscription')
+    const tiempoAgotado = () =>
+      Object.assign(new Error('Request aborted due to timeout being reached (5000ms)'), { type: 'StripeConnectionError' })
+    try {
+      for (const ilegible of [
+        () => prismaMock.planOfferPointer.findUnique.mockResolvedValue(punteroA('cv2', 2, { schemaVersion: 1, rota: true }) as never),
+        () => prismaMock.planOfferPointer.findUnique.mockRejectedValue(new Error('la base no contesta')),
+      ]) {
+        ilegible()
+        mockSubRetrieve.mockReset().mockResolvedValue(deHoy)
+        lecturas.mockClear()
+        jest.mocked(logger.warn).mockClear()
+
+        const res = await leerPlan()
+
+        expect(res.status).toBe(200)
+        expect(res.body.data).not.toHaveProperty('cotizacion')
+        expect(lecturas.mock.calls).toEqual([['sub_hoy', { timeoutMs: 5_000 }]])
+        expect(mockSubRetrieve.mock.calls).toEqual([
+          ['sub_hoy', { expand: ['discounts.source.coupon.applies_to'] }, { timeout: 5_000, maxNetworkRetries: 0 }],
+        ])
+        expect(res.body.data.origin).toMatchObject({ kind: 'CLASSIC', tier: 'PRO', subscriptionId: 'sub_hoy' })
+        expect(jest.mocked(logger.warn)).toHaveBeenCalledWith(expect.stringContaining('«Tu plan»'), expect.objectContaining({ venueId }))
+
+        // Stripe lento: UNA llamada con su tope y «Tu plan» sale igual, sin las fechas de Stripe.
+        mockSubRetrieve.mockReset().mockRejectedValue(tiempoAgotado())
+        const lento = await leerPlan()
+        expect(lento.status).toBe(200)
+        expect(mockSubRetrieve).toHaveBeenCalledTimes(1)
+        expect(lento.body.data).toMatchObject({ currentPeriodEnd: null, interval: null })
+        expect(lento.body.data).not.toHaveProperty('cotizacion')
+      }
+
+      // Con una v1 dañada, la llamada de hoy, sin segundo argumento (el editor apagado no cambia ni en un estado anómalo).
+      prismaMock.planOfferPointer.findUnique.mockReset().mockResolvedValue(punteroA('cv1', 1, { schemaVersion: 1, rota: true }) as never)
+      mockSubRetrieve.mockReset().mockResolvedValue(deHoy)
+      lecturas.mockClear()
+      const v1 = await leerPlan()
+      expect(v1.status).toBe(200)
+      expect(lecturas.mock.calls).toEqual([['sub_hoy']])
+    } finally {
+      lecturas.mockRestore()
+    }
+  })
+
   it('🔴 b2-r9 #8: GET /plan con una v1 dañada (versionQueCobra lanza) → 200 con getPlanState, sin cotizacion', async () => {
     prismaMock.planOfferPointer.findUnique.mockResolvedValue(punteroA('cv1', 1, { schemaVersion: 1, rota: true }) as never)
 

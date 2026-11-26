@@ -323,18 +323,25 @@ export async function cotizarTuPlan(
 
 /**
  * La versión del editor para `GET /plan`, leída UNA vez antes de todo (fix round 2): decide si «Tu plan» lee la tarjeta de la prueba
- * (`conTarjeta`) y con qué versión cotiza. `null` sin versión del editor, o si leerla falla (b2-r9 #8: leer la oferta nunca tumba
- * «Tu plan»; aviso y la respuesta de hoy, con las llamadas a Stripe de hoy).
+ * (`conTarjeta`), con qué versión cotiza y si la suscripción se lee con el tope corto (`delEditor`).
+ * - `vigente`: la versión del editor, o `null` sin ella o si leerla falla (b2-r9 #8: leer la oferta nunca tumba «Tu plan»; aviso y
+ *   la respuesta de hoy, sin cotización).
+ * - `delEditor`: hay una versión del editor, aunque no se pueda leer (Codex b2-code r2 #7, la regla de `versionDeLaConversion`): si
+ *   la lectura lanza, decide el número del puntero (`numeroDeLaVigente`); en la v1 (dañada), `false` y la llamada a Stripe de hoy; en
+ *   una versión del editor, sin número válido o con el puntero ilegible, `true`: la lectura con tope, sin cotización.
  */
-export async function versionDeTuPlanSinRomper(venueId: string): Promise<OfertaVigente | null> {
+export async function versionDeTuPlanSinRomper(venueId: string): Promise<{ vigente: OfertaVigente | null; delEditor: boolean }> {
   try {
-    return await versionQueCobra()
+    const vigente = await versionQueCobra()
+    return { vigente, delEditor: vigente !== null }
   } catch (error) {
+    const numero = await numeroDeLaVigente().catch(() => null)
     logger.warn('«Tu plan»: no se pudo leer la oferta; se responde lo de hoy, sin cotización', {
       venueId,
+      numero,
       error: error instanceof Error ? error.message : String(error),
     })
-    return null
+    return { vigente: null, delEditor: numero !== 1 }
   }
 }
 

@@ -529,15 +529,21 @@ export async function detachVenuePaymentMethod(
 export async function getVenuePlan(req: Request<{ venueId: string }>, res: Response, next: NextFunction): Promise<void> {
   try {
     const { venueId } = req.params
-    // Planes editables (B2, Task 7): con versión del editor, «Tu plan» trae `cotizacion` (de la MISMA lectura de Stripe). Sin ella, o
-    // si leer la oferta falla, `data` es exactamente `getPlanState`, con las llamadas a Stripe de hoy (`retrievePlanSubscription(id)`).
+    // Planes editables (B2, Task 7): con versión del editor, «Tu plan» trae `cotizacion` (de la MISMA lectura de Stripe). Sin ella,
+    // `data` es exactamente `getPlanState`, con las llamadas a Stripe de hoy (`retrievePlanSubscription(id)`); si leer la oferta
+    // falla, el mismo `data`, sin `cotizacion` (la lectura de Stripe, abajo).
     // La versión se lee UNA vez, primero: sólo con ella se pide la tarjeta de la prueba sin tarjeta (`conTarjeta`) y se cotiza.
     // 🔴 Codex b2-code #7: con ella, la suscripción también se lee con el tope corto (5 s, sin reintentos), como las demás lecturas
-    // informativas de la pantalla; si no contesta, «Tu plan» se degrada como hoy. Sin versión del editor, la llamada de hoy.
-    const vigente = await versionDeTuPlanSinRomper(venueId)
+    // informativas de la pantalla; si no contesta, «Tu plan» se degrada como hoy. Con una versión del editor que no se puede leer
+    // (r2 #7), el mismo tope, sin la tarjeta ni la cotización. Sin versión del editor (o con la v1 dañada), la llamada de hoy.
+    const { vigente, delEditor } = await versionDeTuPlanSinRomper(venueId)
     const { planState, suscripcion } = await planStateService.getPlanStateYSuscripcion(
       venueId,
-      vigente ? { conTarjeta: true, stripeTimeoutMs: LECTURA_ACOTADA.timeout } : {},
+      vigente
+        ? { conTarjeta: true, stripeTimeoutMs: LECTURA_ACOTADA.timeout }
+        : delEditor
+          ? { stripeTimeoutMs: LECTURA_ACOTADA.timeout }
+          : {},
     )
     const cotizacion = vigente ? await cotizacionDeTuPlanSinRomper(vigente, venueId, planState, suscripcion) : null
     res.status(200).json({ success: true, data: cotizacion ? { ...planState, cotizacion } : planState })
