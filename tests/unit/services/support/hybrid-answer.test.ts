@@ -1355,7 +1355,9 @@ describe('a guide never goes out without its conditions (T-F5)', () => {
   const card = real('dashboard/clientes/configurar-tarjeta-de-sellos')
   const stamp = real('android/lealtad/sello-que-no-se-sumo')
   // hz:be99f328:D42: la condición de la guía cambió; antes «el *Estado del Programa* tiene que estar en *Activo*».
-  const ACTIVE = 'el *Programa de Puntos* esté en *Inactivo*'
+  // Codex r2 #2: la condición entera (con cliente, el tope del día y los puntos apagados), no sólo la excepción.
+  const ACTIVE =
+    'las ventas con cliente suman sello (hasta las *Visitas con sello por cliente al día*) aunque en *Clientes* › *Programa de Lealtad* el *Programa de Puntos* esté en *Inactivo*'
   const WARNING = 'no agregues el cliente desde esa pantalla ni lo intentes otra vez'
   const cite = (g: LibraryGuide, quote: string, text = quote): DraftLine => ({ text, guideId: g.id, quote })
   // Todos los pasos de las dos guías y sus dos condiciones: 9 líneas, cada una con su cita literal.
@@ -1367,11 +1369,7 @@ describe('a guide never goes out without its conditions (T-F5)', () => {
       cite(card, 'Escribe los *Sellos para llenar la cartilla* y, en *Cómo se lee el premio*, el nombre del premio.'),
       cite(card, 'En *Qué se gana*, elige *Un producto gratis*, *Un porcentaje* o *Un monto fijo*.'),
       cite(card, 'Toca *Guardar programa*: sale «Programa de sellos guardado».'),
-      cite(
-        card,
-        'aunque en *Clientes* › *Programa de Lealtad* el *Programa de Puntos* esté en *Inactivo*',
-        `Las ventas suman sellos aunque ${ACTIVE}.`,
-      ),
+      cite(card, ACTIVE, `Con la tarjeta prendida, ${ACTIVE}.`),
       cite(stamp, 'Si a la venta le faltó el cliente, toca *Agregar cliente*, arriba a la derecha de esa pantalla.'),
       cite(stamp, 'Búscalo y tócalo. Si queda ligado, sale «Cliente agregado: …»'),
       cite(stamp, 'Revisa lo que dice esa pantalla sobre el sello'),
