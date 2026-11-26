@@ -101,7 +101,18 @@
       "cita": "onNavigateToPayment(payload)"
     }
   ],
-  "permisos": [],
+  "permisos": [
+    {
+      "permiso": "payments:create",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/payment/data/api/PaymentApiService.kt",
+      "linea": 105
+    },
+    {
+      "permiso": "payments:create",
+      "archivo": "avoqado-server/src/routes/tpv.routes.ts",
+      "linea": 3241
+    }
+  ],
   "plan": [],
   "sinInternet": [],
   "rutas": [

@@ -4,13 +4,15 @@ description: En el carrito de Cobrar, con el cliente elegido, escribe el código
 product: tpv
 category: clientes
 task: capturar-codigo-de-referido
-requiredPermissions: []
+requiredPermissions:
+  - referral:read
 featureCode: REFERRAL_PROGRAM
 gateKind: FEATURE
 money: true
 versionMin: 2.14.0
 sourceRepo: avoqado-tpv
 sourceRef: 031f14db2969606125a4a04c9f8f30bdd402a660
+deviceTested: 2026-11-25
 keywords:
   - código de referido
   - me recomendó alguien
@@ -25,7 +27,7 @@ La sección «¿Te recomendó alguien?» sale en el carrito de *Cobrar* y viene 
 
 ## Pasos
 
-1. En *Cobrar*, abre el carrito y elige al cliente nuevo con *Agregar cliente*.
+1. En *Cobrar*, abre el carrito (la barra *Cobrar …* de abajo) y elige al cliente nuevo con *Agregar cliente*: búscalo por nombre, teléfono o correo (desde la terminal no se crea).
 2. En «¿Te recomendó alguien?», escribe el código que te da el cliente en *CÓDIGO*.
 3. Toca *Validar*.
 4. Si es correcto, sale «Referido por …» y «Se aplicó …% descuento». Cobra la venta como siempre.

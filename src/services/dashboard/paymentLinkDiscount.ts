@@ -11,7 +11,8 @@ export type DescuentoDeLiga = {
   name: string
 }
 
-export type MotivoNoDisponible = 'VENCIDO' | 'NO_INICIA' | 'AGOTADO' | 'FUERA_DE_HORARIO' | 'MINIMO' | 'INACTIVO'
+/** Sin «AGOTADO» a propósito (D35): un descuento con límite de usos no cabe en una liga (`esCompatibleConLigas`) y sale INACTIVO. */
+export type MotivoNoDisponible = 'VENCIDO' | 'NO_INICIA' | 'FUERA_DE_HORARIO' | 'MINIMO' | 'INACTIVO'
 
 export type Desglose = {
   base: number

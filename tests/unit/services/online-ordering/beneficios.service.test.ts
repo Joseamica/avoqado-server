@@ -449,6 +449,15 @@ describe('aplicarBeneficiosEnTx — R2 y R3: lo que la oferta oculta tampoco se 
     })
   })
 
+  // hz:be99f328:D42: el interruptor de PUNTOS (`active`) ya no apaga el premio de sellos.
+  it('D42: con los puntos apagados y los sellos prendidos el premio SÍ se canjea', async () => {
+    prismaMock.loyaltyConfig.findUnique.mockResolvedValue({ ...CONFIG, active: false } as any)
+
+    const r = await aplicarBeneficiosEnTx(tx, entrada({ premioId: 'premio-1' }), { tolerante: true })
+    expect(r.descartados).toEqual([])
+    expect(canjearPremioEnTx).toHaveBeenCalledWith(tx, 'v1', expect.any(String), 'premio-1')
+  })
+
   it('R3: con el programa de puntos apagado (o sin configuración) los puntos no se canjean', async () => {
     prismaMock.loyaltyConfig.findUnique.mockResolvedValue({ ...CONFIG, active: false } as any)
     expect((await aplicarBeneficiosEnTx(tx, entrada({ puntos: 100 }), { tolerante: true })).descartados).toEqual(['PUNTOS'])
@@ -495,6 +504,13 @@ describe('ofertaDeBeneficios — lectura pura', () => {
     prismaMock.stampReward.findFirst.mockClear()
     expect((await ofertaDeBeneficios('v1', 'c1')).premio).toBeNull()
     expect(prismaMock.stampReward.findFirst).not.toHaveBeenCalled()
+  })
+
+  it('D42: con los puntos apagados se ofrece el premio de sellos y no los puntos', async () => {
+    prismaMock.loyaltyConfig.findUnique.mockResolvedValue({ ...CONFIG, active: false } as any)
+    const o = await ofertaDeBeneficios('v1', 'c1')
+    expect(o.premio).toEqual({ id: 'premio-1', etiqueta: 'Café gratis' })
+    expect(o.puntos).toBeNull()
   })
 
   it('los puntos bajo el mínimo no se ofrecen; arriba, con su valor', async () => {

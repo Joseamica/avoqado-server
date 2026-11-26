@@ -4,7 +4,8 @@ description: Arma una venta en Cobrar con productos del catálogo o con un monto
 product: tpv
 category: ventas
 task: vender-con-cobrar
-requiredPermissions: []
+requiredPermissions:
+  - payments:create
 versionMin: 2.7.1
 sourceRepo: avoqado-tpv
 sourceRef: 031f14db2969606125a4a04c9f8f30bdd402a660

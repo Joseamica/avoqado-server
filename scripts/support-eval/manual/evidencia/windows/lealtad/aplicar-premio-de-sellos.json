@@ -81,9 +81,23 @@
     }
   ],
   "aparato": {
-    "estado": "NO PROBADO EN APARATO",
-    "fotos": [],
-    "filasCreadas": []
+    "estado": "PROBADO",
+    "aparato": "POS de WINDOWS en el escritorio del Alien (Windows 11, 1920×1080), manejado por un agente de PowerShell",
+    "version": "2.25.58-escritorio (develop 6afdcc28), paquete de prueba avoqado-pos-windows-prueba.zip armado en el WSL del Alien (:pos:empaquetarWindows, JDK 17 + JRE 17 de Windows), contra el SERVIDOR aislado (develop 6409b3562 con #633, base av-db-25-d36) en :3004",
+    "apkSha256": "83dcd07e6406a063fe367e4ea55be47ff33b040c9cd68621583f2a60c38b2193",
+    "fecha": "2026-11-25",
+    "fotos": [
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/windows/w-74-primer-caracter.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/windows/w-76.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/windows/w-77.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/windows/w-78.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/windows/w-79.png"
+    ],
+    "filasCreadas": [
+      "WalletPass emitido con el servicio para un cliente nuevo de la semilla (D)",
+      "StampReward REDEEMED en una orden de $17.00 (−$3.00) en efectivo"
+    ],
+    "nota": "25-nov (D36): El lector se emuló con SendKeys (ráfaga de teclas + ENTER). En WINDOWS no se perdió el primer carácter (un carácter de más dio «Producto no encontrado»), así que esa línea de Problemas no se agregó aquí. Con el código exacto: «un cliente nuevo de la semilla (D)», «🎁 Tiene un premio por cobrar: 15% de descuento» y «0 de 2 sellos · esta compra le suma otro» → «Aplicar 15% de descuento» → «Premio: 15% de descuento» −$3.00 con su X → Cobrar $17.00 en efectivo. La X (Quitar premio) no se tocó aquí (sí en ANDROID). Mismo requisito del Programa de Lealtad activo."
   },
   "codex": {
     "lote": 4,

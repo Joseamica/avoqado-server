@@ -53,7 +53,28 @@
       "cita": "Text(\"Quitar\")"
     }
   ],
-  "permisos": [],
+  "permisos": [
+    {
+      "permiso": "referral:read",
+      "archivo": "app/src/main/java/com/avoqado/pos/referrals/data/api/ReferralsApiService.kt",
+      "linea": 43
+    },
+    {
+      "permiso": "referral:read",
+      "archivo": "app/src/main/java/com/avoqado/pos/referrals/data/api/ReferralsApiService.kt",
+      "linea": 60
+    },
+    {
+      "permiso": "referral:read",
+      "archivo": "avoqado-server/src/routes/dashboard/referrals.routes.ts",
+      "linea": 110
+    },
+    {
+      "permiso": "referral:read",
+      "archivo": "avoqado-server/src/routes/dashboard/referrals.routes.ts",
+      "linea": 120
+    }
+  ],
   "plan": [
     {
       "featureCode": "REFERRAL_PROGRAM",
@@ -70,9 +91,22 @@
     }
   ],
   "aparato": {
-    "estado": "NO PROBADO EN APARATO",
-    "fotos": [],
-    "filasCreadas": []
+    "estado": "PROBADO",
+    "aparato": "POS de WINDOWS en el escritorio del Alien (Windows 11, 1920×1080), manejado por un agente de PowerShell",
+    "version": "2.25.58-escritorio (develop 6afdcc28), paquete de prueba avoqado-pos-windows-prueba.zip armado en el WSL del Alien (:pos:empaquetarWindows, JDK 17 + JRE 17 de Windows), contra el SERVIDOR aislado (develop 6409b3562 con #633, base av-db-25-d36) en :3004",
+    "apkSha256": "83dcd07e6406a063fe367e4ea55be47ff33b040c9cd68621583f2a60c38b2193",
+    "fecha": "2026-11-25",
+    "fotos": [
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/windows/w-44.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/windows/w-46.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/windows/w-47.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/windows/w-49.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/windows/w-55.png"
+    ],
+    "filasCreadas": [
+      "Referral PENDING: un cliente nuevo de la semilla (D) referida por un cliente de la semilla (C) (AVOQADOF-SOPHUHK), orden de $18.00 en efectivo"
+    ],
+    "nota": "25-nov (D36): Cobrar con Agua Mineral → Agregar cliente → buscar su nombre → «¿Te recomendó alguien?» con CÓDIGO y Validar → «Referido por un cliente de la semilla (C)» y «Se aplicó 10% descuento» → Quitar → otra vez → Cobrar $18.00 en efectivo (sumó su sello). No se probó sin red."
   },
   "codex": {
     "lote": 4,

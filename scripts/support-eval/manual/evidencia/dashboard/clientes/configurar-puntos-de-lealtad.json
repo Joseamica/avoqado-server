@@ -1,7 +1,7 @@
 {
   "pagina": "dashboard/clientes/configurar-puntos-de-lealtad",
   "sourceRepo": "avoqado-web-dashboard",
-  "sourceRef": "0dd71d0aff8c6b7c8baa30efe87db3dfe49a1354",
+  "sourceRef": "5902b8c1f1583e3c9c9445ff0f1a78b6bd245517",
   "version": "main",
   "pasos": [
     {
@@ -31,19 +31,19 @@
     {
       "paso": 1,
       "archivo": "src/pages/Loyalty/LoyaltySettings.tsx",
-      "linea": 311,
+      "linea": 309,
       "cita": "<h3 className=\"font-semibold text-sm\">{t('settings.status.label')}</h3>"
     },
     {
       "paso": 1,
       "archivo": "src/locales/es/loyalty.json",
       "linea": 7,
-      "cita": "\"label\": \"Estado del Programa\","
+      "cita": "\"label\": \"Programa de Puntos\","
     },
     {
       "paso": 1,
       "archivo": "src/pages/Loyalty/LoyaltySettings.tsx",
-      "linea": 326,
+      "linea": 324,
       "cita": "<Switch checked={watchedActive} onCheckedChange={checked => setValue('active', checked, { shouldDirty: true })} />"
     },
     {
@@ -55,7 +55,7 @@
     {
       "paso": 2,
       "archivo": "src/pages/Loyalty/LoyaltySettings.tsx",
-      "linea": 335,
+      "linea": 333,
       "cita": "title={t('settings.earning.title')}"
     },
     {
@@ -67,7 +67,7 @@
     {
       "paso": 2,
       "archivo": "src/pages/Loyalty/LoyaltySettings.tsx",
-      "linea": 341,
+      "linea": 339,
       "cita": "label={t('settings.earning.pointsPerDollar.label')}"
     },
     {
@@ -85,7 +85,7 @@
     {
       "paso": 3,
       "archivo": "src/pages/Loyalty/LoyaltySettings.tsx",
-      "linea": 374,
+      "linea": 372,
       "cita": "title={t('settings.redemption.title')}"
     },
     {
@@ -115,7 +115,7 @@
     {
       "paso": 4,
       "archivo": "src/pages/Loyalty/LoyaltySettings.tsx",
-      "linea": 414,
+      "linea": 412,
       "cita": "title={t('settings.expiration.title')}"
     },
     {
@@ -145,7 +145,7 @@
     {
       "paso": 5,
       "archivo": "src/pages/Loyalty/LoyaltySettings.tsx",
-      "linea": 558,
+      "linea": 556,
       "cita": "t('settings.save')"
     },
     {
@@ -169,7 +169,7 @@
     {
       "paso": 5,
       "archivo": "src/pages/Loyalty/LoyaltySettings.tsx",
-      "linea": 549,
+      "linea": 547,
       "cita": "data-testid=\"loyalty-save-bar\""
     }
   ],

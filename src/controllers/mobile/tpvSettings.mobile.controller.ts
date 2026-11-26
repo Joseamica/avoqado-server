@@ -42,6 +42,7 @@ import {
 import { customerDisplayBlockFor, readSettingsFingerprint } from '../../services/customer-display/settingsEnvelope.service'
 import { CUSTOMER_DISPLAY_DESIGN_CAPABILITY } from '../../services/customer-display/customerDisplayDesign.validation'
 import { requestDeviceUid } from '../../utils/requestDeviceUid'
+import { reportarDiagnosticoTrasElSondeo } from '../../services/mobile/deviceDiagnostics'
 
 function requireRequestDeviceUid(req: Request): string {
   const deviceUid = requestDeviceUid(req)
@@ -349,6 +350,8 @@ export const getDisplayModeRequest = async (req: Request, res: Response, next: N
         capabilityReport: { requested: capabilityReportRequested(terminal) },
       },
     })
+    // Ya respondió: el reporte de dibujo del POS de Windows se guarda sin que el sondeo lo espere (hz:a5fa2439:D1).
+    reportarDiagnosticoTrasElSondeo(req, terminal.id)
   } catch (error) {
     next(mapDisplayModeRequestError(error))
   }

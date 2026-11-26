@@ -479,6 +479,10 @@
         "sourceRef": "a4e7d854341cdef73bf94ff109a9b54e0f029bf9"
       },
       {
+        "pagina": "android/recibos/imprimir-y-reimprimir-recibo",
+        "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+      },
+      {
         "pagina": "android/reembolsos/hacer-cambio",
         "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
       },
@@ -561,6 +565,10 @@
       {
         "pagina": "windows/pedidos-en-linea/atender-pedidos-en-linea",
         "sourceRef": "a4e7d854341cdef73bf94ff109a9b54e0f029bf9"
+      },
+      {
+        "pagina": "windows/recibos/imprimir-y-reimprimir-recibo",
+        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
       },
       {
         "pagina": "windows/reembolsos/hacer-cambio",
@@ -695,6 +703,12 @@
       {
         "pagina": "windows/cobro/cobrar-en-efectivo",
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+      }
+    ],
+    "avoqado-android:app/src/main/java/com/avoqado/pos/customerdisplay/DisplayModeRemoteRepository.kt": [
+      {
+        "pagina": "windows/ayuda/pantalla-lenta-o-trabada",
+        "sourceRef": "8f540228321648fb2d945cd76e86d5efa4c53fee"
       }
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/customers/data/CustomersRepository.kt": [
@@ -1749,6 +1763,10 @@
       {
         "pagina": "android/reservas/lista-de-espera",
         "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+      },
+      {
+        "pagina": "windows/ayuda/pantalla-lenta-o-trabada",
+        "sourceRef": "8f540228321648fb2d945cd76e86d5efa4c53fee"
       },
       {
         "pagina": "windows/ayuda/ver-version-de-la-app",
@@ -3361,6 +3379,16 @@
         "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
       }
     ],
+    "avoqado-android:app/src/main/java/com/avoqado/pos/referrals/data/api/ReferralsApiService.kt": [
+      {
+        "pagina": "android/clientes/capturar-codigo-de-referido",
+        "sourceRef": "78e5372f37ed7791d86fc1fe621d4a073e5a09ff"
+      },
+      {
+        "pagina": "windows/clientes/capturar-codigo-de-referido",
+        "sourceRef": "78e5372f37ed7791d86fc1fe621d4a073e5a09ff"
+      }
+    ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/referrals/presentation/ReferralCaptureSection.kt": [
       {
         "pagina": "android/clientes/capturar-codigo-de-referido",
@@ -3851,6 +3879,10 @@
       {
         "pagina": "android/tarjetas-de-regalo/cancelar-venta-de-tarjetas-de-regalo",
         "sourceRef": "78e5372f37ed7791d86fc1fe621d4a073e5a09ff"
+      },
+      {
+        "pagina": "windows/ayuda/pantalla-lenta-o-trabada",
+        "sourceRef": "8f540228321648fb2d945cd76e86d5efa4c53fee"
       },
       {
         "pagina": "windows/ayuda/ver-version-de-la-app",
@@ -4665,6 +4697,16 @@
         "sourceRef": "a4e7d854341cdef73bf94ff109a9b54e0f029bf9"
       }
     ],
+    "avoqado-android:avoqado-server/src/routes/dashboard/referrals.routes.ts": [
+      {
+        "pagina": "android/clientes/capturar-codigo-de-referido",
+        "sourceRef": "78e5372f37ed7791d86fc1fe621d4a073e5a09ff"
+      },
+      {
+        "pagina": "windows/clientes/capturar-codigo-de-referido",
+        "sourceRef": "78e5372f37ed7791d86fc1fe621d4a073e5a09ff"
+      }
+    ],
     "avoqado-android:avoqado-server/src/routes/dashboard/reservation.routes.ts": [
       {
         "pagina": "android/reservas/atender-una-cita",
@@ -4823,6 +4865,10 @@
         "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
       },
       {
+        "pagina": "android/recibos/imprimir-y-reimprimir-recibo",
+        "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+      },
+      {
         "pagina": "android/reembolsos/hacer-cambio",
         "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
       },
@@ -4975,6 +5021,10 @@
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
       },
       {
+        "pagina": "windows/recibos/imprimir-y-reimprimir-recibo",
+        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+      },
+      {
         "pagina": "windows/reembolsos/hacer-cambio",
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
       },
@@ -5031,6 +5081,12 @@
       {
         "pagina": "windows/reservas/lista-de-espera",
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+      }
+    ],
+    "avoqado-android:avoqado-server/src/services/dashboard/tpv.dashboard.service.ts": [
+      {
+        "pagina": "windows/ayuda/pantalla-lenta-o-trabada",
+        "sourceRef": "8f540228321648fb2d945cd76e86d5efa4c53fee"
       }
     ],
     "avoqado-android:avoqado-server/src/services/kds/kitchenDisplayStations.ts": [
@@ -5237,6 +5293,10 @@
     ],
     "avoqado-android:avoqado-web-dashboard/src/components/Sidebar/app-sidebar.tsx": [
       {
+        "pagina": "windows/ayuda/pantalla-lenta-o-trabada",
+        "sourceRef": "8f540228321648fb2d945cd76e86d5efa4c53fee"
+      },
+      {
         "pagina": "windows/maquina-de-efectivo/esperando-a-la-maquina",
         "sourceRef": "e7d51ad0634df24ba3522a7364884567fd82009d"
       }
@@ -5259,6 +5319,12 @@
       {
         "pagina": "windows/mesas/tiempos-cocina-y-liberar",
         "sourceRef": "9ffba05b58cda839dd74906ede1cca3847653a42"
+      }
+    ],
+    "avoqado-android:avoqado-web-dashboard/src/locales/es/tpv.json": [
+      {
+        "pagina": "windows/ayuda/pantalla-lenta-o-trabada",
+        "sourceRef": "8f540228321648fb2d945cd76e86d5efa4c53fee"
       }
     ],
     "avoqado-android:avoqado-web-dashboard/src/pages/Settings/ServiceCourses.tsx": [
@@ -5479,6 +5545,10 @@
     ],
     "avoqado-android:desktop/pos/src/main/kotlin/com/avoqado/pos/escritorio/AppEscritorio.kt": [
       {
+        "pagina": "windows/ayuda/pantalla-lenta-o-trabada",
+        "sourceRef": "8f540228321648fb2d945cd76e86d5efa4c53fee"
+      },
+      {
         "pagina": "windows/caja/abrir-y-cerrar-caja",
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
       },
@@ -5589,6 +5659,42 @@
       {
         "pagina": "windows/reembolsos/hacer-cambio",
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+      }
+    ],
+    "avoqado-android:desktop/pos/src/main/kotlin/com/avoqado/pos/escritorio/diagnostico/Veredicto.kt": [
+      {
+        "pagina": "windows/ayuda/pantalla-lenta-o-trabada",
+        "sourceRef": "8f540228321648fb2d945cd76e86d5efa4c53fee"
+      }
+    ],
+    "avoqado-android:desktop/pos/src/main/kotlin/com/avoqado/pos/escritorio/dibujo/ArchivoDeDibujo.kt": [
+      {
+        "pagina": "windows/ayuda/pantalla-lenta-o-trabada",
+        "sourceRef": "8f540228321648fb2d945cd76e86d5efa4c53fee"
+      }
+    ],
+    "avoqado-android:desktop/pos/src/main/kotlin/com/avoqado/pos/escritorio/dibujo/AvisoDeDibujo.kt": [
+      {
+        "pagina": "windows/ayuda/pantalla-lenta-o-trabada",
+        "sourceRef": "8f540228321648fb2d945cd76e86d5efa4c53fee"
+      }
+    ],
+    "avoqado-android:desktop/pos/src/main/kotlin/com/avoqado/pos/escritorio/dibujo/DibujoDeLaCaja.kt": [
+      {
+        "pagina": "windows/ayuda/pantalla-lenta-o-trabada",
+        "sourceRef": "8f540228321648fb2d945cd76e86d5efa4c53fee"
+      }
+    ],
+    "avoqado-android:desktop/pos/src/main/kotlin/com/avoqado/pos/escritorio/dibujo/ModoDeDibujo.kt": [
+      {
+        "pagina": "windows/ayuda/pantalla-lenta-o-trabada",
+        "sourceRef": "8f540228321648fb2d945cd76e86d5efa4c53fee"
+      }
+    ],
+    "avoqado-android:desktop/pos/src/main/kotlin/com/avoqado/pos/escritorio/dibujo/Umbrales.kt": [
+      {
+        "pagina": "windows/ayuda/pantalla-lenta-o-trabada",
+        "sourceRef": "8f540228321648fb2d945cd76e86d5efa4c53fee"
       }
     ],
     "avoqado-android:desktop/pos/src/main/kotlin/com/avoqado/pos/escritorio/impresion/ImpresorasDeWindows.kt": [
@@ -5887,6 +5993,10 @@
         "sourceRef": "4c92a98fab1256782524e72748f44bfe99e2052d"
       },
       {
+        "pagina": "tpv/mesas/descuento-en-la-cuenta-de-la-mesa",
+        "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660"
+      },
+      {
         "pagina": "tpv/mesas/fusionar-cuentas",
         "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660"
       },
@@ -6153,6 +6263,12 @@
       {
         "pagina": "tpv/pedidos-en-linea/abrir-y-cobrar-pedidos-pagados-en-linea",
         "sourceRef": "f659760ee224d71b54f4abf3d2ede18d73f7cc91"
+      }
+    ],
+    "avoqado-tpv:app/src/main/java/com/jaac/avoqado_tpv/features/payment/data/api/PaymentApiService.kt": [
+      {
+        "pagina": "tpv/ventas/vender-con-cobrar",
+        "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660"
       }
     ],
     "avoqado-tpv:app/src/main/java/com/jaac/avoqado_tpv/features/payment/data/ledger/BlumonAttemptResolver.kt": [
@@ -6517,6 +6633,12 @@
         "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660"
       }
     ],
+    "avoqado-tpv:app/src/main/java/com/jaac/avoqado_tpv/features/referrals/data/api/ReferralsApiService.kt": [
+      {
+        "pagina": "tpv/clientes/capturar-codigo-de-referido",
+        "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660"
+      }
+    ],
     "avoqado-tpv:app/src/main/java/com/jaac/avoqado_tpv/features/referrals/presentation/ReferralCaptureSection.kt": [
       {
         "pagina": "tpv/clientes/capturar-codigo-de-referido",
@@ -6704,6 +6826,12 @@
       },
       {
         "pagina": "tpv/mesas/reasignar-mesero",
+        "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660"
+      }
+    ],
+    "avoqado-tpv:app/src/main/java/com/jaac/avoqado_tpv/features/tables/data/api/TablesApiService.kt": [
+      {
+        "pagina": "tpv/mesas/descuento-en-la-cuenta-de-la-mesa",
         "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660"
       }
     ],
@@ -6939,6 +7067,10 @@
         "sourceRef": "81cc9983b24beb0bcdb85c907a361d3806383999"
       },
       {
+        "pagina": "tpv/clientes/capturar-codigo-de-referido",
+        "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660"
+      },
+      {
         "pagina": "tpv/cobro/agregar-propina",
         "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660"
       },
@@ -6979,6 +7111,10 @@
         "sourceRef": "4c92a98fab1256782524e72748f44bfe99e2052d"
       },
       {
+        "pagina": "tpv/mesas/descuento-en-la-cuenta-de-la-mesa",
+        "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660"
+      },
+      {
         "pagina": "tpv/mesas/fusionar-cuentas",
         "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660"
       },
@@ -6996,6 +7132,10 @@
       },
       {
         "pagina": "tpv/reportes/ver-reportes-de-otros-dias",
+        "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660"
+      },
+      {
+        "pagina": "tpv/ventas/vender-con-cobrar",
         "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660"
       }
     ],
@@ -7124,7 +7264,7 @@
     "avoqado-web-dashboard:avoqado-server/prisma/migrations/20261125190100_lealtad_vencimiento_apagado_en_configs_existentes/migration.sql": [
       {
         "pagina": "dashboard/clientes/configurar-puntos-de-lealtad",
-        "sourceRef": "0dd71d0aff8c6b7c8baa30efe87db3dfe49a1354"
+        "sourceRef": "5902b8c1f1583e3c9c9445ff0f1a78b6bd245517"
       }
     ],
     "avoqado-web-dashboard:avoqado-server/src/controllers/dashboard/financialConnection.controller.ts": [
@@ -7206,11 +7346,11 @@
       },
       {
         "pagina": "dashboard/clientes/configurar-puntos-de-lealtad",
-        "sourceRef": "0dd71d0aff8c6b7c8baa30efe87db3dfe49a1354"
+        "sourceRef": "5902b8c1f1583e3c9c9445ff0f1a78b6bd245517"
       },
       {
         "pagina": "dashboard/clientes/configurar-tarjeta-de-sellos",
-        "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
+        "sourceRef": "5902b8c1f1583e3c9c9445ff0f1a78b6bd245517"
       },
       {
         "pagina": "dashboard/clientes/crear-o-editar-grupo-de-clientes",
@@ -7496,11 +7636,11 @@
     "avoqado-web-dashboard:avoqado-server/src/services/dashboard/loyalty.dashboard.service.ts": [
       {
         "pagina": "dashboard/clientes/configurar-puntos-de-lealtad",
-        "sourceRef": "0dd71d0aff8c6b7c8baa30efe87db3dfe49a1354"
+        "sourceRef": "5902b8c1f1583e3c9c9445ff0f1a78b6bd245517"
       },
       {
         "pagina": "dashboard/clientes/configurar-tarjeta-de-sellos",
-        "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
+        "sourceRef": "5902b8c1f1583e3c9c9445ff0f1a78b6bd245517"
       }
     ],
     "avoqado-web-dashboard:avoqado-server/src/services/dashboard/manualPayment.service.ts": [
@@ -7662,7 +7802,7 @@
     "avoqado-web-dashboard:avoqado-server/src/services/loyalty/vencimientoDePuntos.ts": [
       {
         "pagina": "dashboard/clientes/configurar-puntos-de-lealtad",
-        "sourceRef": "0dd71d0aff8c6b7c8baa30efe87db3dfe49a1354"
+        "sourceRef": "5902b8c1f1583e3c9c9445ff0f1a78b6bd245517"
       }
     ],
     "avoqado-web-dashboard:avoqado-server/src/services/online-ordering/card/confirm.service.ts": [
@@ -7874,11 +8014,11 @@
       },
       {
         "pagina": "dashboard/clientes/configurar-puntos-de-lealtad",
-        "sourceRef": "0dd71d0aff8c6b7c8baa30efe87db3dfe49a1354"
+        "sourceRef": "5902b8c1f1583e3c9c9445ff0f1a78b6bd245517"
       },
       {
         "pagina": "dashboard/clientes/configurar-tarjeta-de-sellos",
-        "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
+        "sourceRef": "5902b8c1f1583e3c9c9445ff0f1a78b6bd245517"
       },
       {
         "pagina": "dashboard/clientes/crear-o-editar-grupo-de-clientes",
@@ -8318,11 +8458,11 @@
     "avoqado-web-dashboard:src/locales/es/loyalty.json": [
       {
         "pagina": "dashboard/clientes/configurar-puntos-de-lealtad",
-        "sourceRef": "0dd71d0aff8c6b7c8baa30efe87db3dfe49a1354"
+        "sourceRef": "5902b8c1f1583e3c9c9445ff0f1a78b6bd245517"
       },
       {
         "pagina": "dashboard/clientes/configurar-tarjeta-de-sellos",
-        "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
+        "sourceRef": "5902b8c1f1583e3c9c9445ff0f1a78b6bd245517"
       }
     ],
     "avoqado-web-dashboard:src/locales/es/menu.json": [
@@ -8369,6 +8509,10 @@
       {
         "pagina": "dashboard/reembolsos/reembolsar-un-pago",
         "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
+      },
+      {
+        "pagina": "dashboard/tarjetas-de-regalo/cancelar-venta-de-tarjetas-de-regalo",
+        "sourceRef": "501e37072a13f5ed8f22e3d650f2598d3d8820b6"
       }
     ],
     "avoqado-web-dashboard:src/locales/es/paymentLinks.json": [
@@ -8490,11 +8634,11 @@
       },
       {
         "pagina": "dashboard/clientes/configurar-puntos-de-lealtad",
-        "sourceRef": "0dd71d0aff8c6b7c8baa30efe87db3dfe49a1354"
+        "sourceRef": "5902b8c1f1583e3c9c9445ff0f1a78b6bd245517"
       },
       {
         "pagina": "dashboard/clientes/configurar-tarjeta-de-sellos",
-        "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
+        "sourceRef": "5902b8c1f1583e3c9c9445ff0f1a78b6bd245517"
       },
       {
         "pagina": "dashboard/clientes/crear-o-editar-grupo-de-clientes",
@@ -8936,13 +9080,13 @@
     "avoqado-web-dashboard:src/pages/Loyalty/LoyaltySettings.tsx": [
       {
         "pagina": "dashboard/clientes/configurar-puntos-de-lealtad",
-        "sourceRef": "0dd71d0aff8c6b7c8baa30efe87db3dfe49a1354"
+        "sourceRef": "5902b8c1f1583e3c9c9445ff0f1a78b6bd245517"
       }
     ],
     "avoqado-web-dashboard:src/pages/Loyalty/WalletCardDesigner.tsx": [
       {
         "pagina": "dashboard/clientes/configurar-tarjeta-de-sellos",
-        "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
+        "sourceRef": "5902b8c1f1583e3c9c9445ff0f1a78b6bd245517"
       }
     ],
     "avoqado-web-dashboard:src/pages/Menu/Categories/Categories.tsx": [
@@ -9075,6 +9219,10 @@
       {
         "pagina": "dashboard/reembolsos/reembolsar-un-pago",
         "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
+      },
+      {
+        "pagina": "dashboard/tarjetas-de-regalo/cancelar-venta-de-tarjetas-de-regalo",
+        "sourceRef": "501e37072a13f5ed8f22e3d650f2598d3d8820b6"
       }
     ],
     "avoqado-web-dashboard:src/pages/Payment/PaymentDrawerContent.tsx": [
@@ -9085,6 +9233,10 @@
       {
         "pagina": "dashboard/reembolsos/reembolsar-un-pago",
         "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
+      },
+      {
+        "pagina": "dashboard/tarjetas-de-regalo/cancelar-venta-de-tarjetas-de-regalo",
+        "sourceRef": "501e37072a13f5ed8f22e3d650f2598d3d8820b6"
       }
     ],
     "avoqado-web-dashboard:src/pages/Payment/Payments.tsx": [
@@ -9442,11 +9594,11 @@
       },
       {
         "pagina": "dashboard/clientes/configurar-puntos-de-lealtad",
-        "sourceRef": "0dd71d0aff8c6b7c8baa30efe87db3dfe49a1354"
+        "sourceRef": "5902b8c1f1583e3c9c9445ff0f1a78b6bd245517"
       },
       {
         "pagina": "dashboard/clientes/configurar-tarjeta-de-sellos",
-        "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
+        "sourceRef": "5902b8c1f1583e3c9c9445ff0f1a78b6bd245517"
       },
       {
         "pagina": "dashboard/clientes/crear-o-editar-grupo-de-clientes",

@@ -116,9 +116,25 @@
     }
   ],
   "aparato": {
-    "estado": "NO PROBADO EN APARATO",
-    "fotos": [],
-    "filasCreadas": []
+    "estado": "PROBADO",
+    "aparato": "POS de WINDOWS en el escritorio del Alien (Windows 11, 1920×1080), manejado por un agente de PowerShell",
+    "version": "2.25.58-escritorio (develop 6afdcc28), paquete de prueba avoqado-pos-windows-prueba.zip armado en el WSL del Alien (:pos:empaquetarWindows, JDK 17 + JRE 17 de Windows), contra el SERVIDOR aislado (develop 6409b3562 con #633, base av-db-25-d36) en :3004",
+    "apkSha256": "83dcd07e6406a063fe367e4ea55be47ff33b040c9cd68621583f2a60c38b2193",
+    "fecha": "2026-11-25",
+    "fotos": [
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/windows/w-28.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/windows/w-29.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/windows/w-30.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/windows/w-31.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/windows/w-32.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/windows/w-34.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/windows/w-35.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/windows/w-37.png"
+    ],
+    "filasCreadas": [
+      "ORD-0000000000025 ($1,500, 2 tarjetas): primero cancelada sin devolver y liberada; después cancelada y devuelta en efectivo → tarjetas DEACTIVATED"
+    ],
+    "nota": "25-nov (D36): Más › Pedidos → «Tarjetas de regalo» → Cancelar venta → «…se cancelan juntas sus 2 tarjetas ($1,500.00)» → Cancelar venta → «Emitir reembolso» → Cancelar → «Ahora devuelve completo cada cobro de esta venta.», «Devolver completo · Efectivo · $1,500.00», «Liberar», tarjetas «Bloqueada» → Liberar con la casilla → de vuelta. Otra vez: Cancelar venta → motivo «Pedido cancelado» → Reembolsar $1,500.00 → «¡Reembolso registrado!» y «Esta venta de tarjetas ya se canceló.». No se probó sin red."
   },
   "codex": {
     "lote": 4,
