@@ -19,6 +19,7 @@ import {
   ofertaPorId,
   ofertaPorNumero,
   ofertaVigente,
+  numeroDeLaVigente,
   planOfferDefinition,
   planOfferInput,
   precioDeLaOferta,
@@ -148,6 +149,42 @@ describe('ofertaVigente', () => {
     ;(preparando.currentVersion as any).status = 'PREPARING'
     prismaMock.planOfferPointer.findUnique.mockResolvedValueOnce(preparando as never)
     await expect(ofertaVigente()).rejects.toMatchObject({ statusCode: 503, code: 'PLAN_NOT_CONFIGURED' })
+  })
+})
+
+describe('numeroDeLaVigente (B2 Task 8): el número del puntero, sin leer la definición', () => {
+  it('sin puntero o sin vigente → 1 (el respaldo, como ofertaVigente)', async () => {
+    prismaMock.planOfferPointer.findUnique.mockResolvedValueOnce(null)
+    expect(await numeroDeLaVigente()).toBe(1)
+    prismaMock.planOfferPointer.findUnique.mockResolvedValueOnce({ currentVersion: null } as never)
+    expect(await numeroDeLaVigente()).toBe(1)
+  })
+
+  it('🔴 con una definición rota también da su número (la v1 rota → 1, la v2 rota → 2): no la lee ni la valida', async () => {
+    prismaMock.planOfferPointer.findUnique.mockResolvedValueOnce(punteroA('cv1', 1, { schemaVersion: 1, rota: true }) as never)
+    expect(await numeroDeLaVigente()).toBe(1)
+    prismaMock.planOfferPointer.findUnique.mockResolvedValueOnce(punteroA('cv2', 2, { schemaVersion: 1, rota: true }) as never)
+    expect(await numeroDeLaVigente()).toBe(2)
+    // Sólo pide el número de la vigente: ni su definición ni su id.
+    expect(prismaMock.planOfferPointer.findUnique.mock.calls[0][0]).toEqual({
+      where: { id: 'vigente' },
+      select: { currentVersion: { select: { number: true } } },
+    })
+  })
+
+  it('una vigente sin número válido → null (no se sabe cuál rige); lee con la transacción que le pasen', async () => {
+    prismaMock.planOfferPointer.findUnique.mockResolvedValueOnce({ currentVersion: { number: null } } as never)
+    expect(await numeroDeLaVigente()).toBeNull()
+    prismaMock.planOfferPointer.findUnique.mockResolvedValueOnce({ currentVersion: { number: 0 } } as never)
+    expect(await numeroDeLaVigente()).toBeNull()
+
+    const tx = { planOfferPointer: { findUnique: jest.fn().mockResolvedValue({ currentVersion: { number: 3 } }) } }
+    expect(await numeroDeLaVigente(tx as never)).toBe(3)
+  })
+
+  it('si el puntero no se puede leer, lanza (quien llama decide)', async () => {
+    prismaMock.planOfferPointer.findUnique.mockRejectedValueOnce(new Error('sin conexión a la base'))
+    await expect(numeroDeLaVigente()).rejects.toThrow('sin conexión a la base')
   })
 })
 

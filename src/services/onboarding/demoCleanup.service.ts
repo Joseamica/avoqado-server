@@ -142,6 +142,12 @@ async function canalesQuePierden(tx: Prisma.TransactionClient, que: 'tarifa' | '
 }
 
 /**
+ * Cuánto puede durar la limpieza (su transacción tiene la fila del negocio `FOR UPDATE` todo ese tiempo). La conversión con versión
+ * del editor espera esa fila en su CAS (B2 Task 8) y deriva su propio límite de éste.
+ */
+export const TIMEOUT_DE_LA_LIMPIEZA_DEMO_MS = 120_000
+
+/**
  * Cleans all demo/sample data from a venue
  * Call this when converting from demo to real (KYC approval)
  *
@@ -601,7 +607,7 @@ export async function cleanDemoData(venueId: string, staffId?: string | null): P
     },
     {
       etiqueta: 'cleanDemoData',
-      timeout: 120000, // 2 minute timeout for comprehensive cleanup
+      timeout: TIMEOUT_DE_LA_LIMPIEZA_DEMO_MS, // 2 minute timeout for comprehensive cleanup
     },
   )
 

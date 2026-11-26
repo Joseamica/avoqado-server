@@ -73,6 +73,7 @@ import { mirrorTokenRoleOnStaffVenue } from '@tests/__helpers__/venueRoleMock'
 import { comprobanteDePrueba, definicionDePrueba, idsDeLaVersion, punteroA } from '@tests/__helpers__/planOfferFixtures'
 import type { CotizacionFirmable } from '@/services/billing/comprobanteDeCotizacion'
 import logger from '@/config/logger'
+import { MENSAJE_PLAN_NO_CONFIGURADO } from '@/services/billing/planOffer'
 
 const app = require('../../../src/app').default
 
@@ -546,6 +547,35 @@ describe('POST convert-from-demo → POST plan/checkout con la aceptación (B2, 
     })
     expect(aceptaciones).toHaveLength(1)
     expect(aceptaciones[0].tier).toBe('PRO')
+    // Un rechazo a propósito es un warn (no un error), con la organización y el negocio.
+    expect(jest.mocked(logger.warn)).toHaveBeenCalledWith(
+      'Demo venue conversion refused',
+      expect.objectContaining({ code: 'VENUE_ALREADY_CONVERTED', statusCode: 409, orgId: 'org_test', venueId }),
+    )
+  })
+
+  it('🔴 con la v2 publicada y su definición rota → 503 PLAN_NOT_CONFIGURED antes de limpiar; con la v1 rota → 200 como hoy', async () => {
+    publicar(2, { schemaVersion: 1, rota: true })
+
+    const rota = await convertir(planPro())
+
+    expect(rota.status).toBe(503)
+    expect(rota.body).toMatchObject({
+      code: 'PLAN_NOT_CONFIGURED',
+      message: MENSAJE_PLAN_NO_CONFIGURADO,
+    })
+    expect(mockCleanDemoData).not.toHaveBeenCalled()
+    expect(prismaMock.venue.updateMany).not.toHaveBeenCalled()
+    expect(prismaMock.venue.update).not.toHaveBeenCalled()
+    expect(aceptaciones).toEqual([])
+
+    publicar(1, { schemaVersion: 1, rota: true })
+    const deHoy = await convertir(planPro())
+
+    expect(deHoy.status).toBe(200)
+    expect(deHoy.body.data).not.toHaveProperty('planAcceptance')
+    expect(mockCleanDemoData).toHaveBeenCalledTimes(1)
+    expect(prismaMock.venue.update).toHaveBeenCalledTimes(1)
   })
 
   it('con la v2 y plan inválido → 400 PLAN_INVALID; sin plan → 409 QUOTE_REQUIRED; ninguno limpia', async () => {

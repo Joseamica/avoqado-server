@@ -261,6 +261,7 @@ export async function convertDemoVenue(
         message: error.message,
         code: error.code,
         statusCode: error.statusCode,
+        orgId: req.authContext?.orgId,
         venueId: req.params?.venueId,
       })
     else

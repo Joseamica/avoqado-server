@@ -12,6 +12,7 @@
  */
 const mockCleanDemoData = jest.fn()
 jest.mock('@/services/onboarding/demoCleanup.service', () => ({
+  ...jest.requireActual('@/services/onboarding/demoCleanup.service'),
   cleanDemoData: (...a: unknown[]) => mockCleanDemoData(...a),
 }))
 jest.mock('@/services/superadmin/kycReview.service', () => ({
@@ -25,6 +26,8 @@ import { prismaMock } from '@tests/__helpers__/setup'
 import { comprobanteDePrueba, definicionDePrueba, idsDeLaVersion, punteroA, versionUno } from '@tests/__helpers__/planOfferFixtures'
 import { convertDemoVenue } from '@/services/dashboard/venue.dashboard.service'
 import { PLAN_ACCEPTANCE_TTL_MS } from '@/services/billing/cotizacionDeLaOferta'
+import { MENSAJE_PLAN_NO_CONFIGURADO } from '@/services/billing/planOffer'
+import { TIMEOUT_DE_LA_LIMPIEZA_DEMO_MS } from '@/services/onboarding/demoCleanup.service'
 import type { CotizacionFirmable } from '@/services/billing/comprobanteDeCotizacion'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import logger from '@/config/logger'
@@ -144,20 +147,87 @@ describe('convertDemoVenue sin versión del editor: la conversión de hoy', () =
     expect(prismaMock.venue.update).toHaveBeenCalledTimes(1)
     expect(prismaMock.venue.updateMany).not.toHaveBeenCalled()
     expect(r).toEqual({ ...convertido, canalesEnLineaSinTarifa: [] })
+    // No se limpió nada: el aviso «se limpió» no sale (la limpieza ya avisó por qué no).
+    expect(jest.mocked(logger.info)).not.toHaveBeenCalledWith(expect.stringContaining('Demo data cleaned'), expect.anything())
   })
 
-  it('una v1 que no se puede leer (versionQueCobra lanza): la conversión de hoy con un aviso, sin 503', async () => {
+  it('regresión · con la limpieza de hoy, el aviso «se limpió» sale como siempre', async () => {
+    await convertir()
+
+    expect(jest.mocked(logger.info)).toHaveBeenCalledWith(expect.stringContaining('Demo data cleaned'), limpiezaDeHoy)
+  })
+
+  it('🔴 el puntero en una v1 rota (versionQueCobra lanza): la conversión de hoy, que nunca leyó la oferta, con un aviso y sin 503', async () => {
     conVigente(1, { schemaVersion: 1, rota: true })
 
     const r = await convertir({ plan: planPro() })
 
+    expect(mockCleanDemoData).toHaveBeenCalledTimes(1)
     expect(prismaMock.venue.update).toHaveBeenCalledTimes(1)
+    expect(prismaMock.$transaction).not.toHaveBeenCalled()
     expect(prismaMock.planAcceptance.create).not.toHaveBeenCalled()
-    expect(r).not.toHaveProperty('planAcceptance')
+    expect(r).toEqual({ ...convertido, canalesEnLineaSinTarifa: [] })
     expect(jest.mocked(logger.warn)).toHaveBeenCalledWith(
       expect.stringContaining('conversión de demo'),
       expect.objectContaining({ venueId: VENUE_ID }),
     )
+  })
+})
+
+describe('convertDemoVenue con la oferta del editor ilegible: falla cerrado ANTES de limpiar', () => {
+  const sinConvertir = () => {
+    expect(mockCleanDemoData).not.toHaveBeenCalled()
+    expect(prismaMock.$transaction).not.toHaveBeenCalled()
+    expect(prismaMock.venue.update).not.toHaveBeenCalled()
+    expect(prismaMock.venue.updateMany).not.toHaveBeenCalled()
+    expect(prismaMock.planAcceptance.create).not.toHaveBeenCalled()
+  }
+
+  it.each([
+    ['la v2', 2],
+    ['la v3', 3],
+  ])('🔴 el puntero en %s con su definición rota → 503 PLAN_NOT_CONFIGURED y cleanDemoData no se llamó', async (_n, numero) => {
+    conVigente(numero, { schemaVersion: 1, rota: true })
+
+    for (const plan of [planPro(), { tier: 'FREE' }, undefined]) {
+      await expect(convertir({ plan })).rejects.toMatchObject({
+        statusCode: 503,
+        code: 'PLAN_NOT_CONFIGURED',
+        message: MENSAJE_PLAN_NO_CONFIGURADO,
+      })
+    }
+    sinConvertir()
+  })
+
+  it('🔴 el puntero no se puede leer → 503 PLAN_NOT_CONFIGURED, sin limpiar ni convertir', async () => {
+    prismaMock.planOfferPointer.findUnique.mockRejectedValue(new Error('sin conexión a la base'))
+
+    await expect(convertir({ plan: planPro() })).rejects.toMatchObject({
+      statusCode: 503,
+      code: 'PLAN_NOT_CONFIGURED',
+      message: MENSAJE_PLAN_NO_CONFIGURADO,
+    })
+    sinConvertir()
+  })
+
+  it('una vigente sin número válido (no se sabe cuál rige) → 503, sin limpiar', async () => {
+    const sinNumero = punteroA('cvx', 2, v2())
+    ;(sinNumero.currentVersion as { number: number | null }).number = null
+    prismaMock.planOfferPointer.findUnique.mockResolvedValue(sinNumero as never)
+
+    await expect(convertir({ plan: planPro() })).rejects.toMatchObject({ statusCode: 503, code: 'PLAN_NOT_CONFIGURED' })
+    sinConvertir()
+  })
+
+  it('🔴 regresión · el puntero en una v1 sana: la conversión de hoy (sin leer el plan)', async () => {
+    conVigente(1, versionUno())
+
+    const r = await convertir({ plan: 'PRO' })
+
+    expect(mockCleanDemoData).toHaveBeenCalledTimes(1)
+    expect(prismaMock.venue.update).toHaveBeenCalledTimes(1)
+    expect(prismaMock.$transaction).not.toHaveBeenCalled()
+    expect(r).toEqual({ ...convertido, canalesEnLineaSinTarifa: [] })
   })
 })
 
@@ -221,7 +291,8 @@ describe('convertDemoVenue con la v2 del editor', () => {
     expect(prismaMock.venue.update).not.toHaveBeenCalled()
     expect(prismaMock.$transaction).toHaveBeenCalledTimes(1)
     // Espera la fila si la limpieza de otra pestaña la tiene (hasta su timeout de 2 min), como el `update` de hoy.
-    expect(prismaMock.$transaction).toHaveBeenCalledWith(expect.any(Function), { timeout: 130_000 })
+    expect(prismaMock.$transaction).toHaveBeenCalledWith(expect.any(Function), { timeout: TIMEOUT_DE_LA_LIMPIEZA_DEMO_MS + 10_000 })
+    expect(TIMEOUT_DE_LA_LIMPIEZA_DEMO_MS).toBe(120_000)
     expect(tx.venue.updateMany).toHaveBeenCalledWith({
       where: { id: VENUE_ID, status: VenueStatus.TRIAL },
       data: expect.objectContaining({

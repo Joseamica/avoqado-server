@@ -304,6 +304,9 @@ function leerDefinicion(versionId: string, definition: unknown): PlanOfferDefini
   return r.data
 }
 
+/** El número de una versión publicada: entero, 1 o más (una en preparación no tiene). */
+const esNumeroDeVersion = (number: number | null): number is number => Number.isInteger(number) && (number as number) >= 1
+
 /**
  * La oferta que rige AHORA. Sin puntero o sin vigente → el respaldo con número 1. Una vigente que no pasa el esquema (o que
  * no está publicada con su número) → 503 `PLAN_NOT_CONFIGURED`, nunca el respaldo. Sin caché.
@@ -315,15 +318,32 @@ export async function ofertaVigente(db: Db = prisma): Promise<OfertaVigente> {
   })
   const version = puntero?.currentVersion
   if (!version) return { number: 1, versionId: null, definition: ofertaDeRespaldo(), respaldo: true }
-  if (version.status !== 'PUBLISHED' || !Number.isInteger(version.number) || (version.number as number) < 1) {
+  if (version.status !== 'PUBLISHED' || !esNumeroDeVersion(version.number)) {
     throw ofertaRota(version.id, `la vigente está ${version.status} con número ${version.number ?? 'null'}`)
   }
   return {
-    number: version.number as number,
+    number: version.number,
     versionId: version.id,
     definition: leerDefinicion(version.id, version.definition),
     respaldo: false,
   }
+}
+
+/**
+ * El número de la versión que rige, leído SÓLO del puntero: sin leer ni validar su definición, sin Stripe. Sin vigente, 1 (el
+ * respaldo, como `ofertaVigente`). `null`: la vigente no tiene un número válido (no se sabe cuál rige).
+ *
+ * Para quien tiene que decidir qué hacer cuando `ofertaVigente`/`versionQueCobra` lanzan (B2 Task 8): con la v1, la foto de hoy,
+ * un camino que hoy no lee la oferta sigue igual; con una versión del editor (2 o más) falla cerrado.
+ */
+export async function numeroDeLaVigente(db: Db = prisma): Promise<number | null> {
+  const puntero = await db.planOfferPointer.findUnique({
+    where: { id: PUNTERO_ID },
+    select: { currentVersion: { select: { number: true } } },
+  })
+  const version = puntero?.currentVersion
+  if (!version) return 1
+  return esNumeroDeVersion(version.number) ? version.number : null
 }
 
 /** Una versión por su id (también una en preparación, que no tiene número). */

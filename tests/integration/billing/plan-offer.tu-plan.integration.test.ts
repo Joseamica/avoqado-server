@@ -379,20 +379,31 @@ jest.mock('@/services/superadmin/kycReview.service', () => ({
   ...jest.requireActual('@/services/superadmin/kycReview.service'),
   notifySuperadminsNewKycSubmission: jest.fn().mockResolvedValue(undefined),
 }))
-// B2 Task 8: la limpieza del demo REAL, con una pausa opcional en su primera llamada (la pestaña que ya leyó TRIAL y espera).
-const mockLimpieza = { pausa: null as null | { llego: () => void; suelta: Promise<void> } }
+// B2 Task 8: la limpieza del demo REAL, con una pausa opcional en su primera llamada (la pestaña que ya leyó TRIAL y espera): ANTES
+// de limpiar (llegará a la revisión del estado dentro del candado) o DESPUÉS (ya limpió con el negocio en demo y llegará al CAS).
+// `resultados` anota, en orden, el `skippedReason` de cada limpieza (`null` = limpió).
+const mockLimpieza = {
+  pausa: null as null | { momento: 'antes' | 'despues'; llego: () => void; suelta: Promise<void> },
+  resultados: [] as Array<string | null>,
+}
 jest.mock('@/services/onboarding/demoCleanup.service', () => {
   const real = jest.requireActual<typeof import('@/services/onboarding/demoCleanup.service')>('@/services/onboarding/demoCleanup.service')
   return {
     ...real,
     cleanDemoData: async (...a: Parameters<typeof real.cleanDemoData>) => {
       const pausa = mockLimpieza.pausa
-      if (pausa) {
-        mockLimpieza.pausa = null
+      mockLimpieza.pausa = null
+      if (pausa?.momento === 'antes') {
         pausa.llego()
         await pausa.suelta
       }
-      return real.cleanDemoData(...a)
+      const resultado = await real.cleanDemoData(...a)
+      mockLimpieza.resultados.push(resultado.skippedReason ?? null)
+      if (pausa?.momento === 'despues') {
+        pausa.llego()
+        await pausa.suelta
+      }
+      return resultado
     },
   }
 })
@@ -602,35 +613,37 @@ async function planesDeLaConversion() {
   }
 }
 /** Arma la pausa en la PRIMERA llamada a `cleanDemoData`: `llegada` se cumple cuando esa pestaña ya leyó TRIAL y espera. */
-function pausarLaPrimeraLimpieza() {
+function pausarLaPrimeraLimpieza(momento: 'antes' | 'despues') {
   let llego!: () => void
   let soltar!: () => void
   const llegada = new Promise<void>(resolve => (llego = resolve))
   const suelta = new Promise<void>(resolve => (soltar = resolve))
-  mockLimpieza.pausa = { llego, suelta }
+  mockLimpieza.pausa = { momento, llego, suelta }
   return { llegada, soltar }
 }
 /**
- * La pestaña B arranca, lee TRIAL y se detiene antes de limpiar; mientras, corre `mientras` (la pestaña A y lo demás); luego se suelta
- * B. Siempre se suelta y se espera a B (aunque `mientras` falle), para no dejar una petición colgada.
+ * La pestaña B arranca, lee TRIAL, valida su plan y se detiene en su limpieza (`momento`: antes o después de limpiar); mientras, corre
+ * `mientras` (la pestaña A y lo demás); luego se suelta B. Pase lo que pase con `mientras`, B se suelta y se espera en el `finally`:
+ * ninguna petición queda viva para el `afterEach`.
  */
-async function conLaPestanaBEnPausa<T>(planB: unknown, mientras: () => Promise<T>) {
-  const pausa = pausarLaPrimeraLimpieza()
+async function conLaPestanaBEnPausa<T>(planB: unknown, mientras: () => Promise<T>, momento: 'antes' | 'despues' = 'antes') {
+  const pausa = pausarLaPrimeraLimpieza(momento)
   const pestanaB = convertir(planB).then(r => r)
-  let deA: T | undefined
   try {
     // Si B termina sin llegar a la limpieza (un rechazo antes), la prueba lo dice en vez de quedarse esperando.
     await Promise.race([
       pausa.llegada,
       pestanaB.then(r => {
-        throw new Error(`La pestaña B terminó antes de limpiar: ${r.status} ${JSON.stringify(r.body)}`)
+        throw new Error(`La pestaña B terminó antes de llegar a la pausa: ${r.status} ${JSON.stringify(r.body)}`)
       }),
     ])
-    deA = await mientras()
+    const deA = await mientras()
+    pausa.soltar()
+    return { deA, deB: await pestanaB }
   } finally {
     pausa.soltar()
+    await pestanaB.catch(() => undefined)
   }
-  return { deA: deA as T, deB: await pestanaB }
 }
 
 type SubDelAlmacen = {
@@ -745,6 +758,7 @@ beforeEach(async () => {
   if (!preparada) return
   mockAlmacen.reset()
   mockLimpieza.pausa = null
+  mockLimpieza.resultados = []
   // `logAction` está simulado en toda la integración (`integration-setup.ts`): cada caso revisa SUS llamadas, no filas.
   jest.mocked(logAction).mockClear()
   try {
@@ -864,26 +878,22 @@ describe('La conversión de demo con la v2: el CAS y su aceptación, por HTTP (P
     await demoConLaV2()
     const planes = await planesDeLaConversion()
 
-    const [pro, premium] = await Promise.all([convertir(planes.PRO), convertir(planes.PREMIUM)])
+    // Las dos a la vez, sin carrera de reloj: la de Pro lee TRIAL, valida su plan y limpia con el negocio todavía en demo, y se
+    // detiene justo antes de su CAS; la de Premium hace todo y gana. Al soltarla, Pro llega al CAS con el negocio ya convertido.
+    // (Con un `Promise.all` suelto, la segunda podía llegar cuando la primera ya había terminado y recibir el 400 de hoy.)
+    const { deA: premium, deB: pro } = await conLaPestanaBEnPausa(planes.PRO, () => convertir(planes.PREMIUM), 'despues')
 
-    const respuestas = [
-      { tier: 'PRO', res: pro },
-      { tier: 'PREMIUM', res: premium },
-    ]
-    const ganadoras = respuestas.filter(r => r.res.status === 200)
-    const perdedoras = respuestas.filter(r => r.res.status !== 200)
-    expect(ganadoras).toHaveLength(1)
-    expect(perdedoras).toHaveLength(1)
-    const [ganadora] = ganadoras
-    const [perdedora] = perdedoras
-    expect(perdedora.res.status).toBe(409)
-    expect(perdedora.res.body).toMatchObject({
+    expect(premium.status).toBe(200)
+    expect(pro.status).toBe(409)
+    expect(pro.body).toMatchObject({
       code: 'VENUE_ALREADY_CONVERTED',
       message: 'Este negocio ya se convirtió en otra pestaña. Recarga la página.',
     })
+    // Las dos limpiaron con el negocio en demo (ninguna vio NOT_DEMO): a Pro la frenó el CAS.
+    expect(mockLimpieza.resultados).toEqual([null, null])
     // Una sola aceptación: la de la conversión que ganó el CAS.
     const aceptaciones = await aceptacionesDelNegocio()
-    expect(aceptaciones).toEqual([{ id: ganadora.res.body.data.planAcceptance.id, tier: ganadora.tier, interval: 'monthly' }])
+    expect(aceptaciones).toEqual([{ id: premium.body.data.planAcceptance.id, tier: 'PREMIUM', interval: 'monthly' }])
     expect(await prisma.venue.findUnique({ where: { id: negocio().venueId }, select: { status: true } })).toEqual({
       status: 'PENDING_ACTIVATION',
     })
@@ -892,23 +902,19 @@ describe('La conversión de demo con la v2: el CAS y su aceptación, por HTTP (P
     )
 
     // El plan de la que perdió, sin aceptación: la aceptación viva y sin usar se termina primero.
-    const sinAceptacion = await comprar({
-      tier: perdedora.tier,
-      quoteToken: perdedora.tier === 'PRO' ? planes.PRO.quoteToken : planes.PREMIUM.quoteToken,
-    })
+    const sinAceptacion = await comprar({ tier: 'PRO', quoteToken: planes.PRO.quoteToken })
     expect(sinAceptacion.status).toBe(409)
     expect(sinAceptacion.body).toMatchObject({
       code: 'PLAN_ACCEPTANCE_REQUIRED',
-      details: { acceptanceId: aceptaciones[0].id, tier: ganadora.tier, interval: 'monthly' },
+      details: { acceptanceId: aceptaciones[0].id, tier: 'PREMIUM', interval: 'monthly' },
     })
     expect(mockAlmacen.sesiones).toHaveLength(0)
 
-    const delGanador = await comprar({ tier: ganadora.tier, acceptanceId: aceptaciones[0].id })
+    const delGanador = await comprar({ tier: 'PREMIUM', acceptanceId: aceptaciones[0].id })
 
     expect(delGanador.status).toBe(200)
     expect(mockAlmacen.sesiones).toHaveLength(1)
-    const precio = ganadora.tier === 'PRO' ? 'price_v2_pro_m' : 'price_v2_premium_m'
-    expect(mockAlmacen.sesiones[0].line_items).toEqual([{ price: precio, quantity: 1 }])
+    expect(mockAlmacen.sesiones[0].line_items).toEqual([{ price: 'price_v2_premium_m', quantity: 1 }])
     expect(mockAlmacen.sesiones[0].metadata).toMatchObject({ planOfferVersion: '2', planAcceptanceId: aceptaciones[0].id })
     expect(mockAlmacen.sesiones[0].subscription_data.metadata).toMatchObject({ planAcceptanceId: aceptaciones[0].id })
   })
@@ -923,6 +929,7 @@ describe('La conversión de demo con la v2: el CAS y su aceptación, por HTTP (P
       await prisma.planAcceptance.deleteMany({ where: { venueId: negocio().venueId } })
       await prisma.venue.update({ where: { id: negocio().venueId }, data: { status: 'TRIAL' } })
       mockAlmacen.sesiones = []
+      mockLimpieza.resultados = []
       const planes = await planesDeLaConversion()
 
       // La que pierde ya leyó TRIAL y validó su plan; la que gana convierte mientras tanto.
@@ -931,6 +938,8 @@ describe('La conversión de demo con la v2: el CAS y su aceptación, por HTTP (P
       expect(ganadora.status).toBe(200)
       expect(perdedora.status).toBe(409)
       expect(perdedora.body.code).toBe('VENUE_ALREADY_CONVERTED')
+      // La que gana limpió; la que pierde vio, dentro del candado, que ya no era demo.
+      expect(mockLimpieza.resultados).toEqual([null, 'NOT_DEMO'])
       const aceptaciones = await aceptacionesDelNegocio()
 
       if (orden.gana === 'FREE') {
@@ -1010,6 +1019,7 @@ describe('La conversión de demo con la v2: el CAS y su aceptación, por HTTP (P
         message: 'Este negocio ya se convirtió en otra pestaña. Recarga la página.',
       })
       // La limpieza de B esperó a A, vio que ya no era demo y no borró nada.
+      expect(mockLimpieza.resultados).toEqual([null, 'NOT_DEMO'])
       expect(await prisma.order.count({ where: { id: venta.orderId } })).toBe(1)
       expect(await prisma.payment.count({ where: { id: venta.paymentId } })).toBe(1)
       // Y la aceptación es sólo la de A (Premium).

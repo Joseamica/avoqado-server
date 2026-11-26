@@ -68,6 +68,7 @@ import { exigirPrecioDeStripe, resolverPrecioDelPlan } from '../billing/precioDe
 import { exigirNombreDelPlanAlDia } from '../billing/nombreDelPlanEnStripe'
 import {
   MENSAJE_PLAN_NO_CONFIGURADO,
+  numeroDeLaVigente,
   ofertaPorNumero,
   versionQueCobra,
   type OfertaVigente,
@@ -90,7 +91,7 @@ import { getPlanStateYSuscripcion } from './planState.service'
 import { STANDARD_PLAN_GROSS_CENTS } from '../access/planPricing.constants'
 import { ventaSueltaAbierta } from '../access/ventaSuelta'
 import { notifySuperadminsNewKycSubmission } from '../superadmin/kycReview.service'
-import { cleanDemoData } from '../onboarding/demoCleanup.service'
+import { TIMEOUT_DE_LA_LIMPIEZA_DEMO_MS, cleanDemoData } from '../onboarding/demoCleanup.service'
 import { deleteOnboardingProgress } from '../onboarding/onboardingProgress.service'
 import { OPERATIONAL_VENUE_STATUSES, canDeleteVenue, isDemoVenue, isTrialVenue } from '@/lib/venueStatus.constants'
 import { logAction } from './activity-log.service'
@@ -1114,8 +1115,9 @@ export async function convertDemoVenue(
   let yaNoEraDemo = false
   try {
     const cleanupResult = await cleanDemoData(venueId, staffId)
-    logger.info(`🧹 Demo data cleaned for venue ${venueId}:`, cleanupResult)
     yaNoEraDemo = cleanupResult.skippedReason === 'NOT_DEMO'
+    // Con NOT_DEMO no se limpió nada (la limpieza ya avisó).
+    if (!yaNoEraDemo) logger.info(`🧹 Demo data cleaned for venue ${venueId}:`, cleanupResult)
     canalesEnLineaSinTarifa = cleanupResult.canalesEnLineaSinTarifa
       .filter(c => c.venueId === venueId)
       .map(({ id, channelName, perdio }) => ({ id, channelName, perdio }))
@@ -1315,24 +1317,39 @@ const negocioYaConvertido = () =>
   new ConflictError('Este negocio ya se convirtió en otra pestaña. Recarga la página.', 'VENUE_ALREADY_CONVERTED')
 
 /**
- * El CAS puede esperar la fila del negocio mientras la limpieza de OTRA pestaña la tiene (`FOR UPDATE`, hasta su timeout de 2 min):
- * el `update` de hoy también espera. Con los 5 s de Prisma, esa espera sería un 500 en vez del 409 de la que pierde.
+ * El CAS puede esperar la fila del negocio mientras la limpieza de OTRA pestaña la tiene (`FOR UPDATE`, hasta el timeout de esa
+ * limpieza): el `update` de hoy también espera. Con los 5 s de Prisma, esa espera sería un 500 en vez de un 200 y un 409. Se deriva
+ * del timeout de la limpieza, más un margen para el CAS mismo.
  */
-const TIMEOUT_DEL_CAS_DE_LA_CONVERSION_MS = 130_000
+const TIMEOUT_DEL_CAS_DE_LA_CONVERSION_MS = TIMEOUT_DE_LA_LIMPIEZA_DEMO_MS + 10_000
 
 /**
- * La versión que decide la conversión. Una oferta que no se puede leer no tumba la conversión (que hoy no la lee): se convierte como
- * hoy, con un aviso. El checkout que sigue sí falla cerrado con esa lectura (503) y no cobra nada.
+ * La versión que decide la conversión. Si no se puede leer, decide el número del puntero (`numeroDeLaVigente`, sin leer la
+ * definición):
+ * - en la v1 (o sin versiones): la conversión de hoy, que nunca leyó la oferta, con un aviso (nada cambia con el editor apagado);
+ * - en una versión del editor, sin número válido o si ni el puntero se puede leer: 503 `PLAN_NOT_CONFIGURED` ANTES de limpiar, sin
+ *   CAS ni aceptación. Convertir «como hoy» ahí soltaría en silencio el plan que eligió la persona (b2-r1 #9), y limpiar no tiene
+ *   vuelta.
  */
 async function versionDeLaConversion(venueId: string): Promise<OfertaVigente | null> {
   try {
     return await versionQueCobra()
   } catch (error) {
-    logger.warn('La conversión de demo no pudo leer la oferta; se convierte como hoy, sin leer el plan elegido', {
+    const motivo = error instanceof Error ? error.message : String(error)
+    const numero = await numeroDeLaVigente().catch(() => null)
+    if (numero === 1) {
+      logger.warn('La conversión de demo no pudo leer la v1 de la oferta; se convierte como hoy, sin leer el plan elegido', {
+        venueId,
+        error: motivo,
+      })
+      return null
+    }
+    logger.warn('La conversión de demo no pudo leer la oferta del editor; no se limpia ni se convierte', {
       venueId,
-      error: error instanceof Error ? error.message : String(error),
+      numero,
+      error: motivo,
     })
-    return null
+    throw new AppError(MENSAJE_PLAN_NO_CONFIGURADO, 503, true, 'PLAN_NOT_CONFIGURED')
   }
 }
 
