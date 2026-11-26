@@ -372,10 +372,7 @@ export async function aplicarBeneficiosEnTx(
     const r = await canjear(tx, 'PUNTOS', simulacion, async () => {
       if (!config?.active) throw new BadRequestError('El programa de lealtad no está activo en esta sucursal')
       const programa = { ...config, pointsPerDollar: config.pointsPerDollar.toNumber(), redemptionRate: config.redemptionRate.toNumber() }
-      // D39 r6 #1: la tienda cierra su propio folio en $0 (`order.service.ts`), así que el veto del $0 sin mesa del POS no le aplica.
-      return redeemPointsToOrderInTransaction(tx, venueId, orderId, customerId, puntos, undefined, programa, undefined, {
-        cierraSuPropioCero: true,
-      })
+      return redeemPointsToOrderInTransaction(tx, venueId, orderId, customerId, puntos, undefined, programa)
     })
     if (r === DESCARTADO) descartados.push('PUNTOS')
     else {
