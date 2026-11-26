@@ -71,6 +71,26 @@ describe('logAction — un id de StaffVenue firma con su persona (D33)', () => {
     })
   })
 
+  it('si el asiento firmado falla por OTRA cosa (p. ej. se perdió la respuesta), no escribe otro sin actor (Codex r2 #1)', async () => {
+    prismaMock.activityLog.create.mockRejectedValueOnce(FK).mockRejectedValueOnce(new Error('Connection reset by peer'))
+    prismaMock.staffVenue.findUnique.mockResolvedValue({ staffId: 'staff-real' } as never)
+
+    await expect(logAction({ staffId: 'staffvenue-1', venueId: 'venue-1', action: 'LOYALTY_POINTS_ADJUSTED' })).resolves.toBeUndefined()
+
+    expect(prismaMock.activityLog.create).toHaveBeenCalledTimes(2)
+  })
+
+  it('si la consulta de la ficha falla, sigue al reintento sin actor y no lanza', async () => {
+    prismaMock.activityLog.create.mockRejectedValueOnce(FK).mockResolvedValueOnce({ id: 'audit-6' } as never)
+    prismaMock.staffVenue.findUnique.mockRejectedValue(new Error('pool agotado'))
+
+    await expect(logAction({ staffId: 'staffvenue-1', venueId: 'venue-1', action: 'X' })).resolves.toBeUndefined()
+
+    expect(prismaMock.activityLog.create).toHaveBeenLastCalledWith({
+      data: expect.objectContaining({ staffId: null, data: { unknownStaffId: 'staffvenue-1' } }),
+    })
+  })
+
   it('un id correcto no consulta nada de más', async () => {
     prismaMock.activityLog.create.mockResolvedValueOnce({ id: 'audit-5' } as never)
 

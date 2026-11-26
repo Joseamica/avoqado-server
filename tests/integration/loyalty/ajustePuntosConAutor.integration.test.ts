@@ -58,6 +58,8 @@ describe('D33 · la bitácora del ajuste de puntos lleva a la persona', () => {
     const fila = await asiento('LOYALTY_POINTS_ADJUSTED', customerId)
     expect(fila.staffId).toBe(staffId)
     expect(fila.data).toEqual({ points: 25, newBalance: 25 })
+    // Un solo asiento por ajuste: ni uno firmado más otro sin actor.
+    expect(await prisma.activityLog.count({ where: { venueId, action: 'LOYALTY_POINTS_ADJUSTED', entityId: customerId } })).toBe(1)
     // El movimiento de puntos sigue apuntando a la ficha de sucursal, como pide su tabla.
     const movimiento = await prisma.loyaltyTransaction.findFirstOrThrow({ where: { customerId, type: 'ADJUST' } })
     expect(movimiento.createdById).toBe(staffVenueId)

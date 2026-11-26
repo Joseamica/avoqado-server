@@ -100,8 +100,18 @@ export async function logAction(params: LogActionParams): Promise<void> {
         try {
           await escribir(personaDeLaFicha, data)
           return
-        } catch {
-          // cae al reintento sin actor
+        } catch (errorConPersona) {
+          // Sólo un rechazo de la MISMA llave prueba que no se escribió. Con cualquier otro error (p. ej. se perdió la
+          // respuesta) el asiento firmado pudo quedar: escribir otro sin actor lo duplicaría (Codex r2 #1).
+          const otraVezLaLlave = errorConPersona instanceof Error && errorConPersona.message.includes('ActivityLog_staffId_fkey')
+          if (!otraVezLaLlave) {
+            logger.error('[ActivityLog] Failed to write audit log', {
+              action: params.action,
+              entity: params.entity,
+              error: errorConPersona instanceof Error ? errorConPersona.message : 'Unknown error',
+            })
+            return
+          }
         }
       }
 
