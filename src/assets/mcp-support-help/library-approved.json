@@ -138,6 +138,16 @@
       "featureCode": "LOYALTY_PROGRAM",
       "gateKind": "FEATURE"
     },
+    "android/lealtad/canjear-puntos": {
+      "sha256": "c287fa5bc80d38134bf2f24200d2ccfaef512fcc26e18a96b931172bcb636ca9",
+      "requiredPermissions": [
+        "tables:read",
+        "orders:update",
+        "loyalty:read"
+      ],
+      "featureCode": "LOYALTY_PROGRAM",
+      "gateKind": "FEATURE"
+    },
     "android/lealtad/sello-que-no-se-sumo": {
       "sha256": "d9866f45bb449cd7bab46039d18dd1d52f3b227cc9da61286828eeaf4c6da893",
       "requiredPermissions": [],
@@ -335,7 +345,7 @@
       ]
     },
     "dashboard/clientes/campanas-de-correo": {
-      "sha256": "f4527631bf3285ad95f56bb42186e22accf6d475bf751569879830d206d812ef",
+      "sha256": "2b82c79da3ee54d19ee17ac18ac6174c64185bb580e12965ebec6092a018db6c",
       "requiredPermissions": [
         "marketing:manage"
       ],
@@ -343,7 +353,7 @@
       "gateKind": "FEATURE"
     },
     "dashboard/clientes/configurar-lealtad": {
-      "sha256": "51f91568579ff6892ab5ccceaa4424b0c0dcef9150613b58529cc42c1afb6f89",
+      "sha256": "512c9c372ca74a97f79919037f51a7c9a9491fae47c5897b7c5f1a1c127d542d",
       "requiredPermissions": [
         "loyalty:update"
       ],
@@ -359,7 +369,7 @@
       "gateKind": "FEATURE"
     },
     "dashboard/clientes/configurar-puntos-de-lealtad": {
-      "sha256": "8898c6e359894a0b751372622539b0f92728faf765e7f4034d23321f9ab28207",
+      "sha256": "c426966f061e72e5839b4fc6c3590834b294307df074633fd322bc516271c4b5",
       "requiredPermissions": [
         "loyalty:read",
         "loyalty:update"
@@ -427,7 +437,7 @@
       ]
     },
     "dashboard/clientes/programa-de-referidos": {
-      "sha256": "a9a9cc5a8f117df432ef45201cc2bdd919ebe498ac928693b3161bb83f271338",
+      "sha256": "65c51e806ede17f2f348f1f0d79ca958e06c59ed47fdf7740f37386aef1794f3",
       "requiredPermissions": [
         "referral:read",
         "referral:configure"

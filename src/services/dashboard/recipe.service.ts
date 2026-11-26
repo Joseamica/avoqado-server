@@ -91,7 +91,12 @@ function assertRecipeGraphVenueV1(recipe: { lines: Array<{ rawMaterial: { venueI
   // WHY: A corrupt legacy cross-Venue FK must fail before any foreign cost can
   // be used to persist Recipe or RecipeLine values.
   if (recipe.lines.some(line => line.rawMaterial.venueId !== venueId)) {
-    throw new AppError('Recipe contains an ingredient from another venue', 422, true, 'RECIPE_COST_INPUT_INVALID')
+    throw new AppError(
+      'Esta receta tiene un ingrediente de otra sucursal. Quítalo y elige un insumo de este negocio.',
+      422,
+      true,
+      'RECIPE_COST_INPUT_INVALID',
+    )
   }
 }
 

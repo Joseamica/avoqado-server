@@ -64,6 +64,12 @@ export const UpdateReferralConfigSchema = z.object({
     }),
 })
 
+export const ReactivateReferralProgramSchema = z.object({
+  params: z.object({
+    venueId: z.string().min(1),
+  }),
+})
+
 export const DeactivateReferralProgramSchema = z.object({
   params: z.object({
     venueId: z.string().min(1),
