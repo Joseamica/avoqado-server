@@ -26,7 +26,13 @@ export class LoyaltyPointsExpiryJob {
       scheduleJob(
         'loyalty-points-expiry',
         DATABASE_JOB_SCHEDULES.loyaltyPointsExpiry,
-        () => this.runNow().catch(error => logger.error('🔴 [LEALTAD] Falló la vuelta del vencimiento de puntos', { error })),
+        () =>
+          this.runNow().then(
+            () => undefined,
+            error => {
+              logger.error('🔴 [LEALTAD] Falló la vuelta del vencimiento de puntos', { error })
+            },
+          ),
         null,
         false,
         'America/Mexico_City',
@@ -61,9 +67,7 @@ export class LoyaltyPointsExpiryJob {
       this.running = false
       if (this.pendiente) {
         this.pendiente = false
-        setImmediate(
-          () => this.runNow().catch(error => logger.error('🔴 [LEALTAD] Falló la vuelta del vencimiento de puntos', { error })),
-        )
+        setImmediate(() => this.runNow().catch(error => logger.error('🔴 [LEALTAD] Falló la vuelta del vencimiento de puntos', { error })))
       }
     }
   }
