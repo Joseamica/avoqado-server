@@ -1448,7 +1448,8 @@ async function seedLoyaltyConfig(venueId: string) {
       pointsPerVisit: 10,
       redemptionRate: 0.01, // 100 points = $1
       minPointsRedeem: 100,
-      pointsExpireDays: 365,
+      // D27: el vencimiento viene apagado, también en los demos (los puntos sí vencen cuando se prende).
+      pointsExpireDays: null,
       active: true,
       isDemo: true, // Mark as demo data for cleanup
     },

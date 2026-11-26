@@ -39,7 +39,7 @@ jest.mock('@/utils/prismaClient', () => ({
     },
     product: { findFirst: jest.fn() },
     venue: { findUnique: jest.fn() },
-    customer: { findMany: jest.fn(), update: jest.fn() },
+    customer: { findMany: jest.fn(), update: jest.fn(), updateMany: jest.fn() },
     activityLog: { create: jest.fn() },
   },
 }))
@@ -61,7 +61,7 @@ const mockedPrisma = prisma as unknown as {
   }
   product: { findFirst: jest.Mock }
   venue: { findUnique: jest.Mock }
-  customer: { findMany: jest.Mock; update: jest.Mock }
+  customer: { findMany: jest.Mock; update: jest.Mock; updateMany: jest.Mock }
   activityLog: { create: jest.Mock }
 }
 
@@ -227,19 +227,35 @@ describe('referralProgram.service', () => {
           { id: 'cust_2', firstName: 'Jose', lastName: 'Pérez' },
         ])
         .mockResolvedValueOnce([]) // second pass: drained
-      mockedPrisma.customer.update.mockResolvedValue({})
+      mockedPrisma.customer.updateMany.mockResolvedValue({ count: 1 })
       const n = await backfillLegacyReferralCodes('venue_1', 'TESTMF')
       expect(n).toBe(2)
       expect(generateReferralCode).toHaveBeenCalledTimes(2)
       expect(generateReferralCode).toHaveBeenCalledWith(expect.objectContaining({ venuePrefix: 'TESTMF' }))
-      expect(mockedPrisma.customer.update).toHaveBeenCalledTimes(2)
+      expect(mockedPrisma.customer.updateMany).toHaveBeenCalledTimes(2)
+    })
+
+    // D28 / Codex r2 #6: entre leer a la clienta sin código y escribir el suyo, alguien pudo tocar «Activar código ahora» y
+    // compartir ese código. La escritura sólo cae si sigue sin código: nunca reemplaza uno que ya existe.
+    it('never overwrites a code assigned in the meantime (writes only where referralCode is still null)', async () => {
+      mockedPrisma.customer.findMany.mockResolvedValueOnce([{ id: 'cust_1', firstName: 'María', lastName: null }]).mockResolvedValueOnce([])
+      mockedPrisma.customer.updateMany.mockResolvedValue({ count: 0 })
+
+      const n = await backfillLegacyReferralCodes('venue_1', 'TESTMF')
+
+      expect(mockedPrisma.customer.updateMany).toHaveBeenCalledWith({
+        where: { id: 'cust_1', referralCode: null },
+        data: { referralCode: 'TESTMF-TEST123' },
+      })
+      expect(mockedPrisma.customer.update).not.toHaveBeenCalled()
+      expect(n).toBe(0)
     })
 
     it('no-ops (returns 0) when every customer already has a code', async () => {
       mockedPrisma.customer.findMany.mockResolvedValueOnce([])
       const n = await backfillLegacyReferralCodes('venue_1', 'TESTMF')
       expect(n).toBe(0)
-      expect(mockedPrisma.customer.update).not.toHaveBeenCalled()
+      expect(mockedPrisma.customer.updateMany).not.toHaveBeenCalled()
     })
   })
 

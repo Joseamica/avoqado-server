@@ -224,7 +224,6 @@ const INVENTARIO: Record<string, number> = {
   'src/services/dashboard/impersonation.service.ts': 1,
   'src/services/dashboard/interVenueTransfer.service.ts': 4,
   'src/services/dashboard/itemCategory.dashboard.service.ts': 1,
-  'src/services/dashboard/loyalty.dashboard.service.ts': 1,
   'src/services/dashboard/manualSale.resolvers.ts': 1,
   'src/services/dashboard/menu.dashboard.service.ts': 4,
   'src/services/dashboard/merchantRouting.dashboard.service.ts': 1,
