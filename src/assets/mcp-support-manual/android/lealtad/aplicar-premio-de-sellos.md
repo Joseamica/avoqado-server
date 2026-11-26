@@ -36,7 +36,7 @@ Es en *Cobrar*, con la venta en el carrito. El cliente enseña la tarjeta digita
 
 ## Problemas frecuentes
 
-- Si el aviso no trae premio, sólo dice su avance («… de … sellos · esta compra le suma otro»): toca *Listo*. Ese aviso no revisa el tope de sellos por día: si el cliente ya llegó, al cobrar no suma.
+- Si el aviso no trae premio, sólo dice su avance: toca *Listo*. Desde la versión 2.25.60, el aviso también dice si ESTA compra suma sello: «esta compra le suma otro», «ya recibió su sello de hoy» (el negocio limita los sellos por día y el cliente ya llegó a su tope), «la tarjeta de sellos está apagada» o «esta compra no suma sello». Si no pudo comprobarlo en 1 segundo, sólo enseña el avance, sin esa frase; y en una venta que ya se cobra por partes tampoco la lleva. En versiones anteriores a la 2.25.60 el aviso siempre dice «esta compra le suma otro» y no revisa el tope del día: si el cliente ya llegó a su tope, al cobrar no suma sello aunque el aviso lo prometa.
 - Si el renglón dice «No aplica a esta venta», el premio no corresponde a lo que lleva el carrito.
 - La primera vez que se usa un lector nuevo puede perderse un carácter y salir «Producto no encontrado» con el código casi completo: cierra el aviso y vuelve a escanear.
 - Si dice «Esta venta ya se está cobrando por partes: su premio no se puede cambiar.», el premio ya no se cambia en esa venta.
