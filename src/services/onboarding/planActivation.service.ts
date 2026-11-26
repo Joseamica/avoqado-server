@@ -39,6 +39,7 @@ import {
   tierQueVendeLaSuscripcion,
   getOrCreateStripeCustomer,
   planLookupKey,
+  stripeAfirmaQueNoExiste,
 } from '../stripe.service'
 import { autorizarObligacionNueva, TIMEOUT_DE_LA_TRANSACCION_MS } from '../access/autorizarObligacionNueva'
 import { inventarioDeObligaciones } from '../access/inventarioDeObligaciones'
@@ -46,7 +47,8 @@ import { ensureVenueForOnboarding } from './ensureVenue.service'
 import { primerCobroCubierto } from './primerCobroPagado'
 import { basicPlanValido, fusionarV2SetupData, MENSAJE_BASIC_PLAN_INVALIDO, parseV2Plan } from './onboardingProgress.service'
 import { modalidadDePrueba, type TrialModality } from '../billing/modalidadDePrueba'
-import { resolverPrecioDelPlan } from '../billing/precioDelPlan'
+import { resolverPrecioPorLlave } from '../billing/precioDelPlan'
+import { precioDeLaOferta, priceIdVigente, versionQueCobra, type OfertaVigente } from '../billing/planOffer'
 import {
   isLegacyIntroEligible,
   LEGACY_INTRO_OFFER,
@@ -278,7 +280,20 @@ async function verificarPlanConfigurado(tier: PaidPlanTier): Promise<void> {
   )
 }
 
-async function verificarPrecioDeStripe(
+/**
+ * De dónde salió el precio verificado: la relectura antes de cobrar compara contra la MISMA fuente. `LUGAR` (el precio que
+ * guardó el lugar apartado de la campaña) y `SUSCRIPCION` (el que de verdad cobró el intento de un lugar de antes de B1) no se
+ * releen: Avoqado no archiva precios (diseño §15). Un precio de la `VERSION` que el PASO 7 guardó en el lugar apartado también se
+ * relee como `LUGAR` (Codex B1 #2); la `LLAVE`, nunca: se relee como B0.
+ */
+type OrigenDelPrecio = 'VERSION' | 'LLAVE' | 'LUGAR' | 'SUSCRIPCION'
+type PrecioVerificado = { priceId: string; unitAmount: number; origen: OrigenDelPrecio }
+
+/**
+ * B0, tal cual: el precio de la LLAVE del plan, con su 409 `PLAN_PRICE_MISMATCH` también cuando la lista viene vacía (nunca
+ * el 503 del resolver). Es el camino sin una versión publicada por el editor (tablas vacías o sólo la v1).
+ */
+async function verificarPrecioPorLlave(
   tier: PaidPlanTier,
   interval: PlanBillingInterval,
   esperado: number,
@@ -302,6 +317,185 @@ async function verificarPrecioDeStripe(
   }
   // El MISMO precio que se leyó aquí es el que se cobra: no se vuelve a listar la llave.
   return { priceId: price.id, unitAmount }
+}
+
+/**
+ * PASO 4 — el precio que se va a cobrar tiene que ser el que el cliente consintió (`esperado`).
+ *
+ * - Sin una versión publicada por el editor (`versionQueCobra()` nulo): `verificarPrecioPorLlave`, idéntico a B0.
+ * - Con ella: el `priceId` de su ranura con `prices.retrieve`. Un precio que Stripe ya no tiene (404), inactivo, de otro
+ *   monto o una ranura sin precio dan el MISMO 409 `PLAN_PRICE_MISMATCH` de la llave (la pantalla se recarga), nunca el 503
+ *   del resolver.
+ */
+async function verificarPrecioDeStripe(
+  tier: PaidPlanTier,
+  interval: PlanBillingInterval,
+  esperado: number,
+): Promise<{ priceId: string; unitAmount: number; origen: 'VERSION' | 'LLAVE' }> {
+  const version = await versionQueCobra()
+  if (!version) return { ...(await verificarPrecioPorLlave(tier, interval, esperado)), origen: 'LLAVE' }
+  return verificarPrecioDeLaVersion(version, tier, interval, esperado)
+}
+
+/** El 409 `PLAN_PRICE_MISMATCH` de un precio que no es el consentido, con su 🚨 (alguien movió el precio debajo de una oferta). */
+function precioNoCoincide(contexto: Record<string, unknown>, esperado: number, stripeAmount: number | null, motivo: string): AppError {
+  logger.error('🚨 activate-plan: el precio que se iba a cobrar no coincide con el snapshot — NO se cobra', {
+    ...contexto,
+    esperado,
+    stripe: stripeAmount,
+    motivo,
+  })
+  return new ConflictError('El precio del plan cambió. Vuelve a cargar la página.', 'PLAN_PRICE_MISMATCH', {
+    esperado,
+    stripe: stripeAmount,
+  })
+}
+
+/**
+ * Lo que un precio de CAMPAÑA tiene que ser además de su monto: activo, en MXN, mensual, con el IVA incluido (las mismas
+ * comprobaciones con las que se activó la campaña) y del PRODUCTO del plan. Devuelve el motivo si no lo es.
+ *
+ * 🔴 El producto no es ceremonia: el cupón de la campaña se creó con `applies_to: [producto del plan]`; un precio de otro
+ * producto con el mismo monto cobraría la lista completa, sin el descuento anunciado.
+ */
+function formaDeCampanaQueFalta(price: Stripe.Price, productoDelPlan: string | null): string | null {
+  if (price.active !== true) return 'INACTIVO'
+  if (price.currency !== 'mxn') return 'OTRA_MONEDA'
+  if (price.recurring?.interval !== 'month') return 'NO_ES_MENSUAL'
+  if (price.tax_behavior !== 'inclusive') return 'SIN_IVA_INCLUIDO'
+  const producto = typeof price.product === 'string' ? price.product : (price.product as { id?: string } | null)?.id
+  if (!productoDelPlan || producto !== productoDelPlan) return 'OTRO_PRODUCTO'
+  return null
+}
+
+/** El producto de Stripe del plan: el de su `Feature` activa (`PLAN_PRO` / `PLAN_PREMIUM`). `null` si no lo tiene (falla cerrado). */
+async function productoDelPlan(tier: PaidPlanTier): Promise<string | null> {
+  const code = tier === 'PREMIUM' ? 'PLAN_PREMIUM' : 'PLAN_PRO'
+  const feature = await prisma.feature.findFirst({ where: { code, active: true }, select: { stripeProductId: true } })
+  return feature?.stripeProductId ?? null
+}
+
+/**
+ * El precio de la ranura de una versión del editor. Con `campana` exige además la forma de un precio de campaña (también el
+ * producto del plan).
+ */
+async function verificarPrecioDeLaVersion(
+  version: OfertaVigente,
+  tier: PaidPlanTier,
+  interval: PlanBillingInterval,
+  esperado: number,
+  campana?: { productoDelPlan: string | null },
+): Promise<{ priceId: string; unitAmount: number; origen: 'VERSION' }> {
+  const ranura = precioDeLaOferta(version.definition, tier, interval)
+  const contexto = {
+    origen: 'VERSION',
+    versionId: version.versionId,
+    number: version.number,
+    tier,
+    interval,
+    priceId: ranura.stripePriceId,
+  }
+  if (!ranura.stripePriceId) throw precioNoCoincide(contexto, esperado, null, 'SIN_PRECIO')
+
+  let price: Stripe.Price
+  try {
+    price = await stripe.prices.retrieve(ranura.stripePriceId)
+  } catch (error) {
+    if (stripeAfirmaQueNoExiste(error)) throw precioNoCoincide(contexto, esperado, null, 'NO_EXISTE')
+    throw error
+  }
+  const unitAmount = price.unit_amount ?? null
+  if (!price.active) throw precioNoCoincide(contexto, esperado, unitAmount, 'INACTIVO')
+  if (unitAmount !== esperado || ranura.grossCents !== esperado) throw precioNoCoincide(contexto, esperado, unitAmount, 'OTRO_MONTO')
+  const falta = campana ? formaDeCampanaQueFalta(price, campana.productoDelPlan) : null
+  if (falta) throw precioNoCoincide(contexto, esperado, unitAmount, falta)
+  // El MISMO precio que se leyó aquí es el que se cobra; la relectura sólo compara el puntero.
+  return { priceId: ranura.stripePriceId, unitAmount: esperado, origen: 'VERSION' }
+}
+
+/** Un precio ya leído (del lugar o de la suscripción) que se va a cobrar sin releer: su monto, su forma y su producto, o 409. */
+function exigirPrecioDeCampana(
+  price: Stripe.Price | null | undefined,
+  esperado: number,
+  productoDelPlan: string | null,
+  contexto: Record<string, unknown>,
+): { priceId: string; unitAmount: number } {
+  if (!price?.id) throw precioNoCoincide(contexto, esperado, null, 'SIN_PRECIO')
+  const unitAmount = price.unit_amount ?? null
+  const falta = formaDeCampanaQueFalta(price, productoDelPlan) ?? (unitAmount !== esperado ? 'OTRO_MONTO' : null)
+  if (falta) throw precioNoCoincide({ ...contexto, priceId: price.id }, esperado, unitAmount, falta)
+  return { priceId: price.id, unitAmount: esperado }
+}
+
+/**
+ * PASO 4 de un intento de CAMPAÑA (planes editables B1). La campaña consintió `listPriceCentsSnapshot`; ése es el monto que se
+ * exige en todos los caminos (409 `PLAN_PRICE_MISMATCH` si no). `LaunchCampaign.stripePriceId` no se usa para cobrar.
+ *
+ * - **Sin una versión publicada por el editor** (`versionQueCobra()` nulo; B1 con el interruptor apagado): el camino de hoy,
+ *   literal, para todo intento: `verificarPrecioPorLlave` (`LLAVE`), con sus códigos de hoy y la relectura de B0.
+ * - **Con ella**, en este orden:
+ *   1. el lugar `RESERVED` de esta organización, campaña y versión de la oferta **con** su `stripePriceId` → ése (`LUGAR`);
+ *   2. un lugar `RESERVED` **sin** precio (apartado antes de B1) con la suscripción de su intento → el precio que de verdad
+ *      cobró ese intento (`SUSCRIPCION`). Sólo si la suscripción es de ESE lugar (`metadata.launchRedemptionId`): la de otro
+ *      intento (otro lugar, o una prueba estándar) o una que Stripe ya no tiene (404) caen al paso 3, como en B0;
+ *   3. un lugar `RESERVED` sin precio ni suscripción suya → la llave (`LLAVE`; la llave nunca se movió después de B1, §15);
+ *   4. un intento nuevo → el mensual de la versión (`VERSION`).
+ *   En LUGAR, SUSCRIPCION y VERSION el precio también tiene que ser del producto del plan (el `applies_to` del cupón); la LLAVE
+ *   sigue literal, como B0.
+ */
+async function precioDeLaCampana(
+  campaign: LaunchCampaignRow,
+  organizationId: string,
+  progress: { planStripeSubscriptionId: string | null },
+): Promise<PrecioVerificado> {
+  const tier = campaign.planTier as PaidPlanTier
+  const esperado = campaign.listPriceCentsSnapshot as number
+  const version = await versionQueCobra()
+  if (!version) return { ...(await verificarPrecioPorLlave(tier, 'monthly', esperado)), origen: 'LLAVE' }
+
+  const lugar = await prisma.launchCampaignRedemption.findFirst({
+    where: { organizationId, campaignId: campaign.id, offerVersion: campaign.offerVersion, status: REDEMPTION_STATUS.RESERVED },
+    select: { id: true, stripePriceId: true },
+  })
+  const contexto = { organizationId, campaignId: campaign.id, redemptionId: lugar?.id ?? null }
+
+  if (lugar?.stripePriceId) {
+    let price: Stripe.Price
+    try {
+      price = await stripe.prices.retrieve(lugar.stripePriceId)
+    } catch (error) {
+      if (stripeAfirmaQueNoExiste(error)) throw precioNoCoincide({ ...contexto, origen: 'LUGAR' }, esperado, null, 'NO_EXISTE')
+      throw error
+    }
+    return { ...exigirPrecioDeCampana(price, esperado, await productoDelPlan(tier), { ...contexto, origen: 'LUGAR' }), origen: 'LUGAR' }
+  }
+
+  if (lugar && progress.planStripeSubscriptionId) {
+    // El precio que de verdad cobró ese intento. Un 404 (Stripe dice que no existe) cae a la llave; cualquier otro error sube
+    // tal cual («no pude ver» nunca se lee como «no existe»).
+    let sub: Stripe.Subscription | null
+    try {
+      sub = await stripe.subscriptions.retrieve(progress.planStripeSubscriptionId)
+    } catch (error) {
+      if (!stripeAfirmaQueNoExiste(error)) throw error
+      sub = null
+    }
+    if (sub && sub.metadata?.launchRedemptionId === lugar.id) {
+      const price = sub.items?.data?.[0]?.price as Stripe.Price | undefined
+      return {
+        ...exigirPrecioDeCampana(price, esperado, await productoDelPlan(tier), {
+          ...contexto,
+          origen: 'SUSCRIPCION',
+          subscriptionId: sub.id,
+        }),
+        origen: 'SUSCRIPCION',
+      }
+    }
+  }
+
+  if (lugar) return { ...(await verificarPrecioPorLlave(tier, 'monthly', esperado)), origen: 'LLAVE' }
+
+  return verificarPrecioDeLaVersion(version, tier, 'monthly', esperado, { productoDelPlan: await productoDelPlan(tier) })
 }
 
 /**
@@ -401,7 +595,9 @@ async function apartarLugar(
   venueId: string,
   staffId: string,
   now: Date,
-): Promise<{ id: string; reused: boolean }> {
+  /** El precio verificado en el PASO 4: el lugar nuevo lo guarda y, retomado después de publicar otra versión, cobra con él. */
+  stripePriceId: string,
+): Promise<{ id: string; reused: boolean; stripePriceId: string | null }> {
   return prisma.$transaction(async tx => {
     const vivo = await tx.launchCampaignRedemption.findFirst({
       where: { organizationId, status: { not: REDEMPTION_STATUS.RELEASED } },
@@ -420,7 +616,7 @@ async function apartarLugar(
           launchOffer: buildLaunchOfferView(toOfferRow(campaign), now),
         })
       }
-      return { id: vivo.id, reused: true }
+      return { id: vivo.id, reused: true, stripePriceId: vivo.stripePriceId ?? null }
     }
 
     // 🔴 EL CANDADO DEL CUPO. En Read Committed, `UPDATE … WHERE count < cap` bloquea la fila y
@@ -460,10 +656,11 @@ async function apartarLugar(
         discountMonths: campaign.discountMonths,
         listPriceCents: campaign.listPriceCentsSnapshot as number,
         stripeCouponId: campaign.stripeCouponId as string,
+        stripePriceId,
       },
       select: { id: true },
     })
-    return { id: creada.id, reused: false }
+    return { id: creada.id, reused: false, stripePriceId }
   })
 }
 
@@ -874,7 +1071,10 @@ export async function activatePlan(
   const { expected, campaign, listPriceCents } = await cotizar(input, progress, now)
 
   // ---- PASO 4: verificación contra Stripe (sólo lecturas) ----
-  const precioVerificado = await verificarPrecioDeStripe(input.tier, input.interval, listPriceCents)
+  // Una campaña cobra con el precio de su lugar apartado, de su intento, de la llave o de la versión (`precioDeLaCampana`).
+  const precioVerificado: PrecioVerificado = campaign
+    ? await precioDeLaCampana(campaign, organizationId, progress)
+    : await verificarPrecioDeStripe(input.tier, input.interval, listPriceCents)
   await verificarPlanConfigurado(input.tier)
   const venueRecord = await prisma.venue.findUnique({
     where: { id: venue.id },
@@ -1059,16 +1259,22 @@ export async function activatePlan(
   }
 
   // ---- PASO 7: apartar el lugar del cupo ----
-  let redemption: { id: string; reused: boolean } | null = null
+  let redemption: { id: string; reused: boolean; stripePriceId: string | null } | null = null
   if (campaign) {
     try {
-      redemption = await apartarLugar(campaign, organizationId, venue.id, staffId, now)
+      redemption = await apartarLugar(campaign, organizationId, venue.id, staffId, now, precioVerificado.priceId)
     } catch (error) {
       // No hubo cobro: el lease vuelve a como estaba.
       await soltarLease(organizationId, prev.status, attempt, nuestroLease)
       throw error
     }
   }
+  // 🔴 Codex B1 #2: un precio de la VERSIÓN que ya quedó guardado en el lugar apartado (nuevo o reusado, con ESE precio) se relee
+  // como `LUGAR`: el lugar ya consintió ese precio y Avoqado no archiva precios (§15). Releer el puntero respondía 409 si en medio se
+  // pausó la campaña y se publicó otra versión, y el 409 liberaba un lugar que la campaña pausada ya no deja recuperar. La `LLAVE`
+  // (sin versión del editor) se relee como B0, aunque el lugar la guarde: es la paridad con B0 (#1/#2 de B0).
+  const origenDeLaRelectura: OrigenDelPrecio =
+    precioVerificado.origen === 'VERSION' && redemption?.stripePriceId === precioVerificado.priceId ? 'LUGAR' : precioVerificado.origen
 
   // ---- PASOS 8-11: Stripe y cierre ----
   const planActivationKey = `plan-activation:${organizationId}:${attempt}`
@@ -1111,17 +1317,27 @@ export async function activatePlan(
         customerId,
         { tipo: 'PLAN', tier: input.tier },
         async () => {
-          // 🔴 Codex B0 #1/#2: la llave se vuelve a leer JUSTO antes de cobrar (aún sin `intentoCobrar`). Si entre el PASO 4
-          // y aquí se movió a otro precio, cobrar con el verificado dejaba al cliente cobrado sin acceso (la entrega ya no
-          // reconoce ese precio por su llave) o, si se archivó, un rechazo de Stripe clasificado como «pudo cobrarse». Se
-          // responde 409 sin cobrar: el catch de abajo suelta el lease y libera el lugar como cualquier rechazo previo al
-          // cobro. Si coincide, se cobra con el priceId del PASO 4 (el que se comparó contra el monto consentido).
-          const vigente = await resolverPrecioDelPlan(tierCode, input.interval)
-          if (vigente.priceId !== precioVerificado.priceId) {
-            // 🚨 a propósito: alguien movió la llave del plan en Stripe a media alta.
-            logger.error('🚨 activate-plan: la llave del plan apunta a otro precio al momento de cobrar — NO se cobra', {
+          // 🔴 Codex B0 #1/#2: el precio se vuelve a leer JUSTO antes de cobrar (aún sin `intentoCobrar`). Si entre el PASO 4
+          // y aquí cambió, cobrar con el verificado dejaba al cliente cobrado sin acceso (la entrega ya no reconoce ese
+          // precio por su llave) o, si se archivó, un rechazo de Stripe clasificado como «pudo cobrarse». Se responde 409
+          // sin cobrar: el catch de abajo suelta el lease y libera el lugar como cualquier rechazo previo al cobro. Si
+          // coincide, se cobra con el priceId del PASO 4 (el que se comparó contra el monto consentido).
+          // Planes editables B1: se relee la MISMA fuente que dio el precio verificado. `VERSION` → el puntero (sólo la
+          // base, sin Stripe: otra versión publicada en medio es otro priceId); `LLAVE` → la llave, como B0. `LUGAR` y
+          // `SUSCRIPCION` no se releen: es el precio que ese lugar ya consintió y Avoqado no archiva precios (§15). Un precio
+          // de la versión que el PASO 7 guardó en el lugar ya es `LUGAR` (`origenDeLaRelectura`).
+          const vigente =
+            origenDeLaRelectura === 'VERSION'
+              ? { priceId: await priceIdVigente(input.tier, input.interval), unitAmount: null }
+              : origenDeLaRelectura === 'LLAVE'
+                ? await resolverPrecioPorLlave(tierCode, input.interval)
+                : null
+          if (vigente && vigente.priceId !== precioVerificado.priceId) {
+            // 🚨 a propósito: el precio del plan cambió a media alta.
+            logger.error('🚨 activate-plan: la versión vigente cambió al momento de cobrar — NO se cobra', {
               organizationId,
-              lookupKey: planLookupKey(tierCode, input.interval),
+              origen: origenDeLaRelectura,
+              ...(origenDeLaRelectura === 'LLAVE' ? { lookupKey: planLookupKey(tierCode, input.interval) } : {}),
               verificado: precioVerificado.priceId,
               vigente: vigente.priceId,
             })

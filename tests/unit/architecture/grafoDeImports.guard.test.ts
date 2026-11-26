@@ -102,3 +102,23 @@ describe('cierre r1: sin ciclo entre los servicios de turnos', () => {
     ).toBeNull()
   })
 })
+
+describe('planes editables (B1, Task 8): el nombre en Stripe no conoce al publicador', () => {
+  const PUBLICADOR = join(RAIZ, 'src/services/billing/planOfferPublisher.ts')
+  const ESCRITOR = join(RAIZ, 'src/services/billing/nombreDelPlanEnStripe.ts')
+
+  it.each(['src/jobs/plan-offer-rename.job.ts', 'src/services/billing/nombreDelPlanEnStripe.ts'])(
+    '🔴 %s no alcanza planOfferPublisher (el publicador importa al job, nunca al revés)',
+    archivo => {
+      expect(caminoHasta(join(RAIZ, archivo), PUBLICADOR)).toBeNull()
+    },
+  )
+
+  it('🔴 stripe.service no carga al escritor del nombre con un import estático (el escritor importa stripe.service)', () => {
+    expect(caminoHasta(join(RAIZ, 'src/services/stripe.service.ts'), ESCRITOR)).toBeNull()
+  })
+
+  it('control: el publicador sí alcanza al escritor del nombre (por el job)', () => {
+    expect(caminoHasta(PUBLICADOR, ESCRITOR)).not.toBeNull()
+  })
+})

@@ -44,6 +44,8 @@ const NUNCA_TOCAN_UN_DEMO: Record<string, string> = {
   'marketing-campaign.job.ts': 'campañas de Avoqado; cada envío revisa el negocio de su fila y el dominio demo (capa 2)',
   'online-order-acceptance-expiry.job.ts': 'pedidos en línea; LIVE_DEMO no recibe pedidos (resolveOperationalVenueBySlug)',
   'plan-access-reconciliation.job.ts': 'planes de Stripe; el demo no puede contratar (capa 1)',
+  'plan-offer-rename.job.ts':
+    'no manda nada ni lee negocios: renombra los dos productos de Stripe de los planes de Avoqado (llega a stripe.service, que importa el correo)',
   'plan-renewal-reminder.job.ts': 'planes de Stripe; el demo no puede contratar (capa 1)',
   'plan-winback.job.ts': 'planes de Stripe; el demo no puede contratar (capa 1)',
   'platform-charge-digest.job.ts':

@@ -183,6 +183,7 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   get_device_performance: 'read',
   get_document_request: 'read',
   get_hybrid_campaign: 'read',
+  get_plan_offer: 'read',
   get_inventory_movements: 'read',
   get_launch_campaign: 'read',
   get_recipe: 'read',
@@ -330,6 +331,7 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   promotion_sales: 'read',
   promotion_status: 'read',
   publish_hybrid_campaign: 'write',
+  publish_plan_offer: 'write',
   purchase_order_detail: 'read',
   quarantine_batch: 'write',
   quote_hybrid_purchase: 'write',
@@ -366,6 +368,7 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   reservations: 'read',
   reset_customer_display_design: 'write',
   resolve_inter_venue_transfer_variance: 'write',
+  resolve_pending_plan_offer: 'write',
   respond_to_review: 'write',
   resume_hybrid_purchase: 'write',
   revenue_by_venue: 'read',
@@ -659,6 +662,8 @@ export function configureToolCatalog(server: McpServer, scope: McpScope, profile
             'expectedSerialNumber',
             // …y al ESTADO que se VIO (negocio, serie, tipo, marca y el ajuste, R2-2): si cambió cualquiera, 409.
             'expectedTerminalState',
+            // Publicar una campaña (`set_launch_campaign_status`): con el precio de lista que se VIO, en pesos; si cambió, 409.
+            'expectedListPrice',
           ]) {
             // `null` es un valor que se VIO (sin cartilla): esos campos se atan por presencia. Los demás siguen con `!= null`, para
             // no atar un `null` que el esquema de otra herramienta no acepta.

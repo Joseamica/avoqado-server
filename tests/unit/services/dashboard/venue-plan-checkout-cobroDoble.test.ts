@@ -26,6 +26,8 @@ jest.mock('@/utils/prismaClient', () => ({
         .mockResolvedValue({ id: 'venue-1', name: 'Cafe', slug: 'cafe', stripeCustomerId: 'cus_1', organizationId: 'org-1' }),
     },
     venueFeature: { findMany: (...a: unknown[]) => mockFilasDelPlan(...a) },
+    // Planes editables (B1, Task 8): sin versiones de la oferta, la puerta del nombre no lee Stripe ni frena.
+    planOfferPointer: { findUnique: jest.fn().mockResolvedValue(null) },
   },
 }))
 const mockFilasDelPlan = jest.fn()

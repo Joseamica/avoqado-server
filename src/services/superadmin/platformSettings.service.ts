@@ -11,8 +11,10 @@
  * @module services/superadmin/platformSettings
  */
 
+import { z } from 'zod'
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
+import { BadRequestError } from '@/errors/AppError'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { Prisma } from '@prisma/client'
 
@@ -108,4 +110,75 @@ export async function updatePlatformSettings(input: UpdatePlatformSettingsInput,
   }
 
   return updated
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Planes editables B1 (Task 9): los destinatarios de los avisos internos del alta. Viven aquí, nunca en el código, y se escriben
+// con su propia función: `updatePlatformSettings` (la API vieja de /dashboard/superadmin/platform-settings) no los toca.
+// ---------------------------------------------------------------------------------------------------------------------
+
+export const MAXIMO_DE_DESTINATARIOS = 10
+const correoValido = z.string().email()
+
+/** Los destinatarios guardados. Sin renglón, `[]` (y no se crea nada: es una lectura). */
+export async function getDestinatariosDelAlta(): Promise<string[]> {
+  const fila = await prisma.platformSettings.findUnique({ where: { id: SINGLETON_ID }, select: { avisosDelAltaCorreos: true } })
+  return fila?.avisosDelAltaCorreos ?? []
+}
+
+/**
+ * Recortados, en minúsculas y sin repetidos (en el orden en que llegaron); hasta 10 y cada uno un correo válido. Si algo no cuadra,
+ * 400 `PLAN_OFFER_INVALID` con `details.issues` (la ruta del campo y el motivo, sin repetir el correo: el mensaje llega al log).
+ */
+export function normalizarDestinatarios(correos: string[]): string[] {
+  const issues: { path: string; message: string }[] = []
+  // Un `Set` conserva el orden de llegada y no recorre la lista por cada correo.
+  const vistos = new Set<string>()
+  correos.forEach((crudo, i) => {
+    const correo = crudo.trim().toLowerCase()
+    if (!correoValido.safeParse(correo).success) issues.push({ path: `correos.${i}`, message: 'No es un correo válido.' })
+    else vistos.add(correo)
+  })
+  const lista = [...vistos]
+  if (lista.length > MAXIMO_DE_DESTINATARIOS)
+    issues.push({ path: 'correos', message: `Caben hasta ${MAXIMO_DE_DESTINATARIOS} destinatarios (sin contar los repetidos).` })
+  if (issues.length)
+    throw new BadRequestError('Revisa los destinatarios de los avisos antes de guardarlos.', 'PLAN_OFFER_INVALID', { issues })
+  return lista
+}
+
+/**
+ * El candado de los destinatarios: dos guardados a la vez se forman, así el «antes» de la bitácora es el de verdad. 🔴 No tiene que ver
+ * con los candados de precios, de la oferta ni del nombre (`precio:*`, `plan-offer-publish`, `plan-offer-nombre`): se toma solo, en
+ * su propia transacción, y nunca junto a ellos.
+ */
+export const CANDADO_DE_LOS_DESTINATARIOS = 'platform-settings-recipients'
+
+/** Guarda la lista (normalizada) y, si cambió, deja `PLATFORM_SETTINGS_UPDATED` con el antes y el después. Devuelve lo guardado. */
+export async function setDestinatariosDelAlta(correos: string[], staffId: string): Promise<string[]> {
+  const nuevos = normalizarDestinatarios(correos)
+  // Leer el «antes» y escribir, bajo el candado y en la misma transacción.
+  const antes = await prisma.$transaction(async tx => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${CANDADO_DE_LOS_DESTINATARIOS}))`
+    const fila = await tx.platformSettings.findUnique({ where: { id: SINGLETON_ID }, select: { avisosDelAltaCorreos: true } })
+    await tx.platformSettings.upsert({
+      where: { id: SINGLETON_ID },
+      create: { id: SINGLETON_ID, avisosDelAltaCorreos: nuevos, updatedById: staffId },
+      update: { avisosDelAltaCorreos: nuevos, updatedById: staffId },
+    })
+    return fila?.avisosDelAltaCorreos ?? []
+  })
+  const cambio = antes.length !== nuevos.length || antes.some((correo, i) => correo !== nuevos[i])
+  if (cambio) {
+    // Después del commit y sin esperarlo: la bitácora nunca deshace ni frena el guardado.
+    void logAction({
+      staffId,
+      action: 'PLATFORM_SETTINGS_UPDATED',
+      entity: 'PlatformSettings',
+      entityId: SINGLETON_ID,
+      data: { avisosDelAltaCorreos: { from: antes, to: nuevos } } as Prisma.InputJsonValue,
+    })
+  }
+  logger.info('[PlatformSettings] destinatarios de los avisos del alta guardados', { cuantos: nuevos.length, por: staffId })
+  return nuevos
 }

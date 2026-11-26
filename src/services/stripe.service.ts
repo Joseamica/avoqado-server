@@ -167,6 +167,9 @@ export async function getOrCreateStripeCustomer(
  */
 const funcionesPorSincronizar = () => ({ active: true, code: { notIn: [...CODIGOS_DE_PILOTO] } })
 
+/** Las funciones que SON un plan: su nombre en Stripe lo escribe `escribirNombreDelPlan` (planes editables, B1). */
+const TIER_DEL_PLAN: Record<string, 'PRO' | 'PREMIUM' | undefined> = { PLAN_PRO: 'PRO', PLAN_PREMIUM: 'PREMIUM' }
+
 /**
  * Sync features to Stripe products and prices
  * Creates or updates Stripe products/prices for each feature
@@ -184,6 +187,7 @@ export async function syncFeaturesToStripe(): Promise<Feature[]> {
     try {
       let productId = feature.stripeProductId
       let priceId = feature.stripePriceId
+      const tierDelPlan = TIER_DEL_PLAN[feature.code]
 
       // Create or update Stripe product (with retry)
       if (!productId) {
@@ -205,6 +209,24 @@ export async function syncFeaturesToStripe(): Promise<Feature[]> {
         )
         productId = product.id
         logger.info(`  ✅ Created Stripe product ${productId} for feature ${feature.code}`)
+      } else if (tierDelPlan) {
+        // 🔴 Planes editables (B1): el nombre del producto de Pro y Premium. Sin versión del editor (o si no se pudo leer la vigente)
+        // es el `products.update` de B0, tal cual: nombre y descripción del catálogo, el mismo `retry` y sin opciones de petición;
+        // después, una revisión bajo `plan-offer-nombre` escribe el nombre de la vigente si en medio se publicó uno. Con una vigente
+        // dueña del nombre, se escribe el suyo bajo ese candado (así esta sincronización no deshace un renombre publicado). Si Stripe
+        // rechaza el update, el error llega al `catch` de abajo como en B0 (se salta el precio de este plan). Import perezoso: el
+        // escritor importa este módulo.
+        const { escribirNombreDelPlan } = await import('./billing/nombreDelPlanEnStripe')
+        const estado = await escribirNombreDelPlan(tierDelPlan, 'SYNC', {
+          nombre: feature.name,
+          descripcion: feature.description,
+          productId,
+        })
+        if (estado === 'FALLO')
+          logger.warn(
+            `  ⚠️ Stripe product ${productId} for feature ${feature.code}: name NOT written (the plan offer owns it; the rename job writes it)`,
+          )
+        else logger.info(`  ✅ Updated Stripe product ${productId} for feature ${feature.code}`)
       } else {
         await retry(
           () =>
