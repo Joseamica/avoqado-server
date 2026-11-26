@@ -332,7 +332,7 @@
       ]
     },
     "dashboard/clientes/campanas-de-correo": {
-      "sha256": "2b82c79da3ee54d19ee17ac18ac6174c64185bb580e12965ebec6092a018db6c",
+      "sha256": "dde42e6cd60bf607334dbde7abf0cc10c61bdd19893eea5788b96d9fa51f8244",
       "requiredPermissions": [
         "marketing:manage"
       ],
