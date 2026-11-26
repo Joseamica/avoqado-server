@@ -99,9 +99,27 @@
     }
   ],
   "aparato": {
-    "estado": "NO PROBADO EN APARATO",
-    "fotos": [],
-    "filasCreadas": []
+    "estado": "PROBADO",
+    "aparato": "SAMSUNG del laboratorio del Alien (serial R8YL200592L)",
+    "version": "2.25.58-dev (develop 6afdcc28), copia de QA com.avoqado.pos.d36 compilada en la nube (avq-verify), contra un SERVIDOR aislado (develop 3b779d664, base av-db-25-d36) en :3004",
+    "apkSha256": "f4d8048d40f9014f141dc037c60f83afbcc5690bbdc02ec7ee949f12302adca5",
+    "fecha": "2026-11-25",
+    "fotos": [
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/android/and-03-vender-tarjeta-form.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/android/and-05-tarjeta2.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/android/and-06-correo.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/android/and-07-tarjeta3.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/android/and-08-quitada.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/android/and-09-listo-para-cobrar.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/android/and-10-cobrar.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/android/and-11-pago.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/android/and-13-tras-pago.png"
+    ],
+    "filasCreadas": [
+      "Order ORD-0000000000013 (Avoqado Full) — venta de 2 tarjetas ($500 «Entregar al comprador» + $1,000 por correo a un @example.com), cobrada en efectivo $1,500.00",
+      "GiftCard •••• V0PF ($500, HANDED_TO_BUYER) y •••• S6Z6 ($1,000, EMAIL; Resend apagado: se queda «Enviando…»)"
+    ],
+    "nota": "25-nov (D36): Cobrar › Atajos › Tarjeta de regalo › Vender tarjeta. Tarjeta 1 $500 «Entregar al comprador»; Agregar otra tarjeta → «Tarjeta de regalo 2» con su monto, entrega y «Para (opcional)»; tarjeta 2 $1,000 por Correo → «Obligatorio con WhatsApp o correo» hasta llenar «De parte de»; Agregar otra tarjeta (3) y Quitar tarjeta la saca («Revisa…» ya no menciona la 3). Cobrar $1,500.00 abre la cuenta «Tarjetas de regalo» con otro «Cobrar $1,500.00» (se corrigió el paso 5 para decirlo); efectivo exacto → «Entregar tarjeta de regalo». No se probó: el tope de 20 tarjetas, «El total debe quedar debajo de…», ni sin red."
   },
   "codex": {
     "lote": 4,

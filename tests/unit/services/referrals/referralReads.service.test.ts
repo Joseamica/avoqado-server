@@ -7,6 +7,7 @@ jest.mock('@/utils/prismaClient', () => ({
     referral: { findMany: jest.fn(), count: jest.fn() },
     customer: { findFirst: jest.fn(), findMany: jest.fn() },
     discount: { count: jest.fn() },
+    referralRewardGrant: { count: jest.fn() },
     // getReferralSummary lee la zona del negocio (D19); sin fila cae a America/Mexico_City.
     venue: { findUnique: jest.fn() },
   },
@@ -161,9 +162,11 @@ describe('referralReads.service', () => {
     it('returns this-month, prev-month, conversion, qualified, pending, coupons, top referrer', async () => {
       mockedPrisma.referral.count.mockResolvedValue(0)
       mockedPrisma.discount.count.mockResolvedValue(0)
+      mockedPrisma.referralRewardGrant.count.mockResolvedValue(0)
       mockedPrisma.customer.findFirst.mockResolvedValue(null)
       const result = await getReferralSummary('v1')
       expect(result).toMatchObject({
+        rewardsIssuedThisMonth: 0,
         referralsThisMonth: 0,
         referralsPrevMonth: 0,
         qualifiedThisMonth: 0,
@@ -182,6 +185,7 @@ describe('referralReads.service', () => {
         .mockResolvedValueOnce(8) // qualifiedThisMonth
         .mockResolvedValueOnce(2) // pendingThisMonth
       mockedPrisma.discount.count.mockResolvedValue(3)
+      mockedPrisma.referralRewardGrant.count.mockResolvedValue(5)
       mockedPrisma.customer.findFirst.mockResolvedValue({
         id: 'c1',
         firstName: 'Jose',
@@ -192,6 +196,12 @@ describe('referralReads.service', () => {
       const result = await getReferralSummary('v1')
       expect(result.conversionRate).toBe(0.8)
       expect(result.couponsEmittedThisMonth).toBe(3)
+      // D32: «Premios emitidos» cuenta TODOS los premios de nivel del mes (cupón, descuento permanente y producto gratis),
+      // en un campo propio; `couponsEmittedThisMonth` conserva su significado para quien ya lo lee (MCP, apps viejas).
+      expect(result.rewardsIssuedThisMonth).toBe(5)
+      expect(mockedPrisma.referralRewardGrant.count).toHaveBeenCalledWith({
+        where: { venueId: 'v1', createdAt: { gte: expect.any(Date) } },
+      })
       expect(result.topReferrer?.referralCount).toBe(7)
     })
   })

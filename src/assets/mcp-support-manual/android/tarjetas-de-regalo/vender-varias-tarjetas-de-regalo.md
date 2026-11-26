@@ -10,6 +10,7 @@ money: true
 versionMin: 2.25.22
 sourceRepo: avoqado-android
 sourceRef: 78e5372f37ed7791d86fc1fe621d4a073e5a09ff
+deviceTested: 2026-11-25
 keywords:
   - vender varias tarjetas de regalo
   - agregar otra tarjeta
@@ -28,7 +29,7 @@ Es la misma pantalla de *Vender tarjeta* (en *Cobrar* › *Atajos* › *Tarjeta 
 2. Toca *Agregar otra tarjeta*: sale *Tarjeta de regalo 2*, con su propio monto, su entrega y *Para (opcional)*.
 3. Para sacar una de la venta, toca *Quitar tarjeta* debajo de ella.
 4. Si alguna va por WhatsApp o correo, llena *De parte de*.
-5. Toca *Cobrar …* arriba (dice el total de todas) y cobra esa cuenta.
+5. Toca *Cobrar …* arriba (dice el total de todas): se abre la cuenta de las tarjetas. Toca otra vez *Cobrar …* y cóbrala como siempre.
 
 ## Problemas frecuentes
 

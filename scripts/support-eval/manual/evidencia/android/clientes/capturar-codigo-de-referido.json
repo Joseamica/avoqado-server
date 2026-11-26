@@ -70,9 +70,26 @@
     }
   ],
   "aparato": {
-    "estado": "NO PROBADO EN APARATO",
-    "fotos": [],
-    "filasCreadas": []
+    "estado": "PROBADO",
+    "aparato": "SAMSUNG del laboratorio del Alien (serial R8YL200592L)",
+    "version": "2.25.58-dev (develop 6afdcc28), copia de QA com.avoqado.pos.d36 compilada en la nube (avq-verify), contra el SERVIDOR aislado (develop 6409b3562 con #633, base av-db-25-d36) en :3004",
+    "apkSha256": "f4d8048d40f9014f141dc037c60f83afbcc5690bbdc02ec7ee949f12302adca5",
+    "fecha": "2026-11-25",
+    "fotos": [
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/android/and-50-referido-sin-cliente.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/android/and-51-agregar-cliente.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/android/and-52-crear-cliente.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/android/and-53-cliente-elegido.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/android/and-54-codigo-no-encontrado.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/android/and-55-referido-aplicado.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/android/and-56-referido-quitado.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/android/and-58-referido-cobrado.png"
+    ],
+    "filasCreadas": [
+      "Customer QA-D36 Referida (5500036036) creado desde el POS",
+      "Referral PENDING: referidor un cliente de la semilla (A) (AVOQADOF-ERNED9P), orden de $27.00 en efectivo (10 %)"
+    ],
+    "nota": "25-nov (D36): Sin cliente: «Selecciona un cliente primero para usar un código de referido.». Agregar cliente › Crear → cliente nuevo. NOEXISTE123 → «Código no encontrado» e «Intentar otro código». Código real → «Referido por un cliente de la semilla (A)» y «Se aplicó 10% descuento» (Cobrar $27.00); Quitar lo quita ($30.00); de nuevo y cobro en efectivo. No se probó: «Cliente recurrente» y «No puedes referirte a ti mismo» (sí en la TPV), sin red."
   },
   "codex": {
     "lote": 4,

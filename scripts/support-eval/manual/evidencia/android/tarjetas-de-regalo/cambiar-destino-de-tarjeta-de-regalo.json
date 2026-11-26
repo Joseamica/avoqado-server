@@ -81,9 +81,23 @@
     }
   ],
   "aparato": {
-    "estado": "NO PROBADO EN APARATO",
-    "fotos": [],
-    "filasCreadas": []
+    "estado": "PROBADO",
+    "aparato": "SAMSUNG del laboratorio del Alien (serial R8YL200592L)",
+    "version": "2.25.58-dev (develop 6afdcc28), copia de QA com.avoqado.pos.d36 compilada en la nube (avq-verify), contra un SERVIDOR aislado (develop 3b779d664, base av-db-25-d36) en :3004",
+    "apkSha256": "f4d8048d40f9014f141dc037c60f83afbcc5690bbdc02ec7ee949f12302adca5",
+    "fecha": "2026-11-25",
+    "fotos": [
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/android/and-13-tras-pago.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/android/and-14-entregar.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/android/and-15-cambiar-destino.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/android/and-22-correo-elegido.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/android/and-23-destino-actualizado.png"
+    ],
+    "filasCreadas": [
+      "Order ORD-0000000000013 (Avoqado Full) — venta de 2 tarjetas ($500 «Entregar al comprador» + $1,000 por correo a un @example.com), cobrada en efectivo $1,500.00",
+      "GiftCard cmwwqmojl001cwaonuufkhq8x: •••• V0PF repuesta como •••• 1N8S con destino correo (POST …/gift-cards/:id/change-destination 200)"
+    ],
+    "nota": "25-nov (D36): tras cobrar, «Entregar tarjeta de regalo» abre la pantalla de la venta (se corrigió «Antes de empezar»: no se abre sola). En «•••• V0PF», Cambiar destino → WhatsApp con «123» → «Escribe el celular a 10 dígitos, con o sin +52» y el botón pasa a «Reintentar». Tocar la PALABRA «Correo» no cambia la opción: hay que tocar su círculo (se agregó al paso 2). Correo → qa-d36-destino@example.com → Reintentar: el SERVIDOR contestó 200, la tarjeta quedó repuesta como «•••• 1N8S» con q•••@example.com. El aviso «Destino actualizado» no salió en la foto: la pantalla mostró «Sin conexión: las tarjetas de regalo necesitan internet», una falla pasajera del puente del Alien (IOException), que se quita con la siguiente respuesta. No se probó: entrar por Más › Pedidos, «Para corregir el destino…», ni sin red."
   },
   "codex": {
     "lote": 4,

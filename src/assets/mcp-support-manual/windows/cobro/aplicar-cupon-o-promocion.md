@@ -11,6 +11,7 @@ money: true
 versionMin: 2.25.46
 sourceRepo: avoqado-android
 sourceRef: 78e5372f37ed7791d86fc1fe621d4a073e5a09ff
+deviceTested: 2026-11-25
 keywords:
   - aplicar cupón
   - código de cupón
@@ -30,7 +31,7 @@ Es en *Cobrar*, con productos en el carrito. Los cupones y los descuentos se cre
 
 1. Para un cupón, en la pestaña *Atajos* toca *Cupones*.
 2. Escribe el *Código de cupón* y toca *Validar cupón*.
-3. Si es válido, sale el nombre del cupón, su valor y el «Ahorro estimado». Toca *Aplicar cupón* y cobra como siempre.
+3. Si es válido, sale el nombre del cupón y su valor (y el «Ahorro estimado» cuando se puede calcular). Toca *Aplicar cupón* y cobra como siempre.
 4. Para una promoción, abre la pestaña *Promociones* (o el panel de promociones a un lado) y toca la promoción.
 5. Elige una opción de cada grupo y toca *Agregar al carrito · …*: la promoción entra al carrito con su precio.
 
