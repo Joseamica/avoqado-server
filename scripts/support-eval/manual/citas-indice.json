@@ -8369,6 +8369,10 @@
       {
         "pagina": "dashboard/reembolsos/reembolsar-un-pago",
         "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
+      },
+      {
+        "pagina": "dashboard/tarjetas-de-regalo/cancelar-venta-de-tarjetas-de-regalo",
+        "sourceRef": "501e37072a13f5ed8f22e3d650f2598d3d8820b6"
       }
     ],
     "avoqado-web-dashboard:src/locales/es/paymentLinks.json": [
@@ -9075,6 +9079,10 @@
       {
         "pagina": "dashboard/reembolsos/reembolsar-un-pago",
         "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
+      },
+      {
+        "pagina": "dashboard/tarjetas-de-regalo/cancelar-venta-de-tarjetas-de-regalo",
+        "sourceRef": "501e37072a13f5ed8f22e3d650f2598d3d8820b6"
       }
     ],
     "avoqado-web-dashboard:src/pages/Payment/PaymentDrawerContent.tsx": [
@@ -9085,6 +9093,10 @@
       {
         "pagina": "dashboard/reembolsos/reembolsar-un-pago",
         "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
+      },
+      {
+        "pagina": "dashboard/tarjetas-de-regalo/cancelar-venta-de-tarjetas-de-regalo",
+        "sourceRef": "501e37072a13f5ed8f22e3d650f2598d3d8820b6"
       }
     ],
     "avoqado-web-dashboard:src/pages/Payment/Payments.tsx": [

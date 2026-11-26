@@ -99,9 +99,25 @@
     }
   ],
   "aparato": {
-    "estado": "NO PROBADO EN APARATO",
-    "fotos": [],
-    "filasCreadas": []
+    "estado": "PROBADO",
+    "aparato": "POS de WINDOWS en el escritorio del Alien (Windows 11, 1920×1080), manejado por un agente de PowerShell",
+    "version": "2.25.58-escritorio (develop 6afdcc28), paquete de prueba avoqado-pos-windows-prueba.zip armado en el WSL del Alien (:pos:empaquetarWindows, JDK 17 + JRE 17 de Windows), contra el SERVIDOR aislado (develop 6409b3562 con #633, base av-db-25-d36) en :3004",
+    "apkSha256": "83dcd07e6406a063fe367e4ea55be47ff33b040c9cd68621583f2a60c38b2193",
+    "fecha": "2026-11-25",
+    "fotos": [
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/windows/w-11.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/windows/w-12-whatsapp-validacion.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/windows/w-14.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/windows/w-17.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/windows/w-18.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/windows/w-19.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/windows/w-20.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/windows/w-21.png"
+    ],
+    "filasCreadas": [
+      "Orden ORD-0000000000025 de $1,500.00 en efectivo con 2 tarjetas (K28Q $500 y 55W1 $1,000, entregadas al comprador)"
+    ],
+    "nota": "25-nov (D36): Atajos › Tarjeta de regalo › Vender tarjeta. Con WhatsApp sin dato: «Escribe el celular a 10 dígitos, con o sin +52» y «Obligatorio con WhatsApp o correo». Agregar otra tarjeta → «Tarjeta de regalo 2»; con 3, Quitar tarjeta sacó una. Cobrar $1,500.00 abre la cuenta «Tarjetas de regalo» con otro «Cobrar $1,500.00» (se corrigió el paso 5 como en ANDROID) → efectivo $1500 → «Entregar tarjeta de regalo». No se probó: tope de 20, tope por compra, sin red."
   },
   "codex": {
     "lote": 4,

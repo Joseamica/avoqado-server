@@ -108,9 +108,22 @@
     }
   ],
   "aparato": {
-    "estado": "NO PROBADO EN APARATO",
-    "fotos": [],
-    "filasCreadas": []
+    "estado": "PROBADO",
+    "aparato": "POS de WINDOWS en el escritorio del Alien (Windows 11, 1920×1080), manejado por un agente de PowerShell",
+    "version": "2.25.58-escritorio (develop 6afdcc28), paquete de prueba avoqado-pos-windows-prueba.zip armado en el WSL del Alien (:pos:empaquetarWindows, JDK 17 + JRE 17 de Windows), contra el SERVIDOR aislado (develop 6409b3562 con #633, base av-db-25-d36) en :3004",
+    "apkSha256": "83dcd07e6406a063fe367e4ea55be47ff33b040c9cd68621583f2a60c38b2193",
+    "fecha": "2026-11-25",
+    "fotos": [
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/windows/w-63.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/windows/w-64.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/windows/w-65.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/windows/w-66.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/windows/w-68.png"
+    ],
+    "filasCreadas": [
+      "Orden ORD-0000000000027 de $153.00 en efectivo: cupón WPHC55P7 (10 %) + OrderPromotion «Paquete QA dividir»"
+    ],
+    "nota": "25-nov (D36): Atajos › Cupones → WPHC55P7 → Validar cupón → «FULLTEST-D38 9DSKI» y «10%», sin «Ahorro estimado» (igual que en ANDROID; se corrigió el paso 3) → Aplicar cupón. Promociones → «Paquete QA dividir» → Tamaño «Requerido 0/1» y «Falta elegir…» → Chico → «Agregar al carrito · $150.00» → cobro en efectivo. No se probó sin red."
   },
   "codex": {
     "lote": 4,

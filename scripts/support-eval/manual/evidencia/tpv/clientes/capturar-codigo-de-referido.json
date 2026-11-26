@@ -70,9 +70,24 @@
   ],
   "rutas": [],
   "aparato": {
-    "estado": "NO PROBADO EN APARATO",
-    "fotos": [],
-    "filasCreadas": []
+    "estado": "PROBADO",
+    "aparato": "PAX del laboratorio del Alien (serial 2841548417), puede-cobrar en 0; sólo efectivo",
+    "version": "2.22.3-sandbox (main d082376e), copia de QA com.jaac.avoqado_tpv.sandbox.d36 compilada en la nube (assembleSandboxDebug), contra el SERVIDOR aislado (develop 6409b3562 con #633, base av-db-25-d36) en :3004",
+    "apkSha256": "9038c41cc8dd5180677d80736cf1b24870af21460388a2ea4d310d6fd7266f3d",
+    "fecha": "2026-11-25",
+    "fotos": [
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/tpv/tpv-30-carrito.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/tpv/tpv-31-agregar-cliente.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/tpv/tpv-32-recurrente.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/tpv/tpv-34-a-si-mismo.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/tpv/tpv-35-referido-ok.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/tpv/tpv-37-confirmar.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/tpv/tpv-38-pagado.png"
+    ],
+    "filasCreadas": [
+      "Referral PENDING: un cliente nuevo de la semilla (E) referido por un cliente de la semilla (B) (AVOQADOF-THER4CY), orden de $18.00 en efectivo"
+    ],
+    "nota": "25-nov (D36): Cobrar con Agua Mineral → la barra «Cobrar $20.00» abre el carrito (se aclaró en el paso 1) → sin cliente: «Selecciona un cliente primero…». Agregar cliente sólo busca (no crea: «Sin resultados para…»). Con QA-D36 Referida (ya compró) → «Cliente recurrente», «Necesitas a un manager para forzar la atribución», «Forzar atribución» y «Requiere autorización de un manager.». Con (E) y su propio código → «No puedes referirte a ti mismo». Con el de Theron → «Referido por un cliente de la semilla (B)» y «Se aplicó 10% descuento» → Quitar → otra vez → Cobrar $18.00 → Calificación (Saltar) → Sin propina → Efectivo → «Confirmar pago en efectivo» → pagada. No se probó: «Programa inactivo», sin red («Necesita internet»)."
   },
   "codex": {
     "lote": 4,

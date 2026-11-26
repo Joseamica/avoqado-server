@@ -78,36 +78,60 @@
     },
     {
       "paso": 4,
+      "archivo": "src/locales/es/sidebar.json",
+      "linea": 49,
+      "cita": "\"transactions\": \"Transacciones\","
+    },
+    {
+      "paso": 4,
+      "archivo": "src/pages/Payment/PaymentDrawerContent.tsx",
+      "linea": 295,
+      "cita": "{t('detail.actions.issueRefund', { defaultValue: 'Emitir reembolso' })}"
+    },
+    {
+      "paso": 4,
+      "archivo": "src/pages/Payment/IssueRefundSheet.tsx",
+      "linea": 262,
+      "cita": "{ value: 'CANCELLED_ORDER', label: t('refund.reasons.CANCELLED_ORDER', { defaultValue: 'Pedido cancelado' }) },"
+    },
+    {
+      "paso": 4,
+      "archivo": "src/locales/es/payment.json",
+      "linea": 810,
+      "cita": "\"confirm\": \"Reembolsar\","
+    },
+    {
+      "paso": 5,
       "archivo": "src/locales/es/giftCards.json",
       "linea": 244,
       "cita": "\"step3\": \"Al registrar la devolución, las tarjetas se cancelan solas.\","
     },
     {
-      "paso": 4,
+      "paso": 5,
       "archivo": "src/locales/es/giftCards.json",
       "linea": 248,
       "cita": "\"inProgressAll\": \"Cancelación en curso: las tarjetas de la venta están bloqueadas. Devuelve el dinero desde la venta.\","
     },
     {
-      "paso": 5,
+      "paso": 6,
       "archivo": "src/pages/GiftCards/components/GiftCardManagerActions.tsx",
       "linea": 684,
       "cita": "{t('actions.cancelSale.release')}"
     },
     {
-      "paso": 5,
+      "paso": 6,
       "archivo": "src/locales/es/giftCards.json",
       "linea": 250,
       "cita": "\"release\": \"Ya no cancelar\","
     },
     {
-      "paso": 5,
+      "paso": 6,
       "archivo": "src/locales/es/giftCards.json",
       "linea": 253,
       "cita": "\"releaseCheck\": \"Comprobé que la devolución NO se hizo (la terminal la rechazó o no se intentó). Si no lo sabes, deja la tarjeta bloqueada.\","
     },
     {
-      "paso": 5,
+      "paso": 6,
       "archivo": "src/locales/es/giftCards.json",
       "linea": 255,
       "cita": "\"released\": \"Listo: las tarjetas se pueden usar otra vez.\","
@@ -145,9 +169,27 @@
     "filasCreadas": []
   },
   "navegador": {
-    "estado": "NO PROBADO EN NAVEGADOR",
-    "fotos": [],
-    "filasCreadas": []
+    "estado": "PROBADO",
+    "herramienta": "playwright",
+    "servidor": "DASHBOARD develop 1a878e36 (vite en :5903) + SERVIDOR aislado (develop 6409b3562 con #633, base av-db-25-d36) en :3004",
+    "fecha": "2026-11-25",
+    "fotos": [
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/dashboard/d-10-cancelar-aviso.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/dashboard/d-11-bloqueadas.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/dashboard/d-13-ya-no-cancelar.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/dashboard/d-14-liberadas.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/dashboard/d-15-venta.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/dashboard/d-21-menu-pago.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/dashboard/d-22-emitir-reembolso.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/dashboard/d-23-reembolso-paso2.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/dashboard/d-25-motivo-elegido.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/dashboard/d-26-reembolsado.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/dashboard/d-28-cancelada.png"
+    ],
+    "filasCreadas": [
+      "ORD-0000000000014 ($100 en efectivo): bloqueada, liberada con «Ya no cancelar», bloqueada otra vez y devuelta desde Ventas › Transacciones (Payment REFUND −$100) → tarjeta DEACTIVATED"
+    ],
+    "nota": "25-nov (D36): Acciones del gerente › Cancelar la venta → aviso con los 3 pasos → Bloquear y empezar → «Tarjetas bloqueadas. Ahora devuelve el dinero desde la venta.», «Cancelación en curso», «Ir a la venta» y «Ya no cancelar». Ya no cancelar → casilla «Comprobé que la devolución NO se hizo…» → «Listo: las tarjetas se pueden usar otra vez.». Otra vez Bloquear → Ir a la venta abre el pedido (Recibo n.° 000014) SIN botón de reembolso: el cobro en efectivo se devuelve en Ventas › Transacciones › el pago › ⋯ › Emitir reembolso → marcar «Tarjeta de regalo» → Reembolsar artículos → motivo → Reembolsar → «Reembolso emitido» (se corrigió el paso 3). La tarjeta quedó «Cancelada» sola. No se probaron: la terminal (tarjeta), los motivos de «apagado», «No supimos si se guardó»."
   },
   "codex": {
     "lote": 4,

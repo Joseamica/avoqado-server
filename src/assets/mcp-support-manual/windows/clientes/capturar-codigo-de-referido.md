@@ -11,6 +11,7 @@ money: true
 versionMin: 2.22.2
 sourceRepo: avoqado-android
 sourceRef: 78e5372f37ed7791d86fc1fe621d4a073e5a09ff
+deviceTested: 2026-11-25
 keywords:
   - código de referido
   - me recomendó alguien
