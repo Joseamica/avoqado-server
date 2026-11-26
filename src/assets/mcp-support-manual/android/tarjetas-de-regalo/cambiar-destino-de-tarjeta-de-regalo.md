@@ -26,7 +26,7 @@ Es en la pantalla *Tarjetas de regalo* de la venta (al terminar de cobrarla, toc
 ## Pasos
 
 1. En la tarjeta («•••• …»), toca *Cambiar destino*.
-2. Elige *WhatsApp* o *Correo* (toca el círculo de la opción).
+2. Elige *WhatsApp* o *Correo*. En versiones anteriores a la 2.25.59, toca el círculo de la opción: la palabra no responde.
 3. Escribe el celular a 10 dígitos o el correo de quien la recibe.
 4. Toca *Cambiar destino*: sale «Destino actualizado».
 

@@ -293,7 +293,7 @@
       "gateKind": "FEATURE"
     },
     "android/tarjetas-de-regalo/cambiar-destino-de-tarjeta-de-regalo": {
-      "sha256": "0625ca7ac0afaa2f28354fd3a07ae8fcf13cda94de33f11d58a336affc5287b2",
+      "sha256": "f4e5fb1c01968c36d66f64f3e724a1b1e005b1371e95c8e2fd15510531016226",
       "requiredPermissions": [
         "giftCards:read",
         "giftCards:manage"
