@@ -38,7 +38,7 @@ const TITLE_END: Record<HelpApp, RegExp> = {
 }
 const FAMILY_END = { PAX: / PAX$/, NEXGO: / Nexgo$/ }
 /** Páginas de dinero cuyo permiso trae otra rama (la de D42 las está editando): quien se lo ponga borra su renglón. */
-const PERMISO_EN_OTRA_RAMA = new Set(['android/lealtad/aplicar-premio-de-sellos', 'windows/lealtad/aplicar-premio-de-sellos'])
+const PERMISO_EN_OTRA_RAMA = new Set<string>([])
 const CHECKS = ['parses', 'deviceTested', 'browserTested', 'permissions', 'contact', 'sizes', 'titles', 'inventory'] as const
 type Problems = Record<(typeof CHECKS)[number], string[]>
 

@@ -4,7 +4,8 @@ description: Escanea en Cobrar la tarjeta digital del cliente; si tiene un premi
 product: android
 category: lealtad
 task: aplicar-premio-de-sellos
-requiredPermissions: []
+requiredPermissions:
+  - loyalty:read
 featureCode: LOYALTY_PROGRAM
 gateKind: FEATURE
 money: true
