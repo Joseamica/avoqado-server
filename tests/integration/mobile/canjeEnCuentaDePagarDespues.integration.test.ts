@@ -23,7 +23,9 @@ jest.mock('@/communication/sockets/managers/socketManager', () => {
 })
 jest.mock('@/communication/rabbitmq/publisher', () => ({ publishCommand: jest.fn() }))
 jest.mock('@/services/dashboard/activity-log.service', () => ({ logAction: jest.fn() }))
-jest.mock('@/services/wallet/notifyPassUpdated.service', () => ({ notifyCustomerPassUpdated: jest.fn().mockResolvedValue({ notified: 0 }) }))
+jest.mock('@/services/wallet/notifyPassUpdated.service', () => ({
+  notifyCustomerPassUpdated: jest.fn().mockResolvedValue({ notified: 0 }),
+}))
 
 const venueId = `itest-d39-${randomUUID()}`
 let staffId: string
