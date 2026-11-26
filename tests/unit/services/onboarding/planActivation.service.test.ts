@@ -3096,6 +3096,20 @@ describe('🔴 D2: el pedido de después del reto (PASO 6 con una suscripción i
     expect(mockEntregar).not.toHaveBeenCalled()
   })
 
+  it('🔴 Codex b2-code #2, la guarda de la salida: sin versión del editor la periodicidad no se compara — un reto ANUAL se reanuda aunque el reenvío pida mensual, como hoy', async () => {
+    enStripe({
+      sub_3ds: incompleta({ items: { data: [{ current_period_end: FIN_DEL_PERIODO, price: { recurring: { interval: 'year' } } }] } }),
+    })
+
+    await expect(activatePlan({ ...BASE, offer: OFERTA_LAUNCH })).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'PLAN_PAYMENT_REQUIRES_ACTION',
+      details: { clientSecret: 'pi_1_secret_x' },
+    })
+    expect(mockVoid).not.toHaveBeenCalled()
+    expect(mockSubCreate).not.toHaveBeenCalled()
+  })
+
   it('3. requires_confirmation (el navegador nunca confirmó) ⇒ igual que el anterior', async () => {
     elPagoEsta('requires_confirmation')
 

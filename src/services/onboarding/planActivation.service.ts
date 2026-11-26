@@ -51,7 +51,7 @@ import { resolverPrecioPorLlave } from '../billing/precioDelPlan'
 import { precioDeLaOferta, priceIdVigente, versionQueCobra, type OfertaVigente } from '../billing/planOffer'
 import { basicoDeLaBienvenida } from '../billing/avisosDelBasico'
 import { DIA_MS, ofertaCambio, planFueraDeVenta, revisarComprobante } from '../billing/opcionesDeCompra'
-import type { CotizacionFirmada } from '../billing/comprobanteDeCotizacion'
+import { verificarCotizacion, type CotizacionFirmada } from '../billing/comprobanteDeCotizacion'
 import {
   isLegacyIntroEligible,
   LEGACY_INTRO_OFFER,
@@ -999,6 +999,26 @@ function modalidadCobrada(sub: Stripe.Subscription): ModalidadCobrada {
 /** El lugar del cupo que apartó un intento, tal como lo dejó en la metadata de su suscripción. */
 type LugarDelIntento = { redemptionId: string; campaignId: string; offerVersion: string }
 
+/**
+ * Codex b2-code #2: el número de versión que nombra el comprobante de la petición, aunque ya no sea el de la vigente (el reenvío del
+ * navegador tras el reto manda el suyo). `null` sin comprobante, o si no es legible para esta organización (firma, alcance o
+ * vencimiento): nunca lanza. Sólo lo lee la recuperación de un reto con versión del editor.
+ */
+function versionQueNombraElComprobante(token: unknown, organizationId: string, ahora: Date): number | null {
+  if (token === undefined || token === null) return null
+  try {
+    return verificarCotizacion(token, `org:${organizationId}`, ahora).versionNumber
+  } catch {
+    return null
+  }
+}
+
+/** La periodicidad del precio de una suscripción del plan (`null` si no la trae). */
+function periodicidadDeLaSuscripcion(sub: Stripe.Subscription): 'monthly' | 'annual' | null {
+  const periodo = sub.items?.data?.[0]?.price?.recurring?.interval
+  return periodo === 'year' ? 'annual' : periodo === 'month' ? 'monthly' : null
+}
+
 /** Si falta cualquiera de los tres datos, `null`: no se libera nada que no se pueda nombrar completo. */
 function lugarDeLaMetadata(sub: Stripe.Subscription): LugarDelIntento | null {
   const { launchRedemptionId, launchCampaignId, launchOfferVersion } = sub.metadata ?? {}
@@ -1066,6 +1086,12 @@ async function anularIntento(sub: Stripe.Subscription): Promise<'DESCARTADA' | {
  * la oferta (o ninguna) y pagar hoy: es el pedido que el propio navegador manda tras el reto. Cualquier lectura que falle
  * ⇒ 503 con el lease VIVO (regla 4). Los 409/402/503 de aquí salen tal cual: el llamador NO lo envuelve en su `try/catch`
  * de lecturas. Cada 503 de «no sé» deja un `logger.warn` con organización, suscripción y estado (nunca el secreto).
+ *
+ * 🔴 Codex b2-code #2: con versión del editor (`delEditor`), también la versión de la oferta estándar (`planOfferVersion` de la
+ * suscripción contra la que nombra el comprobante de la petición, `versionDelPedido`; vacía sin comprobante legible) y la
+ * periodicidad de la suscripción contra la pedida. Un comprobante NUEVO (otra versión u otro ciclo) no reanuda el reto viejo: se
+ * anula y se estrena intento. El reenvío del navegador con SU comprobante (aunque ya no sea el de la vigente) sí lo reanuda. Sin
+ * versión del editor, lo de hoy: sin la periodicidad y con la versión vacía de los dos lados.
  */
 async function resolverIntentoIncompleto(args: {
   sub: Stripe.Subscription
@@ -1074,8 +1100,10 @@ async function resolverIntentoIncompleto(args: {
   organizationId: string
   attempt: number
   lease: Date
+  delEditor: boolean
+  versionDelPedido: number | null
 }): Promise<{ recuperada: Stripe.Subscription | null; lugarDescartado: LugarDelIntento | null }> {
-  const { input, campaign, organizationId, attempt, lease } = args
+  const { input, campaign, organizationId, attempt, lease, delEditor, versionDelPedido } = args
   const leer = async <T>(lectura: () => Promise<T>): Promise<T> => {
     try {
       return await lectura()
@@ -1129,6 +1157,9 @@ async function resolverIntentoIncompleto(args: {
     // versión vieja y el PASO 7 respondería OFFER_CHANGED (cobrado y sin acceso); así se anula y se estrena intento, y el
     // avance libera el lugar de la versión vieja con la misma regla.
     (sub.metadata?.launchOfferVersion ?? '') === (campaign ? String(campaign.offerVersion) : '') &&
+    // Codex b2-code #2: la versión de la oferta estándar y la periodicidad (sólo con versión del editor; ver arriba).
+    (sub.metadata?.planOfferVersion ?? '') === (versionDelPedido !== null ? String(versionDelPedido) : '') &&
+    (!delEditor || periodicidadDeLaSuscripcion(sub) === input.interval) &&
     input.payNow
 
   if (mismoIntento && (pi?.status === 'requires_action' || pi?.status === 'requires_confirmation')) {
@@ -1546,6 +1577,9 @@ export async function activatePlan(
           organizationId,
           attempt,
           lease: nuestroLease,
+          delEditor: recuperacionDiferida,
+          // Sin versión del editor el comprobante no se lee (B0/B1 literal).
+          versionDelPedido: recuperacionDiferida ? versionQueNombraElComprobante(input.quoteToken, organizationId, now) : null,
         }))
       } else if (!SUSCRIPCION_COBRADA.includes(estado as (typeof SUSCRIPCION_COBRADA)[number])) {
         logger.warn('activate-plan: suscripción recuperada en estado no concluyente', {

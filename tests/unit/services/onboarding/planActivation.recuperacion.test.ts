@@ -404,6 +404,70 @@ describe('B2 Task 5: un intento anterior que pudo cobrar se recupera con su susc
     expect(mockVoid).not.toHaveBeenCalled()
   })
 
+  /** El reto del banco del intento 1 (Pro anual de la v2), esperando todavía; la suscripción nueva se lee por su id. */
+  const retoDeLaV2 = () => ({
+    ...cobrada(),
+    status: 'incomplete',
+    latest_invoice: { id: 'in_1', status: 'open', confirmation_secret: { client_secret: 'pi_reto_secret_x' } },
+  })
+  const nuevaCobrada = (price: ReturnType<typeof precio>) =>
+    cobrada({
+      id: 'sub_nuevo',
+      metadata: {},
+      latest_invoice: { id: 'in_2', status: 'paid', amount_paid: price.unit_amount },
+      items: { data: [{ current_period_end: FIN, price }] },
+    })
+
+  it('🔴 Codex b2-code #2: reto de Pro anual de la v2 pendiente; sale la v3 con otro precio; la dueña recarga y manda un comprobante VÁLIDO de la v3 con la misma tarjeta → no se reanuda el reto viejo: se anula su factura y el intento nuevo cobra el precio de la v3', async () => {
+    conVigente(v3(), 3)
+    const PRO_A_V3 = 1042840 // 899000 + IVA
+    const precioV3 = precio('price_v3_pro_a', PRO_A_V3, 'year')
+    mockPriceRetrieve.mockImplementation(async (id: string) => {
+      if (id === 'price_v3_pro_a') return precioV3
+      throw Object.assign(new Error('No such price'), { code: 'resource_missing', statusCode: 404 })
+    })
+    mockSubRetrieve.mockImplementation(async (id: string) => (id === 'sub_nuevo' ? nuevaCobrada(precioV3) : retoDeLaV2()))
+    pagoConEstado('requires_action')
+    mockSubCreate.mockResolvedValue({ id: 'sub_nuevo', status: 'active' })
+
+    const r = await pedir({
+      interval: 'annual',
+      offer: { kind: 'STANDARD', expectedFirstChargeCents: PRO_A_V3 },
+      quoteToken: comprobante({ versionNumber: 3, interval: 'annual', precioCents: PRO_A_V3, firstChargeCents: PRO_A_V3 }),
+    })
+
+    expect(r.status).toBe('ACTIVE')
+    expect(mockVoid).toHaveBeenCalledWith('in_1')
+    expect(mockSubCreate).toHaveBeenCalledTimes(1)
+    const [cuerpo] = mockSubCreate.mock.calls[0]
+    expect(cuerpo.items).toEqual([{ price: 'price_v3_pro_a' }])
+    expect(cuerpo.metadata).toMatchObject({ planOfferVersion: '3', planActivationKey: `plan-activation:${ORG}:2` })
+  })
+
+  it('🔴 Codex b2-code #2: reto de Pro ANUAL de la v2 pendiente; la dueña pide Pro MENSUAL con un comprobante válido de la v2 y la misma tarjeta → se anula el reto anual y el intento nuevo cobra el mensual', async () => {
+    mockSubRetrieve.mockImplementation(async (id: string) => (id === 'sub_nuevo' ? nuevaCobrada(PRECIOS.price_v2_pro_m) : retoDeLaV2()))
+    pagoConEstado('requires_action')
+    mockSubCreate.mockResolvedValue({ id: 'sub_nuevo', status: 'active' })
+
+    const r = await pedir({ quoteToken: comprobante() })
+
+    expect(r).toMatchObject({ status: 'ACTIVE', interval: 'monthly' })
+    expect(mockVoid).toHaveBeenCalledWith('in_1')
+    expect(mockSubCreate).toHaveBeenCalledTimes(1)
+    expect(mockSubCreate.mock.calls[0][0].items).toEqual([{ price: 'price_v2_pro_m' }])
+  })
+
+  it('el reenvío del navegador sin comprobante legible no reanuda el reto de una versión del editor (la versión vacía no es la suya): se anula y el intento nuevo pide su comprobante', async () => {
+    mockSubRetrieve.mockResolvedValue(retoDeLaV2())
+    pagoConEstado('requires_action')
+
+    await expect(
+      pedir({ interval: 'annual', offer: { kind: 'STANDARD', expectedFirstChargeCents: PRO_A_V2 }, quoteToken: 'no-es-un-comprobante' }),
+    ).rejects.toMatchObject({ statusCode: 400, code: 'QUOTE_INVALID' })
+    expect(mockVoid).toHaveBeenCalledWith('in_1')
+    expect(mockSubCreate).not.toHaveBeenCalled()
+  })
+
   it('🔴 intento anterior sin cobro (otra tarjeta, se descarta) y comprobante de la v2 ya no vigente → 409 OFFER_CHANGED reason VERSION, cero subscriptions.create; queda IN_PROGRESS con el intento siguiente, sin lease ni id', async () => {
     conVigente(v3(), 3)
     mockSubRetrieve.mockResolvedValue(sinCobroDeOtraTarjeta())
