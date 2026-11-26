@@ -25,6 +25,7 @@ import { NextFunction, Request, Response } from 'express'
 import * as venueDashboardService from '../../services/dashboard/venue.dashboard.service'
 import * as planStateService from '../../services/dashboard/planState.service'
 import { cotizacionDeTuPlanSinRomper, versionDeTuPlanSinRomper } from '../../services/billing/cotizacionDeLaOferta'
+import { LECTURA_ACOTADA } from '../../services/billing/tarjetaQueCobraria'
 import { getVenuePlanInfo } from '../../services/access/basePlan.service'
 import * as seatReconciliationService from '../../services/dashboard/seatReconciliation.service'
 import type { CancellationInput } from '@/services/shared/cancellationReason'
@@ -531,8 +532,13 @@ export async function getVenuePlan(req: Request<{ venueId: string }>, res: Respo
     // Planes editables (B2, Task 7): con versión del editor, «Tu plan» trae `cotizacion` (de la MISMA lectura de Stripe). Sin ella, o
     // si leer la oferta falla, `data` es exactamente `getPlanState`, con las llamadas a Stripe de hoy (`retrievePlanSubscription(id)`).
     // La versión se lee UNA vez, primero: sólo con ella se pide la tarjeta de la prueba sin tarjeta (`conTarjeta`) y se cotiza.
+    // 🔴 Codex b2-code #7: con ella, la suscripción también se lee con el tope corto (5 s, sin reintentos), como las demás lecturas
+    // informativas de la pantalla; si no contesta, «Tu plan» se degrada como hoy. Sin versión del editor, la llamada de hoy.
     const vigente = await versionDeTuPlanSinRomper(venueId)
-    const { planState, suscripcion } = await planStateService.getPlanStateYSuscripcion(venueId, vigente ? { conTarjeta: true } : {})
+    const { planState, suscripcion } = await planStateService.getPlanStateYSuscripcion(
+      venueId,
+      vigente ? { conTarjeta: true, stripeTimeoutMs: LECTURA_ACOTADA.timeout } : {},
+    )
     const cotizacion = vigente ? await cotizacionDeTuPlanSinRomper(vigente, venueId, planState, suscripcion) : null
     res.status(200).json({ success: true, data: cotizacion ? { ...planState, cotizacion } : planState })
   } catch (error) {

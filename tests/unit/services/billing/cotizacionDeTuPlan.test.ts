@@ -510,7 +510,7 @@ describe('cotizacionDeTuPlan', () => {
 })
 
 describe('retrievePlanSubscription — la tarjeta de la prueba sólo para «Tu plan» (fix round 1)', () => {
-  it('🔴 sin conTarjeta, una prueba sin tarjeta no lee el cliente (ni trae la tarjeta); con él, UNA lectura del cliente con tope', async () => {
+  it('🔴 sin conTarjeta, una prueba sin tarjeta no lee el cliente (ni trae la tarjeta); con él, UNA lectura del cliente con tope, también con timeoutMs (Codex b2-code #7)', async () => {
     mockSubRetrieve.mockResolvedValue(suscripcion())
     mockCustomerRetrieve.mockResolvedValue(cliente())
 
@@ -519,8 +519,9 @@ describe('retrievePlanSubscription — la tarjeta de la prueba sólo para «Tu p
     expect(sinOpcion).toMatchObject({ sinTarjeta: true, trialEnd: new Date(FIN_S * 1000), noHabraCobro: false })
     expect(sinOpcion).not.toHaveProperty('faltaTarjeta')
     expect(sinOpcion).not.toHaveProperty('tarjetaQueCobrara')
-    // La B (UNA llamada con tope) tampoco la lee, aunque la pida.
-    await retrievePlanSubscription('sub_1', { timeoutMs: 3_000, conTarjeta: true })
+    // La B (UNA llamada con tope, sin `conTarjeta`) tampoco la lee.
+    const laB = await retrievePlanSubscription('sub_1', { timeoutMs: 3_000 })
+    expect(laB).not.toHaveProperty('faltaTarjeta')
     expect(mockCustomerRetrieve).not.toHaveBeenCalled()
     expect(mockPmRetrieve).not.toHaveBeenCalled()
 
@@ -531,6 +532,14 @@ describe('retrievePlanSubscription — la tarjeta de la prueba sólo para «Tu p
       ['cus_1', { expand: ['invoice_settings.default_payment_method', 'default_source'] }, TOPE],
     ])
     expect(mockPmRetrieve).not.toHaveBeenCalled()
+
+    // 🔴 Codex b2-code #7: «Tu plan» con versión del editor lee la suscripción con el tope corto Y pide la tarjeta: se lee igual.
+    mockCustomerRetrieve.mockClear()
+    const acotadaConTarjeta = await retrievePlanSubscription('sub_1', { timeoutMs: 5_000, conTarjeta: true })
+    expect(acotadaConTarjeta).toMatchObject({ sinTarjeta: true, faltaTarjeta: true, tarjetaQueCobrara: null })
+    expect(mockCustomerRetrieve.mock.calls).toEqual([
+      ['cus_1', { expand: ['invoice_settings.default_payment_method', 'default_source'] }, TOPE],
+    ])
 
     // Una suscripción de hoy, con `conTarjeta`, tampoco lee nada más.
     mockCustomerRetrieve.mockClear()

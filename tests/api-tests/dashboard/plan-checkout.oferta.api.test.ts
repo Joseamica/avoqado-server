@@ -336,7 +336,7 @@ describe('GET /plan → POST /plan/checkout con la versión del editor (B2, Task
     expect(mockSubList).not.toHaveBeenCalled()
   })
 
-  it('🔴 fix round 2: GET /plan sin versión del editor (o con la oferta ilegible) lee la suscripción como hoy, retrievePlanSubscription(id) sin segundo argumento; con la v2, { conTarjeta: true }', async () => {
+  it('🔴 fix round 2: GET /plan sin versión del editor (o con la oferta ilegible) lee la suscripción como hoy, retrievePlanSubscription(id) sin segundo argumento; con la v2, { conTarjeta: true, timeoutMs: 5000 } (Codex b2-code #7)', async () => {
     // Un negocio con Pro en Stripe, de HOY (con tarjeta, sin `sinTarjeta`).
     prismaMock.venueFeature.findMany.mockResolvedValue([
       { ...pruebaRegalada(-24), id: 'vf_pro', stripeSubscriptionId: 'sub_hoy', endDate: null },
@@ -377,17 +377,75 @@ describe('GET /plan → POST /plan/checkout con la versión del editor (B2, Task
       expect(mockCustomerRetrieve).not.toHaveBeenCalled()
       expect(mockCreatePreview).not.toHaveBeenCalled()
 
-      // Con la versión del editor, «Tu plan» pide la tarjeta de la prueba (una suscripción de hoy no lee nada más) y cotiza.
+      // Con la versión del editor, «Tu plan» pide la tarjeta de la prueba (una suscripción de hoy no lee nada más) y cotiza. 🔴 Codex
+      // b2-code #7: la suscripción se lee con el tope corto (5 s, sin reintentos), como las demás lecturas informativas de la pantalla.
       conVigente(2, v2())
       lecturas.mockClear()
+      mockSubRetrieve.mockClear()
       const conEditor = await leerPlan()
       expect(conEditor.status).toBe(200)
-      expect(lecturas.mock.calls).toEqual([['sub_hoy', { conTarjeta: true }]])
+      expect(lecturas.mock.calls).toEqual([['sub_hoy', { conTarjeta: true, timeoutMs: 5_000 }]])
+      expect(mockSubRetrieve.mock.calls).toEqual([
+        ['sub_hoy', { expand: ['discounts.source.coupon.applies_to'] }, { timeout: 5_000, maxNetworkRetries: 0 }],
+      ])
       expect(conEditor.body.data.cotizacion).toMatchObject({ versionNumber: 2 })
       expect(mockCustomerRetrieve).not.toHaveBeenCalled()
     } finally {
       lecturas.mockRestore()
     }
+  })
+
+  it('🔴 Codex b2-code #7: con la v2 y una prueba sin tarjeta viva, GET /plan lee la suscripción con el tope corto Y la tarjeta (Stripe no la tiene: SIN_TARJETA); si la suscripción no contesta, 200 degradado como hoy', async () => {
+    conVigente(2, v2())
+    const fin = Math.floor((Date.now() + 10 * DIA) / 1000)
+    prismaMock.venueFeature.findMany.mockResolvedValue([
+      { ...pruebaRegalada(10 * 24), id: 'vf_pro', stripeSubscriptionId: 'sub_prueba', endDate: new Date(fin * 1000) },
+    ])
+    mockSubRetrieve.mockResolvedValue({
+      id: 'sub_prueba',
+      object: 'subscription',
+      customer: 'cus_1',
+      status: 'trialing',
+      created: fin - 14 * 86_400,
+      cancel_at_period_end: false,
+      cancel_at: null,
+      trial_end: fin,
+      trial_settings: { end_behavior: { missing_payment_method: 'cancel' } },
+      default_payment_method: null,
+      default_source: null,
+      metadata: { sinTarjeta: 'true', planOfferVersion: '2' },
+      discounts: [],
+      items: {
+        data: [{ current_period_end: fin, price: { id: 'price_v2_pro_m', unit_amount: PRO_M_V2, recurring: { interval: 'month' } } }],
+      },
+    })
+    // El cliente de Stripe vivo y sin tarjeta guardada; la vista previa del cobro al terminar.
+    mockCustomerRetrieve.mockResolvedValue({ id: 'cus_1', object: 'customer', invoice_settings: { default_payment_method: null } })
+    mockCreatePreview.mockResolvedValue({ amount_due: PRO_M_V2 })
+
+    const plan = await leerPlan()
+
+    expect(plan.status).toBe(200)
+    expect(mockSubRetrieve.mock.calls).toEqual([
+      ['sub_prueba', { expand: ['discounts.source.coupon.applies_to'] }, { timeout: 5_000, maxNetworkRetries: 0 }],
+    ])
+    expect(mockCustomerRetrieve).toHaveBeenCalledTimes(1)
+    expect(plan.body.data.cotizacion.estadoDeLaPrueba).toMatchObject({ estado: 'SIN_TARJETA', tier: 'PRO', tarjeta: null })
+
+    // La suscripción no contesta en 5 s: «Tu plan» sale igual, como hoy (sin las fechas ni el precio de Stripe, sin estado de la prueba).
+    mockSubRetrieve
+      .mockReset()
+      .mockRejectedValue(
+        Object.assign(new Error('Request aborted due to timeout being reached (5000ms)'), { type: 'StripeConnectionError' }),
+      )
+    mockCustomerRetrieve.mockClear()
+    const degradado = await leerPlan()
+
+    expect(degradado.status).toBe(200)
+    expect(mockSubRetrieve).toHaveBeenCalledTimes(1)
+    expect(degradado.body.data).toMatchObject({ currentPeriodEnd: null, interval: null })
+    expect(degradado.body.data.cotizacion).not.toHaveProperty('estadoDeLaPrueba')
+    expect(mockCustomerRetrieve).not.toHaveBeenCalled()
   })
 
   it('🔴 b2-r9 #8: GET /plan con una v1 dañada (versionQueCobra lanza) → 200 con getPlanState, sin cotizacion', async () => {
