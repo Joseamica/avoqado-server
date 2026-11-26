@@ -188,3 +188,25 @@ describe('POST /dashboard/venues/:venueId/billing-portal — el flujo de la tarj
     expect(prismaMock.planOfferPointer.findUnique).not.toHaveBeenCalled()
   })
 })
+
+describe('POST /dashboard/venues/:venueId/billing-portal — la oferta ilegible con flujo PONER_TARJETA (Codex b2-code #8)', () => {
+  it('🔴 con el puntero en una v1 dañada (versionQueCobra lanza): el portal genérico de hoy, sin flow_data, como B1', async () => {
+    prismaMock.planOfferPointer.findUnique.mockResolvedValue(punteroA('cv1', 1, { schemaVersion: 1, rota: true }) as never)
+
+    const res = await abrir({ flujo: 'PONER_TARJETA' })
+
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({ success: true, url: 'https://billing.stripe.test/p/session_1' })
+    expect(mockPortalCreate.mock.calls).toEqual([[CUERPO_DE_HOY]])
+  })
+
+  it('🔴 si ni el puntero se puede leer (la base no contesta) → 503 PLAN_NOT_CONFIGURED, sin portal', async () => {
+    prismaMock.planOfferPointer.findUnique.mockRejectedValue(new Error('la base no contesta'))
+
+    const res = await abrir({ flujo: 'PONER_TARJETA' })
+
+    expect(res.status).toBe(503)
+    expect(res.body).toMatchObject({ code: 'PLAN_NOT_CONFIGURED', message: MENSAJE_PLAN_NO_CONFIGURADO })
+    expect(mockPortalCreate).not.toHaveBeenCalled()
+  })
+})

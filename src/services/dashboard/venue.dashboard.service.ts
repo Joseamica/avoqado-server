@@ -1904,17 +1904,30 @@ export async function createVenueBillingPortalSession(
 
 /**
  * Planes editables (B2, Task 7): ¿se abre el portal en el flujo de la tarjeta? Sólo `PONER_TARJETA` con una versión del editor (la
- * prueba sin tarjeta sólo existe con ella); sin `flujo` no se lee nada. Con `PONER_TARJETA` y la oferta ilegible, el 503 de «plan no
- * configurado» de las compras (fix round 1, como `tarjeta-de-la-prueba`): el botón de la tarjeta nunca abre el portal genérico.
+ * prueba sin tarjeta sólo existe con ella); sin `flujo` no se lee nada. Si la oferta no se puede leer, decide el número del puntero
+ * (`numeroDeLaVigente`, como `versionDeLaConversion`; Codex b2-code #8):
+ * - en la v1 (dañada): el portal genérico de hoy, sin el flujo (B1 descartaba el campo: nada cambia con el editor apagado);
+ * - en una versión del editor, sin número válido o si ni el puntero se puede leer: el 503 de «plan no configurado» de las compras
+ *   (fix round 1, como `tarjeta-de-la-prueba`): el botón de la tarjeta de una prueba sin tarjeta nunca abre el portal genérico.
  */
 async function pideElFlujoDeLaTarjeta(venueId: string, flujo: unknown): Promise<boolean> {
   if (flujo !== 'PONER_TARJETA') return false
   try {
     return (await versionQueCobra()) !== null
   } catch (error) {
+    const motivo = error instanceof Error ? error.message : String(error)
+    const numero = await numeroDeLaVigente().catch(() => null)
+    if (numero === 1) {
+      logger.warn('billing-portal: no se pudo leer la v1 de la oferta; se abre el portal de hoy, sin el flujo de la tarjeta', {
+        venueId,
+        error: motivo,
+      })
+      return false
+    }
     logger.warn('billing-portal: no se pudo leer la oferta; el botón de la tarjeta no abre el portal', {
       venueId,
-      error: error instanceof Error ? error.message : String(error),
+      numero,
+      error: motivo,
     })
     throw new AppError(MENSAJE_PLAN_NO_CONFIGURADO, 503, true, 'PLAN_NOT_CONFIGURED')
   }
