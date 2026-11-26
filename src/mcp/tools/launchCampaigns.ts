@@ -1,5 +1,6 @@
 import { registerHybridCampaignTools } from './hybridBilling'
 import { registerHybridPricingTools } from './hybridPricing'
+import { registerPlanOfferTools } from './planOffer'
 /**
  * S11 — las campañas ligeras de lanzamiento, desde el MCP (spec 2026-09-17 § 3.9).
  *
@@ -28,6 +29,7 @@ import {
   updateLaunchCampaign,
 } from '@/services/launchCampaigns/launchCampaign.service'
 import prisma from '@/utils/prismaClient'
+import AppError from '@/errors/AppError'
 import { LAUNCH_CAMPAIGN_SELECT } from '@/services/launchCampaigns/launchCampaign.service'
 import { activateLaunchCampaign, previewLaunchOffer } from '@/services/launchCampaigns/launchCampaignStripe.service'
 import { launchOfferAvailability } from '@/services/launchCampaigns/launchOfferMath'
@@ -37,12 +39,16 @@ import { reviewHybridCampaignOffer } from '@/services/launchCampaigns/hybridCamp
 
 const SOLO_AVOQADO = 'Solo Avoqado puede ver o cambiar las ofertas de lanzamiento.'
 
+/** Las negativas de activar una oferta que la herramienta explica con su código (planes editables B1). */
+const NEGATIVAS_DE_ACTIVAR = new Set(['LAUNCH_CAMPAIGN_PREVIEW_STALE', 'PLAN_OFFER_PENDING', 'PLAN_OFFER_STALE', 'PLAN_NOT_ON_SALE'])
+
 /** Pesos con dos decimales, para que el texto que lee una persona no hable en centavos. */
 const pesos = (cents: number) => `$${(cents / 100).toFixed(2)}`
 
 export function registerLaunchCampaignTools(server: McpServer, scope: McpScope): void {
   registerHybridCampaignTools(server, scope)
   registerHybridPricingTools(server, scope)
+  registerPlanOfferTools(server, scope)
   server.tool(
     'preview_hybrid_offer',
     'Simula una oferta de plan, funciones específicas o paquete a elección. Valida cantidad, funciones ya incluidas, dependencias, precio total en pesos MXN y renovación. Con la vigencia (startsAt y endsAt) de una oferta de un solo producto, «overlaps» lista las promociones activas de ese producto cuya vigencia se traslapa, sin la campaña campaignId (es un aviso: no bloquea). El escenario es hipotético. No publica, reserva, cobra ni activa funciones. Sólo para Avoqado.',
@@ -228,9 +234,16 @@ export function registerLaunchCampaignTools(server: McpServer, scope: McpScope):
       code: z.string().describe('El código de la oferta'),
       action: z.enum(['activate', 'pause', 'end']).describe('Qué hacer con ella'),
       reason: z.string().optional().describe('Por qué (obligatorio al pausar y al terminar)'),
+      expectedListPrice: z
+        .number()
+        .positive()
+        .optional()
+        .describe(
+          'Al publicar: el precio mensual de renovación (con IVA, en pesos) que dio la vista previa. Lo pone la vista previa; no lo cambies.',
+        ),
       confirm: z.boolean().optional().describe('true para aplicarlo de verdad'),
     },
-    async ({ code, action, reason, confirm }) => {
+    async ({ code, action, reason, expectedListPrice, confirm }) => {
       if (!scope.isSuperAdmin) return text({ ok: false, error: SOLO_AVOQADO })
       requireWriteScopeAlways(scope, 'launch-campaigns:write', 'cambia una oferta que se cobra con tarjeta')
 
@@ -252,10 +265,14 @@ export function registerLaunchCampaignTools(server: McpServer, scope: McpScope):
             offerVersion: ficha.offerVersion,
           })
           preview = {
-            cupon: p.couponId,
+            // Al reactivar se conserva el cupón que la oferta ya tiene; la primera vez, el que se crearía.
+            cupon: ficha.stripeCouponId ?? p.couponId,
             hoyPaga: pesos(p.firstChargeCents),
             despues: `${pesos(p.renewalMonthlyCents)} al mes`,
             avisos: p.problems,
+            // 🔴 El precio de lista que se VIO, en pesos: el token de confirmación lo ata y la activación lo exige igual
+            // (si al confirmar ya es otro, 409 sin tocar el descuento).
+            expectedListPrice: p.listPriceCents / 100,
           }
         }
         return text({
@@ -274,12 +291,28 @@ export function registerLaunchCampaignTools(server: McpServer, scope: McpScope):
 
       // Con `confirm` se llama al MISMO servicio que usa el superadmin: un segundo camino que
       // creara cupones sería un segundo sitio donde equivocarse con el dinero.
-      const resultado =
-        action === 'activate'
-          ? await activateLaunchCampaign(ficha.id, scope.staffId, reason)
-          : action === 'pause'
-            ? await pauseLaunchCampaign(ficha.id, reason as string, scope.staffId)
-            : await endLaunchCampaign(ficha.id, reason as string, scope.staffId)
+      let resultado: Awaited<ReturnType<typeof activateLaunchCampaign>>
+      try {
+        resultado =
+          action === 'activate'
+            ? await activateLaunchCampaign(
+                ficha.id,
+                scope.staffId,
+                reason,
+                // El servicio guarda centavos (excepción de las campañas); la herramienta habla en pesos y convierte aquí.
+                expectedListPrice !== undefined ? { expectedListPriceCents: Math.round(expectedListPrice * 100) } : {},
+              )
+            : action === 'pause'
+              ? await pauseLaunchCampaign(ficha.id, reason as string, scope.staffId)
+              : await endLaunchCampaign(ficha.id, reason as string, scope.staffId)
+      } catch (error) {
+        // Las negativas que la persona resuelve volviendo a revisar (o esperando a que termine una publicación de los planes):
+        // un código estable y el mensaje, en vez de un error genérico.
+        if (error instanceof AppError && error.code && NEGATIVAS_DE_ACTIVAR.has(error.code)) {
+          return text({ ok: false, codigo: error.code, error: error.message })
+        }
+        throw error
+      }
 
       const disponible = launchOfferAvailability(toOfferRow(resultado), new Date())
       return text({

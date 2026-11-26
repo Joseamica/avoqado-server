@@ -108,6 +108,7 @@ import { supportNoticesJob } from './jobs/support-notices.job'
 import { cashDrawerReconcilerJob } from './jobs/cash-drawer-reconciler.job'
 import { planAccessReconciliationJob } from './jobs/plan-access-reconciliation.job'
 import { altasAMedioPagoJob } from './jobs/altas-a-medio-pago.job'
+import { planOfferRenameJob } from './jobs/plan-offer-rename.job'
 import { paidOrderReconcilerJob } from './jobs/paid-order-reconciler.job'
 import { kdsArchiveClosedDayJob } from './jobs/kds-archive-closed-day.job'
 import { cashClosePairReconcilerJob } from './jobs/cash-close-pair-reconciler.job'
@@ -225,6 +226,7 @@ const gracefulShutdown = async (signal: string) => {
       planAccessReconciliationJob.stop()
       documentRequestsJob.stop()
       altasAMedioPagoJob.stop()
+      planOfferRenameJob.stop()
       paidOrderReconcilerJob.stop()
       kdsArchiveClosedDayJob.stop()
       cashClosePairReconcilerJob.stop()
@@ -616,6 +618,8 @@ const startApplication = async (retries = 3) => {
       planAccessReconciliationJob.start()
       documentRequestsJob.start()
       altasAMedioPagoJob.start()
+      // Planes editables: el nombre del producto de Stripe de cada plan converge con la oferta vigente (cada minuto).
+      planOfferRenameJob.start()
       paidOrderReconcilerJob.start()
       // D17: lo viejo de la pantalla de cocina se archiva al cerrar el día (cuenta ya cerrada).
       kdsArchiveClosedDayJob.start()

@@ -55,6 +55,7 @@ import {
 } from '../stripe.service'
 import { autorizarObligacionNueva } from '../access/autorizarObligacionNueva'
 import { resolverPrecioDelPlan } from '../billing/precioDelPlan'
+import { exigirNombreDelPlanAlDia } from '../billing/nombreDelPlanEnStripe'
 import { STANDARD_PLAN_GROSS_CENTS } from '../access/planPricing.constants'
 import { ventaSueltaAbierta } from '../access/ventaSuelta'
 import { notifySuperadminsNewKycSubmission } from '../superadmin/kycReview.service'
@@ -1832,6 +1833,10 @@ export async function createVenuePlanCheckoutSession(
       stripe: unitAmount,
     })
   }
+  // Planes editables (B1, Task 8): mientras Stripe muestre otro nombre del que publicó la oferta, 503 PLAN_RENAME_PENDING. También
+  // ANTES de la regla común, por la misma razón que el precio: dentro vencería la sesión abierta de otra pestaña. Sin versiones o con
+  // sólo la v1 no lee Stripe.
+  await exigirNombreDelPlanAlDia(tier)
   const checkoutUrl = await autorizarObligacionNueva(venueId, cliente, { tipo: 'PLAN', tier }, async () => {
     // D3: dentro de la regla común (bajo su candado). Con una prueba regalada del MISMO plan, el primer cobro es el fin de
     // la prueba; la fecha la decide el servidor, nunca el cliente.
