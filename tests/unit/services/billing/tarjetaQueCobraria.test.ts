@@ -211,6 +211,22 @@ describe('clienteDeStripeVivo — las opciones de cada camino (fix round 2, C2)'
     await clienteDeStripeVivo('cus_1')
     await clienteDeStripeVivo('cus_1', {})
 
-    expect(mockCustomerRetrieve.mock.calls.map((c: unknown[]) => c[2])).toEqual([TOPE, {}])
+    expect(mockCustomerRetrieve.mock.calls[0][2]).toEqual(TOPE)
+    // 🔴 Prueba con Stripe de pruebas (26-nov): con `{}` como tercer argumento stripe-node lanza «Unknown arguments» y el alta con
+    // versión daba 500. Sin opciones, la llamada va SIN tercer argumento (el cliente de siempre).
+    expect(mockCustomerRetrieve.mock.calls[1]).toHaveLength(2)
+  })
+
+  it('🔴 el contrato de stripe-node: `{}` como opciones es «Unknown arguments»; sin tercer argumento, la llamada sale', async () => {
+    const StripeReal = jest.requireActual('stripe')
+    // Un cliente HTTP que nunca sale a la red: si la llamada llega a mandarse, falla «sin red», nunca por sus argumentos.
+    const sinRed = StripeReal.createFetchHttpClient(async () => {
+      throw new Error('sin red')
+    })
+    const real = new StripeReal('sk_test_contrato', { httpClient: sinRed, maxNetworkRetries: 0 })
+    const params = { expand: ['invoice_settings.default_payment_method', 'default_source'] }
+
+    await expect(real.customers.retrieve('cus_1', params, {})).rejects.toThrow(/Unknown arguments/)
+    await expect(real.customers.retrieve('cus_1', params)).rejects.not.toThrow(/Unknown arguments/)
   })
 })

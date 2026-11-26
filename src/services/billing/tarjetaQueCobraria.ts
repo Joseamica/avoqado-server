@@ -103,8 +103,13 @@ export async function clienteDeStripeVivo(
   opciones: Stripe.RequestOptions = LECTURA_ACOTADA,
 ): Promise<Stripe.Customer | null> {
   if (!customerId) return null
+  const params = { expand: ['invoice_settings.default_payment_method', 'default_source'] }
+  // 🔴 stripe-node no reconoce `{}` como opciones (no trae ninguna llave suya): lo toma como un argumento de más y lanza «Unknown
+  // arguments» (lo encontró la prueba con Stripe de pruebas, 26-nov). Sin opciones, la llamada va sin el tercer argumento.
   const cliente = await leerOMuerto(() =>
-    stripe.customers.retrieve(customerId, { expand: ['invoice_settings.default_payment_method', 'default_source'] }, opciones),
+    Object.keys(opciones).length > 0
+      ? stripe.customers.retrieve(customerId, params, opciones)
+      : stripe.customers.retrieve(customerId, params),
   )
   if (cliente === null || (cliente as Stripe.DeletedCustomer | undefined)?.deleted === true) return null
   return cliente as Stripe.Customer

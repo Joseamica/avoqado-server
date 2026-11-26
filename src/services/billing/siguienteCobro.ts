@@ -24,11 +24,46 @@ export async function montoDelSiguienteCobro(
     if (typeof preview.amount_due === 'number') return preview.amount_due
     logger.warn(`siguienteCobro: la vista previa de ${subscriptionId} no trae amount_due`)
   } catch (err) {
+    // 🔴 Stripe no da vista previa de una prueba sin método con `missing_payment_method: cancel` (`invoice_upcoming_none`, visto con
+    // Stripe de pruebas el 26-nov): sin este respaldo, la prueba sin tarjeta nunca tenía monto y «Tu plan» nunca ofrecía «Poner mi tarjeta».
+    if ((err as { code?: unknown } | null)?.code === 'invoice_upcoming_none') {
+      const monto = await montoDeLaPruebaSinMetodo(stripe, subscriptionId, opciones)
+      if (monto !== null) return monto
+    }
     logger.warn(`siguienteCobro: falló la vista previa de ${subscriptionId}`, {
       error: err instanceof Error ? err.message : 'Unknown error',
     })
   }
   return null
+}
+
+/**
+ * Lo que se cobrará en cuanto la prueba sin método tenga tarjeta: la vista previa de una suscripción NUEVA del mismo cliente (su saldo
+ * y sus cupones) con los mismos renglones. Sólo para la prueba viva que terminaría cancelada por no tener método; si ya no se cobrará
+ * (cancelada, con cancelación programada o con la cobranza en pausa), `null`: no se inventa un cobro.
+ * ponytail: no copia descuentos propios de la suscripción; la prueba sin tarjeta del alta no lleva ninguno (B2). Si un día los lleva,
+ * pasarlos como `discounts: [{ discount }]`.
+ */
+async function montoDeLaPruebaSinMetodo(stripe: Stripe, subscriptionId: string, opciones?: Stripe.RequestOptions): Promise<number | null> {
+  try {
+    const sub = opciones
+      ? await stripe.subscriptions.retrieve(subscriptionId, opciones)
+      : await stripe.subscriptions.retrieve(subscriptionId)
+    const seCancelaSinMetodo = sub.trial_settings?.end_behavior?.missing_payment_method === 'cancel'
+    if (sub.status !== 'trialing' || !seCancelaSinMetodo || sub.cancel_at_period_end || sub.cancel_at || pausaDe(sub)) return null
+    const customer = typeof sub.customer === 'string' ? sub.customer : sub.customer.id
+    const params = {
+      customer,
+      subscription_details: { items: sub.items.data.map(i => ({ price: i.price.id, quantity: i.quantity ?? 1 })) },
+    }
+    const preview = opciones ? await stripe.invoices.createPreview(params, opciones) : await stripe.invoices.createPreview(params)
+    return typeof preview.amount_due === 'number' ? preview.amount_due : null
+  } catch (err) {
+    logger.warn(`siguienteCobro: falló la vista previa de respaldo de ${subscriptionId}`, {
+      error: err instanceof Error ? err.message : 'Unknown error',
+    })
+    return null
+  }
 }
 
 /**
