@@ -1373,13 +1373,15 @@ export async function activatePlan(
     }
 
     if (!progress.planStripeSubscriptionId) throw pendiente('no hay suscripción registrada')
+    // 🔴 Codex b2-code r5 C: el cierre va ANTES de la lectura de Stripe. El paso del plan ya está ACTIVE y esa lectura sólo arma la
+    // respuesta: si Stripe tarda o falla, el alta igual queda cerrada (y la respuesta es el mismo error de hoy).
+    await terminarElAlta()
     // 🔴 Los dos importes salen de la suscripción REAL, nunca de la cotización.
     const sub = await stripe.subscriptions.retrieve(progress.planStripeSubscriptionId, { expand: ['latest_invoice'] })
     const redencion = await prisma.launchCampaignRedemption.findFirst({
       where: { organizationId, status: REDEMPTION_STATUS.APPLIED },
       include: { campaign: { select: { code: true } } },
     })
-    await terminarElAlta()
     // La modalidad de lo que YA existe: un reintento con otra elección no la cambia (nadie toca cancel_at_period_end).
     const modalidadActiva = modalidadDePrueba(sub)
     return {

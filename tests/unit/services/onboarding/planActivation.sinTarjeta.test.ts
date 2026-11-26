@@ -498,6 +498,33 @@ describe('B2 Task 6: el alta sin tarjeta abre su prueba en Stripe', () => {
     expect(bienvenida.mock.calls[0][1]).toMatchObject({ empezo: true, noHabraCobro: true })
   })
 
+  it('🔴 Codex b2-code r5 C: el reintento sobre una prueba ya abierta (paso del plan ACTIVE, alta sin cerrar) cierra el alta ANTES de la lectura informativa de Stripe: si esa lectura falla, el alta igual queda cerrada y la respuesta es el error de hoy', async () => {
+    prismaMock.onboardingProgress.findUnique.mockResolvedValue({
+      id: 'op-1',
+      organizationId: ORG,
+      completedAt: null,
+      v2SetupData: { plan: { tier: 'PRO', interval: 'monthly', payNow: false, paymentMethodId: null, sinTarjeta: true } },
+      launchCampaignId: null,
+      termsAcceptedAt: new Date('2026-11-20T00:00:00Z'),
+      planActivationStatus: 'ACTIVE',
+      planActivationAttempt: 1,
+      planActivationLeaseUntil: null,
+      planStripeSubscriptionId: 'sub_1',
+    } as never)
+    const caida = Object.assign(new Error('Stripe caído'), { type: 'StripeAPIError', statusCode: 500 })
+    mockSubRetrieve.mockRejectedValue(caida)
+
+    await expect(pedir({ quoteToken: comprobante() })).rejects.toBe(caida)
+
+    expect(terminarAltaCobradaSinRomper).toHaveBeenCalledWith(ORG, expect.objectContaining({ via: 'cobro' }))
+    expect((terminarAltaCobradaSinRomper as jest.Mock).mock.invocationCallOrder[0]).toBeLessThan(
+      mockSubRetrieve.mock.invocationCallOrder[0],
+    )
+    // La lectura de Stripe conserva sus argumentos de hoy.
+    expect(mockSubRetrieve.mock.calls).toEqual([['sub_1', { expand: ['latest_invoice'] }]])
+    expect(mockSubCreate).not.toHaveBeenCalled()
+  })
+
   it('el reintento después del 200 perdido (alreadyActive) dice la tarjeta y si habrá cobro, leídos de Stripe en ese momento', async () => {
     prismaMock.onboardingProgress.findUnique.mockResolvedValue({
       id: 'op-1',
