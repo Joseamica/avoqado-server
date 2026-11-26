@@ -88,14 +88,48 @@ describe('POST …/loyalty/redeem con llave — expectedVersion', () => {
       respuesta(),
       jest.fn(),
     )
-    expect(manifiestos[0]).toMatchObject({ action: 'redeemLoyaltyPoints', payload: { points: 100, expectedDiscountAmount: 10, expectedVersion: 7 } })
+    expect(manifiestos[0]).toMatchObject({
+      action: 'redeemLoyaltyPoints',
+      payload: { points: 100, expectedDiscountAmount: 10, expectedVersion: 7 },
+    })
     expect(esperados[0]).toEqual({ monto: 10, puntos: 100, deLaCabecera: true, version: 7 })
   })
 
   it('sin versión (Mesas, apps viejas): el manifiesto y lo esperado de siempre', async () => {
-    await redeemPoints(peticion({ customerId: 'c1', points: 100, expectedDiscountAmount: 10, httpOperation: llave }), respuesta(), jest.fn())
+    await redeemPoints(
+      peticion({ customerId: 'c1', points: 100, expectedDiscountAmount: 10, httpOperation: llave }),
+      respuesta(),
+      jest.fn(),
+    )
     expect(manifiestos[0].payload).toEqual({ points: 100, expectedDiscountAmount: 10 })
     expect(esperados[0]).toEqual({ monto: 10, puntos: 100, deLaCabecera: true })
+  })
+
+  it('r11 (Codex r10 #4): un 409 de negocio del canje (cobro de la terminal en curso) sale como rechazo con recibo, no como duda', async () => {
+    const { ConflictError } = jest.requireActual('@/errors/AppError')
+    let capturado: unknown
+    ;(httpOp.executeHttpOperation as jest.Mock).mockImplementation(async (_input: any, mutate: any) => {
+      try {
+        await mutate({})
+      } catch (e) {
+        capturado = e
+      }
+      return { kind: 'RETRY', code: 'OPERATION_OUTCOME_PENDING' }
+    })
+    ;(redeemPointsToOrderInTransaction as jest.Mock).mockRejectedValue(
+      new ConflictError('Hay un cobro con tarjeta en curso', 'ORDER_CANCEL_BLOCKED_BY_TERMINAL_CHARGE'),
+    )
+    await redeemPoints(
+      peticion({ customerId: 'c1', points: 100, expectedDiscountAmount: 10, httpOperation: llave }),
+      respuesta(),
+      jest.fn(),
+    )
+    expect(capturado).toBeInstanceOf(httpOp.DomainRejected)
+    expect((capturado as any).rejection).toEqual({
+      status: 409,
+      code: 'ORDER_CANCEL_BLOCKED_BY_TERMINAL_CHARGE',
+      message: 'Hay un cobro con tarjeta en curso',
+    })
   })
 
   it('dos manifiestos que sólo difieren en la versión no son el mismo recibo', () => {
