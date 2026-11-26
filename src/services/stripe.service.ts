@@ -15,7 +15,9 @@ import logger from '@/config/logger'
 import { Feature, Prisma } from '@prisma/client'
 import { retry, shouldRetryStripeError } from '@/utils/retry'
 import { subscriptionPeriod } from '@/utils/stripeSubscriptionPeriod'
-import { pausaDe } from '@/services/billing/siguienteCobro'
+import { noHabraCobro, pausaDe } from '@/services/billing/siguienteCobro'
+import { tarjetaDeLaPrueba } from '@/services/billing/faltaTarjeta'
+import type { TarjetaVisible } from '@/services/billing/tarjetaQueCobraria'
 import { billingPageUrl } from '@/utils/dashboardLinks'
 import { addDays } from 'date-fns'
 import emailService from './email.service'
@@ -1237,6 +1239,11 @@ export interface CreatePlanCheckoutSessionInput {
    * códigos promocionales: un cupón de N meses empezaría a contar hoy y se gastaría antes del primer cobro.
    */
   trialEnd?: Date
+  /**
+   * Planes editables (B2, Task 7): lo que la compra cita de su versión (`planOfferVersion`, `planOfferPrecioDe`). Va en la sesión y
+   * en la suscripción, y nunca pisa lo nuestro (`kind`, `venueId`, `tierCode`, `interval`…). Sin ella, el cuerpo de siempre.
+   */
+  extraMetadata?: Record<string, string>
 }
 
 /**
@@ -1271,6 +1278,7 @@ export async function createPlanCheckoutSession(input: CreatePlanCheckoutSession
             description,
             ...(input.trialEnd ? { trial_end: Math.floor(input.trialEnd.getTime() / 1000) } : {}),
             metadata: {
+              ...(input.extraMetadata ?? {}),
               kind: 'PLAN_CHECKOUT',
               venueId: input.venueId,
               tierCode,
@@ -1283,6 +1291,7 @@ export async function createPlanCheckoutSession(input: CreatePlanCheckoutSession
           },
           // `kind` la marca como NUESTRA para la regla común de compra, que expira las abiertas antes de abrir otra.
           metadata: {
+            ...(input.extraMetadata ?? {}),
             kind: 'PLAN_CHECKOUT',
             venueId: input.venueId,
             tierCode,
@@ -1882,6 +1891,22 @@ export async function retrievePlanSubscription(
   grossAmountCents: number | null
   /** D5: el cupón vigente (uno, entendible) para mostrar lo que de verdad paga; `null` = se muestra el precio de lista. */
   descuento: DescuentoDelPlan | null
+  /** Planes editables (B2, Task 7): es una prueba SIN tarjeta del alta (`metadata.sinTarjeta: 'true'`, ruling P6). */
+  sinTarjeta: boolean
+  /**
+   * Sólo con `sinTarjeta` (y sin `bound`): la prueba sigue `trialing`, terminará cancelándose sin método y Stripe no tiene una
+   * tarjeta con qué cobrarla. `false` también si no se pudo leer (no se anuncia lo que no se sabe).
+   */
+  faltaTarjeta: boolean
+  /** Sólo con `sinTarjeta`, en prueba: la tarjeta que cobraría Stripe al terminar (§18), o `null` (sin tarjeta, o no se pudo leer). */
+  tarjetaQueCobrara: TarjetaVisible | null
+  /** El fin de la prueba de Stripe (`trial_end`), o `null`. */
+  trialEnd: Date | null
+  /**
+   * Al terminar la prueba (sin prueba, desde ahora) Stripe NO cobrará: cancelación programada o cobranza en pausa. La misma regla de
+   * los recordatorios (`noHabraCobro`).
+   */
+  noHabraCobro: boolean
 }> {
   // D5: el detalle del cupón viene en la MISMA llamada (expand): sin él, `discounts` sólo trae ids.
   const params = { expand: ['discounts.source.coupon.applies_to'] }
@@ -1892,6 +1917,12 @@ export async function retrievePlanSubscription(
         shouldRetry: shouldRetryStripeError,
         context: 'stripe.retrievePlanSubscription',
       })
+  // Planes editables (B2, Task 7): una prueba SIN tarjeta se reconoce por su metadata (ruling P6). Sólo con ella se lee qué tarjeta
+  // cobraría (el cliente, con tope y sin lanzar): una suscripción de hoy hace las mismas llamadas de siempre. La B (`bound`) promete
+  // UNA llamada, así que ahí no se lee.
+  const sinTarjeta = (sub.metadata as Record<string, string> | null | undefined)?.sinTarjeta === 'true'
+  const tarjeta = sinTarjeta && !bound ? await tarjetaDeLaPrueba(sub) : { faltaTarjeta: false, tarjetaQueCobrara: null }
+  const trialEnd = typeof sub.trial_end === 'number' ? new Date(sub.trial_end * 1000) : null
   const createdRaw = (sub as any).created as number | undefined
   const rawInterval = sub.items.data[0]?.price.recurring?.interval
   // SDK v19 may surface a single `discount` object and/or a `discounts` array (see subscriptionHasActiveDiscount).
@@ -1907,8 +1938,16 @@ export async function retrievePlanSubscription(
     interval: rawInterval === 'year' ? 'year' : rawInterval === 'month' ? 'month' : null,
     grossAmountCents: sub.items.data[0]?.price.unit_amount ?? null,
     descuento: descuentoDelPlan(sub as never, productoDe(sub.items.data[0]?.price.product)),
+    sinTarjeta,
+    faltaTarjeta: tarjeta.faltaTarjeta,
+    tarjetaQueCobrara: tarjeta.tarjetaQueCobrara,
+    trialEnd,
+    noHabraCobro: noHabraCobro(sub, trialEnd ? trialEnd.getTime() : Date.now()),
   }
 }
+
+/** Lo que `retrievePlanSubscription` lee de la suscripción del plan («Tu plan», B2 Task 7). */
+export type ResumenDeLaSuscripcionDelPlan = Awaited<ReturnType<typeof retrievePlanSubscription>>
 
 /**
  * Plan Básico: UNA suscripción leída de Stripe ahora para decir la modalidad de su prueba (`modalidadDePrueba`). Acotada: un
@@ -1981,14 +2020,49 @@ function configuracionDelPortal(): { configuration: string } | Record<string, ne
   return id ? { configuration: id } : {}
 }
 
-export async function createCustomerPortalSession(customerId: string, returnUrl: string): Promise<string> {
-  const session = await stripe.billingPortal.sessions.create({
-    customer: customerId,
-    return_url: returnUrl,
-    ...configuracionDelPortal(),
-  })
+/** Planes editables (B2, Task 7): el 503 del flujo de la tarjeta. Nunca se abre el portal genérico en su lugar. */
+const MENSAJE_PORTAL_NO_CONFIGURADO = 'No pudimos abrir la página para poner tu tarjeta. Intenta en unos minutos.'
 
-  logger.info(`✅ Created customer portal session for customer ${customerId}`)
+export async function createCustomerPortalSession(
+  customerId: string,
+  returnUrl: string,
+  /**
+   * Planes editables (B2, Task 7, §17): `PONER_TARJETA` abre el portal directo en el flujo de la tarjeta (`payment_method_update`) y
+   * regresa a `returnUrl` al terminar. El flujo deja la tarjeta como predeterminada del cliente, que es la que cobra una prueba sin
+   * método propio. El portal no promete enseñar el monto: «Tu plan» lo enseña antes de mandar. Sin opciones, el cuerpo de siempre.
+   */
+  opciones: { flujo?: 'PONER_TARJETA' } = {},
+): Promise<string> {
+  if (opciones.flujo !== 'PONER_TARJETA') {
+    const session = await stripe.billingPortal.sessions.create({
+      customer: customerId,
+      return_url: returnUrl,
+      ...configuracionDelPortal(),
+    })
+
+    logger.info(`✅ Created customer portal session for customer ${customerId}`)
+    return session.url
+  }
+
+  let session: Stripe.BillingPortal.Session
+  try {
+    session = await stripe.billingPortal.sessions.create({
+      customer: customerId,
+      return_url: returnUrl,
+      ...configuracionDelPortal(),
+      flow_data: { type: 'payment_method_update', after_completion: { type: 'redirect', redirect: { return_url: returnUrl } } },
+    })
+  } catch (error) {
+    // 🚨 a propósito: la configuración del portal no deja poner la tarjeta (o Stripe no contestó). El portal genérico no lo sustituye.
+    logger.error('🚨 createCustomerPortalSession: Stripe rechazó el flujo de la tarjeta — NO se abre el portal', {
+      customerId,
+      type: (error as { type?: unknown })?.type,
+      error: error instanceof Error ? error.message : String(error),
+    })
+    throw new AppError(MENSAJE_PORTAL_NO_CONFIGURADO, 503, true, 'PORTAL_NOT_CONFIGURED')
+  }
+
+  logger.info(`✅ Created customer portal session (payment_method_update) for customer ${customerId}`)
   return session.url
 }
 

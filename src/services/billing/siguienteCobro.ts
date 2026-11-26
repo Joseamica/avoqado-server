@@ -8,9 +8,19 @@ import logger from '@/config/logger'
  * 🔴 `null` = no se sabe. Quien llama NO anuncia un monto ni recae en el precio de lista (`price.unit_amount`):
  * con una campaña de $10 eso anunciaba $1,158.84.
  */
-export async function montoDelSiguienteCobro(stripe: Stripe, subscriptionId: string): Promise<number | null> {
+export async function montoDelSiguienteCobro(
+  stripe: Stripe,
+  subscriptionId: string,
+  /**
+   * Planes editables (B2, Task 7): las opciones de la lectura. «Tu plan» la acota (`LECTURA_ACOTADA`: sólo informa y la espera una
+   * respuesta); sin ellas, la llamada de siempre (los recordatorios y el aviso de Stripe).
+   */
+  opciones?: Stripe.RequestOptions,
+): Promise<number | null> {
   try {
-    const preview = await stripe.invoices.createPreview({ subscription: subscriptionId })
+    const preview = opciones
+      ? await stripe.invoices.createPreview({ subscription: subscriptionId }, opciones)
+      : await stripe.invoices.createPreview({ subscription: subscriptionId })
     if (typeof preview.amount_due === 'number') return preview.amount_due
     logger.warn(`siguienteCobro: la vista previa de ${subscriptionId} no trae amount_due`)
   } catch (err) {

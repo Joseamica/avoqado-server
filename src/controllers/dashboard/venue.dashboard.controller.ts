@@ -24,6 +24,7 @@
 import { NextFunction, Request, Response } from 'express'
 import * as venueDashboardService from '../../services/dashboard/venue.dashboard.service'
 import * as planStateService from '../../services/dashboard/planState.service'
+import { cotizacionDeTuPlanSinRomper } from '../../services/billing/cotizacionDeLaOferta'
 import { getVenuePlanInfo } from '../../services/access/basePlan.service'
 import * as seatReconciliationService from '../../services/dashboard/seatReconciliation.service'
 import type { CancellationInput } from '@/services/shared/cancellationReason'
@@ -411,7 +412,7 @@ export async function updateVenuePaymentMethod(
  * Generates a URL to Stripe's hosted billing portal for subscription management
  */
 export async function createBillingPortalSession(
-  req: Request<{ venueId: string }, any, { returnUrl: string }>,
+  req: Request<{ venueId: string }, any, { returnUrl: string; flujo?: unknown }>,
   res: Response,
   next: NextFunction,
 ): Promise<void> {
@@ -426,7 +427,11 @@ export async function createBillingPortalSession(
 
     // Call service to create billing portal session
     const skipOrgCheck = await esSuperadminDeLaSesion(req.authContext)
-    const portalUrl = await venueDashboardService.createVenueBillingPortalSession(orgId, venueId, returnUrl, { skipOrgCheck })
+    // Planes editables (B2, Task 7): `flujo` sin revisar; sólo con versión del editor y `PONER_TARJETA` se pide el flujo de la tarjeta.
+    const portalUrl = await venueDashboardService.createVenueBillingPortalSession(orgId, venueId, returnUrl, {
+      skipOrgCheck,
+      flujo: req.body.flujo,
+    })
 
     res.status(200).json({
       success: true,
@@ -512,8 +517,11 @@ export async function detachVenuePaymentMethod(
 export async function getVenuePlan(req: Request<{ venueId: string }>, res: Response, next: NextFunction): Promise<void> {
   try {
     const { venueId } = req.params
-    const planState = await planStateService.getPlanState(venueId)
-    res.status(200).json({ success: true, data: planState })
+    // Planes editables (B2, Task 7): con versión del editor, «Tu plan» trae `cotizacion` (de la MISMA lectura de Stripe). Sin ella, o
+    // si leer la oferta falla, `data` es exactamente `getPlanState`, como hoy.
+    const { planState, suscripcion } = await planStateService.getPlanStateYSuscripcion(venueId)
+    const cotizacion = await cotizacionDeTuPlanSinRomper(venueId, planState, suscripcion)
+    res.status(200).json({ success: true, data: cotizacion ? { ...planState, cotizacion } : planState })
   } catch (error) {
     logger.error('Error getting venue plan state', {
       error: error instanceof Error ? error.message : 'Unknown error',
@@ -692,7 +700,17 @@ export async function getVenueSeatStatus(req: Request<{ venueId: string }>, res:
  * POST /api/v1/dashboard/venues/:venueId/plan/checkout
  */
 export async function createVenuePlanCheckoutSession(
-  req: Request<{ venueId: string }, any, { interval?: 'monthly' | 'annual'; tier?: 'PRO' | 'PREMIUM'; primerCobroAnunciado?: string }>,
+  req: Request<
+    { venueId: string },
+    any,
+    {
+      interval?: 'monthly' | 'annual'
+      tier?: 'PRO' | 'PREMIUM'
+      primerCobroAnunciado?: string
+      quoteToken?: unknown
+      acceptanceId?: unknown
+    }
+  >,
   res: Response,
   next: NextFunction,
 ): Promise<void> {
@@ -710,6 +728,8 @@ export async function createVenuePlanCheckoutSession(
     const checkoutUrl = await venueDashboardService.createVenuePlanCheckoutSession(orgId, venueId, interval, tier, {
       skipOrgCheck,
       primerCobroAnunciado: req.body.primerCobroAnunciado,
+      quoteToken: req.body.quoteToken,
+      acceptanceId: req.body.acceptanceId,
     })
 
     res.status(200).json({

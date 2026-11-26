@@ -31,6 +31,12 @@ function subSummary(overrides: Record<string, unknown> = {}) {
     grossAmountCents: 115884,
     // D5: el cupón vigente que lee retrievePlanSubscription; sin cupón, null (lo que ya asumía cada aserción).
     descuento: null as import('@/services/billing/descuentoDelPlan').DescuentoDelPlan | null,
+    // Planes editables (B2, Task 7): una suscripción de hoy no es una prueba sin tarjeta (lo que ya asumía cada aserción).
+    sinTarjeta: false,
+    faltaTarjeta: false,
+    tarjetaQueCobrara: null as import('@/services/billing/tarjetaQueCobraria').TarjetaVisible | null,
+    trialEnd: null as Date | null,
+    noHabraCobro: false,
     ...overrides,
   }
 }

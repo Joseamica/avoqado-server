@@ -2,9 +2,31 @@
  * Planes editables (B2, Task 3): la cotización que el alta publica en `progress`, con un comprobante firmado por plan y
  * periodicidad. Sólo existe con una versión que publicó el editor (`versionQueCobra()`); sin ella devuelve `null` y la
  * respuesta de hoy no cambia.
+ *
+ * B2, Task 7: también la de «Tu plan» (`GET /plan` → `cotizacion`), firmada para el negocio (`venue:<id>`), con lo que Stripe dice
+ * de una prueba SIN tarjeta (qué tarjeta cobraría y cuánto, §18), y la revisión del checkout que la cita.
  */
-import { cotizarOpcion, opcionDelAlta, type OpcionCotizada } from './opcionesDeCompra'
-import { versionQueCobra, type OfertaVigente, type Periodicidad, type PlanPagado } from './planOffer'
+import type Stripe from 'stripe'
+import type { PlanAcceptance, Prisma, PrismaClient } from '@prisma/client'
+import prisma from '../../utils/prismaClient'
+import logger from '../../config/logger'
+import { stripe, type ResumenDeLaSuscripcionDelPlan } from '../stripe.service'
+import type { PlanState } from '../dashboard/planState.service'
+import { elegirFilaDelPlan } from '../access/filaDelPlan'
+import { MARGEN_CHECKOUT_MS, MARGEN_OFERTA_MS, type FilaDePrueba } from './cobroDiferido'
+import {
+  cotizarOpcion,
+  ofertaCambio,
+  opcionDeTuPlan,
+  opcionDelAlta,
+  planFueraDeVenta,
+  revisarComprobante,
+  type OpcionCotizada,
+  type OpcionDeCompra,
+} from './opcionesDeCompra'
+import { codigoDelPlan, versionQueCobra, type OfertaVigente, type Periodicidad, type PlanPagado } from './planOffer'
+import { montoDelSiguienteCobro } from './siguienteCobro'
+import { LECTURA_ACOTADA, type TarjetaVisible } from './tarjetaQueCobraria'
 
 export interface PlanCotizado {
   displayName: string
@@ -50,4 +72,319 @@ export function cotizarOferta(vigente: OfertaVigente, organizationId: string, ah
 export async function cotizacionDelAlta(organizationId: string, ahora: Date = new Date()): Promise<OfertaDelAlta | null> {
   const vigente = await versionQueCobra()
   return vigente ? cotizarOferta(vigente, organizationId, ahora) : null
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// «Tu plan» (B2, Task 7, §17, §18)
+// ---------------------------------------------------------------------------------------------------------------------
+
+type Db = Prisma.TransactionClient | PrismaClient
+
+/**
+ * La fila de plan que se administra (la regla de `elegirFilaDelPlan`): de ella sale la prueba REGALADA que difiere el primer cobro
+ * (D3) o deja comprar un plan fuera de venta (§11 F). «Tu plan» y el checkout la leen igual; dentro del candado, con su `tx`.
+ */
+export async function leerFilaDelPlan(venueId: string, db: Db = prisma): Promise<FilaDePrueba | null> {
+  const codigos = TIERS.map(codigoDelPlan)
+  const filas = await db.venueFeature.findMany({
+    where: { venueId, feature: { code: { in: codigos } } },
+    select: {
+      id: true,
+      active: true,
+      endDate: true,
+      suspendedAt: true,
+      gracePeriodEndsAt: true,
+      stripeSubscriptionId: true,
+      updatedAt: true,
+      feature: { select: { code: true } },
+    },
+    take: codigos.length,
+  })
+  return elegirFilaDelPlan(filas)
+}
+
+export interface PlanDeTuPlan {
+  displayName: string
+  /** Hoy se puede comprar (al menos una periodicidad tiene opción): en venta, o con una prueba regalada vigente de ese plan. */
+  vendible: boolean
+  monthly: OpcionCotizada | null
+  annual: OpcionCotizada | null
+}
+
+/**
+ * La prueba SIN tarjeta del negocio según Stripe en ESTE momento (b2-r6 #4):
+ * - `SIN_TARJETA`: sigue `trialing` y Stripe no tiene con qué cobrarla (la pantalla ofrece «Poner mi tarjeta» sólo con monto);
+ * - `CON_TARJETA`: sigue `trialing` y Stripe ya tiene la tarjeta que cobrará (`tarjeta`);
+ * - `TERMINADA`: Stripe la canceló (aunque la baja todavía no llegue a la fila): nunca «Listo».
+ * `montoAlTerminarCents` es lo que Stripe cobrará (`amount_due` de su vista previa, con saldo y cupones); `null` = no se sabe.
+ */
+export interface EstadoDeLaPrueba {
+  estado: 'SIN_TARJETA' | 'CON_TARJETA' | 'TERMINADA'
+  tier: PlanPagado
+  interval: Periodicidad
+  trialEndsAt: string
+  tarjeta: TarjetaVisible | null
+  montoAlTerminarCents: number | null
+}
+
+/** La compra que el negocio aceptó al convertir su demo (Task 8) y todavía no usó (b2-r8 #7, b2-r9 #5). */
+export interface AceptacionPendiente {
+  acceptanceId: string
+  tier: PlanPagado
+  interval: Periodicidad
+  expiresAt: string
+}
+
+export interface CotizacionDeTuPlan {
+  versionNumber: number
+  planes: Record<PlanPagado, PlanDeTuPlan>
+  estadoDeLaPrueba?: EstadoDeLaPrueba
+  aceptacionPendiente?: AceptacionPendiente
+}
+
+const periodicidadDe = (interval: 'month' | 'year' | null): Periodicidad | null =>
+  interval === 'year' ? 'annual' : interval === 'month' ? 'monthly' : null
+
+/**
+ * El estado de la prueba sin tarjeta, de lo que `getPlanState` ya leyó de Stripe (`sub`, con la tarjeta, ruling P6). La única
+ * llamada nueva es la vista previa, y sólo con la prueba `trialing` que seguirá cobrándose. `null`: no hay prueba sin tarjeta, ya
+ * terminó y se cobró o falló el cobro (`active`, `past_due`, `unpaid`: «Tu plan» de hoy), tiene una cancelación programada
+ * (`noHabraCobro`: la pantalla de hoy ya dice cuándo termina) o no se pudo leer su tarjeta.
+ */
+async function estadoDeLaPruebaSinTarjeta(
+  planState: PlanState,
+  sub: ResumenDeLaSuscripcionDelPlan | null,
+): Promise<EstadoDeLaPrueba | null> {
+  const origin = planState.origin
+  if (origin?.kind !== 'CLASSIC' || !origin.tier || !sub?.sinTarjeta) return null
+  const interval = periodicidadDe(sub.interval)
+  if (!interval || !sub.trialEnd) return null
+  const base = { tier: origin.tier, interval, trialEndsAt: sub.trialEnd.toISOString() }
+  if (sub.status === 'canceled') return { estado: 'TERMINADA', ...base, tarjeta: null, montoAlTerminarCents: null }
+  if (sub.status !== 'trialing' || sub.noHabraCobro) return null
+  if (!sub.faltaTarjeta && !sub.tarjetaQueCobrara) return null
+  const montoAlTerminarCents = planState.stripeSubscriptionId
+    ? await montoDelSiguienteCobro(stripe, planState.stripeSubscriptionId, LECTURA_ACOTADA)
+    : null
+  return sub.faltaTarjeta
+    ? { estado: 'SIN_TARJETA', ...base, tarjeta: null, montoAlTerminarCents }
+    : { estado: 'CON_TARJETA', ...base, tarjeta: sub.tarjetaQueCobrara, montoAlTerminarCents }
+}
+
+/** Una fila de ESE plan con su suscripción viva (en prueba, activa o con el cobro pendiente): el negocio ya lo tiene. */
+const ESTADOS_DEL_PLAN_VIVO: ReadonlySet<PlanState['state']> = new Set(['trial', 'active', 'canceling', 'past_due'])
+/** Una suscripción en estos estados nunca se cobró: la aceptación que cita sigue sin usar. */
+const SUSCRIPCION_SIN_USO: ReadonlySet<string> = new Set(['incomplete_expired', 'canceled'])
+
+/**
+ * La aceptación viva del negocio (`expiresAt > ahora`, la más reciente) sólo si todavía no se usó (b2-r9 #5): el negocio no tiene ya
+ * ese plan vivo y ninguna suscripción de su cliente de Stripe cita su id (`metadata.planAcceptanceId`, que pone el checkout de la
+ * aceptación, Task 8), fuera de `incomplete_expired` y `canceled`. La lista de suscripciones sólo se pide con una aceptación viva.
+ * 🔴 Si Stripe no deja verla, LANZA: «no pude ver» no es «sin usar». `GET /plan` entonces no ofrece la acción; el checkout de Task 8
+ * la trata como sin usar (su 409) y, si ya se pagó, la regla común responde `PLAN_YA_CONTRATADO`.
+ *
+ * `opcionesDeStripe`: `LECTURA_ACOTADA` por default (sólo informa); la compra (Task 8) pasa `{}`.
+ */
+export async function aceptacionSinUsar(
+  venueId: string,
+  planState: PlanState,
+  customerId: string | null,
+  ahora: Date = new Date(),
+  opcionesDeStripe: Stripe.RequestOptions = LECTURA_ACOTADA,
+): Promise<PlanAcceptance | null> {
+  const aceptacion = await prisma.planAcceptance.findFirst({
+    where: { venueId, expiresAt: { gt: ahora } },
+    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+  })
+  if (!aceptacion) return null
+  const yaTieneElPlan =
+    planState.planTier === aceptacion.tier && Boolean(planState.stripeSubscriptionId) && ESTADOS_DEL_PLAN_VIVO.has(planState.state)
+  if (yaTieneElPlan) return null
+  if (!customerId) return aceptacion
+  const suscripciones = await stripe.subscriptions.list({ customer: customerId, status: 'all', limit: 100 }, opcionesDeStripe)
+  const usada = suscripciones.data.some(s => s.metadata?.planAcceptanceId === aceptacion.id && !SUSCRIPCION_SIN_USO.has(s.status))
+  if (usada) return null
+  if (suscripciones.has_more) {
+    throw new Error(`aceptacionSinUsar: el cliente tiene más de 100 suscripciones; no se pudo revisar la aceptación ${aceptacion.id}`)
+  }
+  return aceptacion
+}
+
+const esPlanPagado = (tier: string): tier is PlanPagado => tier === 'PRO' || tier === 'PREMIUM'
+const esPeriodicidad = (interval: string): interval is Periodicidad => interval === 'monthly' || interval === 'annual'
+
+/** `aceptacionPendiente` de «Tu plan»: nunca lanza (si no se puede saber si se usó, no se ofrece). */
+async function aceptacionPendienteDe(venueId: string, planState: PlanState, ahora: Date): Promise<AceptacionPendiente | null> {
+  try {
+    const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { stripeCustomerId: true } })
+    const aceptacion = await aceptacionSinUsar(venueId, planState, venue?.stripeCustomerId ?? null, ahora)
+    if (!aceptacion) return null
+    if (!esPlanPagado(aceptacion.tier) || !esPeriodicidad(aceptacion.interval)) {
+      logger.warn('«Tu plan»: la aceptación guardada no es de un plan y periodicidad conocidos; no se ofrece', {
+        venueId,
+        acceptanceId: aceptacion.id,
+      })
+      return null
+    }
+    return {
+      acceptanceId: aceptacion.id,
+      tier: aceptacion.tier,
+      interval: aceptacion.interval,
+      expiresAt: aceptacion.expiresAt.toISOString(),
+    }
+  } catch (error) {
+    logger.warn('«Tu plan»: no se pudo saber si la aceptación ya se usó; no se ofrece', {
+      venueId,
+      error: error instanceof Error ? error.message : String(error),
+    })
+    return null
+  }
+}
+
+/**
+ * Lo que «Tu plan» cotiza con la versión del editor; `null` sin ella (y entonces `GET /plan` es el de hoy). `sub` es lo que
+ * `getPlanState` ya leyó de la suscripción del plan.
+ *
+ * - Con una prueba sin tarjeta, `estadoDeLaPrueba`; en `SIN_TARJETA` ninguna opción de compra (comprar otro plan encima lo niega la
+ *   regla común). En `TERMINADA`, las opciones de compra normales, como Gratis.
+ * - Sin prueba sin tarjeta, las opciones de `opcionDeTuPlan` (con `MARGEN_OFERTA_MS`, para que el checkout, con 48 h, nunca reciba
+ *   un «$0 hoy» que ya no daría), firmadas para `venue:<id>`, sin llamadas nuevas a Stripe.
+ * - `aceptacionPendiente` aunque ningún plan esté en venta en la vigente: el checkout con su `acceptanceId` honra la versión aceptada.
+ *
+ * Lanza si leer la oferta falla (una versión rota, una ranura sin precio): quien responde `GET /plan` usa
+ * `cotizacionDeTuPlanSinRomper`.
+ */
+export async function cotizacionDeTuPlan(
+  venueId: string,
+  planState: PlanState,
+  sub: ResumenDeLaSuscripcionDelPlan | null,
+  ahora: Date = new Date(),
+): Promise<CotizacionDeTuPlan | null> {
+  const vigente = await versionQueCobra()
+  if (!vigente) return null
+  const estadoDeLaPrueba = await estadoDeLaPruebaSinTarjeta(planState, sub)
+  const sinOpciones = estadoDeLaPrueba?.estado === 'SIN_TARJETA'
+  const fila = sinOpciones ? null : await leerFilaDelPlan(venueId)
+  const alcance = `venue:${venueId}`
+  const planes = {} as Record<PlanPagado, PlanDeTuPlan>
+  for (const tier of TIERS) {
+    const plan: PlanDeTuPlan = { displayName: vigente.definition[tier].displayName, vendible: false, monthly: null, annual: null }
+    if (!sinOpciones) {
+      for (const interval of PERIODOS) {
+        const opcion = opcionDeTuPlan({
+          vigente,
+          fila,
+          enPruebaDeStripe: null,
+          tier,
+          interval,
+          ahoraMs: ahora.getTime(),
+          margenMs: MARGEN_OFERTA_MS,
+        })
+        if (opcion) plan[interval] = cotizarOpcion(opcion, { versionNumber: vigente.number, tier, interval, alcance }, ahora)
+      }
+    }
+    plan.vendible = plan.monthly !== null || plan.annual !== null
+    planes[tier] = plan
+  }
+  const aceptacionPendiente = await aceptacionPendienteDe(venueId, planState, ahora)
+  return {
+    versionNumber: vigente.number,
+    planes,
+    ...(estadoDeLaPrueba ? { estadoDeLaPrueba } : {}),
+    ...(aceptacionPendiente ? { aceptacionPendiente } : {}),
+  }
+}
+
+/**
+ * `cotizacionDeTuPlan` para `GET /plan`: leer la oferta nunca tumba «Tu plan» (b2-r9 #8). Si lanza, `null` con un aviso y la
+ * respuesta es la de hoy.
+ */
+export async function cotizacionDeTuPlanSinRomper(
+  venueId: string,
+  planState: PlanState,
+  sub: ResumenDeLaSuscripcionDelPlan | null,
+  ahora: Date = new Date(),
+): Promise<CotizacionDeTuPlan | null> {
+  try {
+    return await cotizacionDeTuPlan(venueId, planState, sub, ahora)
+  } catch (error) {
+    logger.warn('«Tu plan»: no se pudo leer la oferta; se responde lo de hoy, sin cotización', {
+      venueId,
+      error: error instanceof Error ? error.message : String(error),
+    })
+    return null
+  }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// El checkout de «Tu plan» con una versión del editor (B2, Task 7)
+// ---------------------------------------------------------------------------------------------------------------------
+
+/**
+ * Pasos 1-3 de la compra de «Tu plan»: el comprobante (`venue:<id>`, la vigente; su rechazo se lanza), la opción de la vigente con
+ * el margen del checkout (sin ella, `PLAN_NOT_ON_SALE`) y que el comprobante diga lo mismo que la opción: el precio, y el fin de la
+ * prueba regalada si la difiere (`PRUEBA_CERCA` si ya no se puede, `QUOTE_MISMATCH` si cambió); sin fin de prueba, se paga hoy el
+ * precio. Nunca toca Stripe. `trialEnd` es el fin con el que se abre la sesión (`undefined` = se cobra hoy).
+ */
+export function revisarCompraDeTuPlan(args: {
+  vigente: OfertaVigente
+  venueId: string
+  tier: PlanPagado
+  interval: Periodicidad
+  quoteToken: unknown
+  fila: FilaDePrueba | null
+  ahora: Date
+}): { opcion: OpcionDeCompra; trialEnd: Date | undefined } {
+  const { vigente, venueId, tier, interval, quoteToken, fila, ahora } = args
+  const n = vigente.number
+  const revisado = revisarComprobante({ token: quoteToken, alcance: `venue:${venueId}`, tier, interval, versionNumber: n, ahora })
+  if (revisado.comprobante === null) throw revisado.rechazo
+  const { comprobante } = revisado
+  const opcion = opcionDeTuPlan({
+    vigente,
+    fila,
+    enPruebaDeStripe: null,
+    tier,
+    interval,
+    ahoraMs: ahora.getTime(),
+    margenMs: MARGEN_CHECKOUT_MS,
+  })
+  if (!opcion) throw planFueraDeVenta(tier, vigente.definition[tier].displayName)
+  if (comprobante.precioCents !== opcion.precioCents) throw ofertaCambio('QUOTE_MISMATCH', n)
+  if (comprobante.trialEndsAt) {
+    if (comprobante.firstChargeCents !== 0) throw ofertaCambio('QUOTE_MISMATCH', n)
+    if (!opcion.trialEndsAt) throw ofertaCambio('PRUEBA_CERCA', n)
+    if (opcion.trialEndsAt.getTime() !== comprobante.trialEndsAt.getTime()) throw ofertaCambio('QUOTE_MISMATCH', n)
+    return { opcion, trialEnd: opcion.trialEndsAt }
+  }
+  if (comprobante.firstChargeCents !== comprobante.precioCents) throw ofertaCambio('QUOTE_MISMATCH', n)
+  return { opcion, trialEnd: undefined }
+}
+
+/**
+ * Paso 5, dentro de la regla común (con su `tx`, sólo la base): la vigente sigue siendo la del comprobante y la prueba regalada da
+ * la misma compra. Si no, `ofertaCambio` (o `PLAN_NOT_ON_SALE` si ya no hay opción) y no se abre nada. Lo que se publique DESPUÉS de
+ * esta relectura es residuo aceptado: sale con la versión que la persona vio.
+ */
+export async function exigirLaMismaCompra(
+  tx: Prisma.TransactionClient,
+  args: { venueId: string; tier: PlanPagado; interval: Periodicidad; versionNumber: number; trialEnd: Date | undefined },
+): Promise<void> {
+  const { venueId, tier, interval, versionNumber, trialEnd } = args
+  const releida = await versionQueCobra(tx)
+  if (!releida || releida.number !== versionNumber) throw ofertaCambio('VERSION', releida?.number ?? 1)
+  const fila = await leerFilaDelPlan(venueId, tx)
+  const opcion = opcionDeTuPlan({
+    vigente: releida,
+    fila,
+    enPruebaDeStripe: null,
+    tier,
+    interval,
+    ahoraMs: Date.now(),
+    margenMs: MARGEN_CHECKOUT_MS,
+  })
+  if (!opcion) throw planFueraDeVenta(tier, releida.definition[tier].displayName)
+  if (trialEnd && opcion.trialEndsAt?.getTime() !== trialEnd.getTime()) {
+    throw ofertaCambio(opcion.trialEndsAt ? 'QUOTE_MISMATCH' : 'PRUEBA_CERCA', releida.number)
+  }
 }

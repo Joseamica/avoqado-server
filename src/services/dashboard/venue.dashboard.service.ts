@@ -54,8 +54,10 @@ import {
   createTrialSetupIntent,
 } from '../stripe.service'
 import { autorizarObligacionNueva } from '../access/autorizarObligacionNueva'
-import { resolverPrecioDelPlan } from '../billing/precioDelPlan'
+import { exigirPrecioDeStripe, resolverPrecioDelPlan } from '../billing/precioDelPlan'
 import { exigirNombreDelPlanAlDia } from '../billing/nombreDelPlanEnStripe'
+import { versionQueCobra, type OfertaVigente } from '../billing/planOffer'
+import { exigirLaMismaCompra, leerFilaDelPlan, revisarCompraDeTuPlan } from '../billing/cotizacionDeLaOferta'
 import { STANDARD_PLAN_GROSS_CENTS } from '../access/planPricing.constants'
 import { ventaSueltaAbierta } from '../access/ventaSuelta'
 import { notifySuperadminsNewKycSubmission } from '../superadmin/kycReview.service'
@@ -1603,7 +1605,11 @@ export async function createVenueBillingPortalSession(
   orgId: string,
   venueId: string,
   returnUrl: string,
-  options: { skipOrgCheck?: boolean } = {},
+  /**
+   * `flujo` (planes editables, B2 Task 7, §17): sin revisar. Sólo `PONER_TARJETA` con una versión del editor abre el portal en el
+   * flujo de la tarjeta; cualquier otro valor, o sin versión del editor, el portal de hoy.
+   */
+  options: { skipOrgCheck?: boolean; flujo?: unknown } = {},
 ): Promise<string> {
   logger.info('Creating billing portal session', { venueId, returnUrl })
 
@@ -1687,7 +1693,9 @@ export async function createVenueBillingPortalSession(
   }
 
   // Create portal session
-  const portalUrl = await createCustomerPortalSession(stripeCustomerId, returnUrl)
+  const portalUrl = (await pideElFlujoDeLaTarjeta(venueId, options.flujo))
+    ? await createCustomerPortalSession(stripeCustomerId, returnUrl, { flujo: 'PONER_TARJETA' })
+    : await createCustomerPortalSession(stripeCustomerId, returnUrl)
 
   logger.info('✅ Billing portal session created', {
     venueId,
@@ -1695,6 +1703,24 @@ export async function createVenueBillingPortalSession(
   })
 
   return portalUrl
+}
+
+/**
+ * Planes editables (B2, Task 7): ¿se abre el portal en el flujo de la tarjeta? Sólo `PONER_TARJETA` con una versión del editor (la
+ * prueba sin tarjeta sólo existe con ella). Si leer la oferta falla, el portal de hoy: no se cobra nada y «Tu plan» tampoco ofrece
+ * «Poner mi tarjeta» sin su cotización.
+ */
+async function pideElFlujoDeLaTarjeta(venueId: string, flujo: unknown): Promise<boolean> {
+  if (flujo !== 'PONER_TARJETA') return false
+  try {
+    return (await versionQueCobra()) !== null
+  } catch (error) {
+    logger.warn('billing-portal: no se pudo leer la oferta; se abre el portal de hoy', {
+      venueId,
+      error: error instanceof Error ? error.message : String(error),
+    })
+    return false
+  }
 }
 
 /**
@@ -1721,8 +1747,12 @@ export async function createVenuePlanCheckoutSession(
   /**
    * `primerCobroAnunciado` (D3): la fecha que el DASHBOARD mostró con «hoy $0». Si ya no se puede diferir, o la prueba
    * cambió de fecha (el SUPERADMIN la acortó), 409 en vez de abrir un pago distinto de lo anunciado.
+   *
+   * Planes editables (B2, Task 7): `quoteToken` es el comprobante de «Tu plan» (`GET /plan` → `cotizacion`) y `acceptanceId` la
+   * aceptación de la demo (Task 8). Sin revisar: sin versión del editor no se leen; con ella el comprobante es obligatorio y
+   * sustituye a `primerCobroAnunciado` (su `trialEndsAt` es la fecha anunciada).
    */
-  options: { skipOrgCheck?: boolean; primerCobroAnunciado?: string } = {},
+  options: { skipOrgCheck?: boolean; primerCobroAnunciado?: string; quoteToken?: unknown; acceptanceId?: unknown } = {},
 ): Promise<string> {
   const tierCode = tier === 'PREMIUM' ? 'PLAN_PREMIUM' : 'PLAN_PRO'
   logger.info('Creating plan checkout session', { venueId, interval, tier })
@@ -1814,6 +1844,14 @@ export async function createVenuePlanCheckoutSession(
   // antes, que miraban el ACCESO (un plan suspendido que Stripe sigue cobrando no contaba) y no impedían dos pestañas:
   // ahora se expiran las compras abiertas y se lee lo que el negocio tiene vivo en Stripe.
   const cliente = stripeCustomerId
+
+  // Planes editables (B2, Task 7): con una versión del editor la compra cita el comprobante de «Tu plan». Sin ella, lo de hoy, literal
+  // (el comprobante y la aceptación que lleguen ni se leen).
+  const vigente = await versionQueCobra()
+  if (vigente) {
+    // Task 8 (ruling P8): aquí, ANTES del comprobante, la compra de una aceptación (`acceptanceId`) y el 409 PLAN_ACCEPTANCE_REQUIRED.
+    return checkoutConLaOferta({ venue, customerId: cliente, vigente, tier, interval, billingBase, quoteToken: options.quoteToken })
+  }
   // El precio de Stripe se lee UNA vez; si no es el que el dashboard muestra, NO se abre sesión (nada se cobra).
   // 🔴 Codex B0 #3: ANTES de la regla común. La regla vence las compras abiertas del cliente antes de crear: si este 409
   // saliera dentro, el enlace de pago válido de otra pestaña quedaba vencido y el cliente sin uno nuevo. La sesión se abre
@@ -1897,6 +1935,66 @@ export async function createVenuePlanCheckoutSession(
     tierCode,
   })
 
+  return checkoutUrl
+}
+
+/**
+ * El checkout de «Tu plan» con una versión del editor (B2, Task 7). En este orden:
+ *  1-3. el comprobante y la opción de la vigente (`revisarCompraDeTuPlan`; su rechazo se lanza);
+ *  4. el precio de la versión en Stripe (activo y del bruto) y el nombre del plan, ANTES de la regla común: dentro vencería la
+ *     sesión abierta de otra pestaña (Codex B0 #3);
+ *  5. dentro de la regla común, la relectura de la vigente y de la fila con su `tx` (`exigirLaMismaCompra`) y la sesión con el
+ *     priceId de la versión, su fin de prueba y la metadata que la cita.
+ * Una prueba sin tarjeta viva del mismo plan la sigue negando la regla común (`PLAN_YA_CONTRATADO`).
+ */
+async function checkoutConLaOferta(args: {
+  venue: { id: string; name: string; slug: string }
+  customerId: string
+  vigente: OfertaVigente
+  tier: 'PRO' | 'PREMIUM'
+  interval: 'monthly' | 'annual'
+  billingBase: string
+  quoteToken: unknown
+}): Promise<string> {
+  const { venue, customerId, vigente, tier, interval, billingBase, quoteToken } = args
+  const venueId = venue.id
+  const tierCode = tier === 'PREMIUM' ? 'PLAN_PREMIUM' : 'PLAN_PRO'
+  const n = vigente.number
+  const { opcion, trialEnd } = revisarCompraDeTuPlan({
+    vigente,
+    venueId,
+    tier,
+    interval,
+    quoteToken,
+    fila: await leerFilaDelPlan(venueId),
+    ahora: new Date(),
+  })
+  await exigirPrecioDeStripe(opcion.priceId, opcion.precioCents, {
+    venueId,
+    tierCode,
+    interval,
+    versionId: vigente.versionId,
+    number: n,
+  })
+  await exigirNombreDelPlanAlDia(tier)
+  const checkoutUrl = await autorizarObligacionNueva(venueId, customerId, { tipo: 'PLAN', tier }, async tx => {
+    await exigirLaMismaCompra(tx, { venueId, tier, interval, versionNumber: n, trialEnd })
+    return createPlanCheckoutSession({
+      venueId,
+      customerId,
+      priceId: opcion.priceId,
+      interval,
+      tierCode,
+      successUrl: `${billingBase}?checkout=success${trialEnd ? '&sinCobroHoy=1' : ''}`,
+      cancelUrl: `${billingBase}?checkout=cancel`,
+      venueName: venue.name,
+      venueSlug: venue.slug,
+      trialEnd,
+      extraMetadata: { planOfferVersion: String(n), planOfferPrecioDe: String(n) },
+    })
+  })
+
+  logger.info('✅ Plan checkout session created', { venueId, venueName: venue.name, interval, tierCode, offerVersion: n })
   return checkoutUrl
 }
 
