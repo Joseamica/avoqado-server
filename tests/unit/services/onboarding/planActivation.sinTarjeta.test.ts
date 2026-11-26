@@ -623,11 +623,13 @@ describe('B2 Task 6, fix round 1: la tarjeta es informativa y nunca frena el cie
 describe('B2 Task 6, fix round 2', () => {
   const TOPE = { timeout: 5_000, maxNetworkRetries: 0 }
 
-  it('🔴 C2: la lectura del cliente que es puerta de la compra (PASO 4) va con las opciones del cliente de siempre ({}); la de la tarjeta después de abrir la prueba, con el tope de 5 s', async () => {
+  it('🔴 C2: la lectura del cliente que es puerta de la compra (PASO 4) va con las opciones del cliente de siempre (sin tercer argumento); la de la tarjeta después de abrir la prueba, con el tope de 5 s', async () => {
     await pedir({ quoteToken: comprobante() })
 
-    const lecturas = mockCustomerRetrieve.mock.calls.map((c: unknown[]) => c[2])
-    expect(lecturas).toEqual([{}, TOPE])
+    // 🔴 Prueba con Stripe de pruebas (26-nov): pasar `{}` como opciones hace que stripe-node lance «Unknown arguments» (500 en la
+    // compra). Las opciones del cliente de siempre son NO pasar el tercer argumento.
+    expect(mockCustomerRetrieve.mock.calls[0]).toHaveLength(2)
+    expect(mockCustomerRetrieve.mock.calls[1][2]).toEqual(TOPE)
   })
 
   it('🔴 la lectura de la tarjeta RECHAZA (sin ir por la bienvenida: una prueba sin tarjeta recuperada que ya tiene tarjeta) → el cierre termina igual, sin un rechazo sin manejar (Jest falla la prueba si lo hay) y sin la tarjeta en la respuesta', async () => {
