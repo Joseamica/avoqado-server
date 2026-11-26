@@ -462,6 +462,26 @@ describe('B2 Task 5: un intento anterior que pudo cobrar se recupera con su susc
     expect(mockSubCreate.mock.calls[0][0].items).toEqual([{ price: 'price_v2_pro_m' }])
   })
 
+  it('🔴 Codex b2-code r2 R1: con una v1 dañada (versionQueCobra lanza), un reto estándar ANUAL pendiente y el reenvío con la misma tarjeta eligiendo mensual → el mismo reto, como B1: sin comparar periodicidad ni versión y sin anular nada', async () => {
+    prismaMock.planOfferPointer.findUnique.mockResolvedValue(punteroA('cv1', 1, { schemaVersion: 1, rota: true }) as never)
+    // El intento de la v1 (sin versión del editor) y, por si acaso, también uno que dijera la versión: con la oferta ilegible ninguno se compara.
+    for (const metadata of [sin(cobrada().metadata, 'planOfferVersion', 'planOfferPrecioDe'), cobrada().metadata]) {
+      jest.clearAllMocks()
+      prismaMock.$transaction.mockImplementation(async (cb: unknown) => (cb as (tx: unknown) => unknown)(prismaMock))
+      alta({ planOfferVersionNumber: null })
+      mockSubRetrieve.mockResolvedValue({ ...retoDeLaV2(), metadata })
+      pagoConEstado('requires_action')
+
+      await expect(pedir()).rejects.toMatchObject({
+        statusCode: 409,
+        code: 'PLAN_PAYMENT_REQUIRES_ACTION',
+        details: { clientSecret: 'pi_reto_secret_x' },
+      })
+      expect(mockVoid).not.toHaveBeenCalled()
+      expect(mockSubCreate).not.toHaveBeenCalled()
+    }
+  })
+
   it('el reenvío del navegador sin comprobante legible no reanuda el reto de una versión del editor (la versión vacía no es la suya): se anula y el intento nuevo pide su comprobante', async () => {
     mockSubRetrieve.mockResolvedValue(retoDeLaV2())
     pagoConEstado('requires_action')

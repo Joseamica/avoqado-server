@@ -1087,11 +1087,11 @@ async function anularIntento(sub: Stripe.Subscription): Promise<'DESCARTADA' | {
  * ⇒ 503 con el lease VIVO (regla 4). Los 409/402/503 de aquí salen tal cual: el llamador NO lo envuelve en su `try/catch`
  * de lecturas. Cada 503 de «no sé» deja un `logger.warn` con organización, suscripción y estado (nunca el secreto).
  *
- * 🔴 Codex b2-code #2: con versión del editor (`delEditor`), también la versión de la oferta estándar (`planOfferVersion` de la
- * suscripción contra la que nombra el comprobante de la petición, `versionDelPedido`; vacía sin comprobante legible) y la
- * periodicidad de la suscripción contra la pedida. Un comprobante NUEVO (otra versión u otro ciclo) no reanuda el reto viejo: se
- * anula y se estrena intento. El reenvío del navegador con SU comprobante (aunque ya no sea el de la vigente) sí lo reanuda. Sin
- * versión del editor, lo de hoy: sin la periodicidad y con la versión vacía de los dos lados.
+ * 🔴 Codex b2-code #2: con una versión del editor leída (`delEditor`), también la versión de la oferta estándar
+ * (`planOfferVersion` de la suscripción contra la que nombra el comprobante de la petición, `versionDelPedido`; vacía sin
+ * comprobante legible) y la periodicidad de la suscripción contra la pedida. Un comprobante NUEVO (otra versión u otro ciclo) no
+ * reanuda el reto viejo: se anula y se estrena intento. El reenvío del navegador con SU comprobante (aunque ya no sea el de la
+ * vigente) sí lo reanuda. Sin versión del editor, o si leerla falló (r2 R1), lo de B1: sin la periodicidad y sin la versión.
  */
 async function resolverIntentoIncompleto(args: {
   sub: Stripe.Subscription
@@ -1157,9 +1157,11 @@ async function resolverIntentoIncompleto(args: {
     // versión vieja y el PASO 7 respondería OFFER_CHANGED (cobrado y sin acceso); así se anula y se estrena intento, y el
     // avance libera el lugar de la versión vieja con la misma regla.
     (sub.metadata?.launchOfferVersion ?? '') === (campaign ? String(campaign.offerVersion) : '') &&
-    // Codex b2-code #2: la versión de la oferta estándar y la periodicidad (sólo con versión del editor; ver arriba).
-    (sub.metadata?.planOfferVersion ?? '') === (versionDelPedido !== null ? String(versionDelPedido) : '') &&
-    (!delEditor || periodicidadDeLaSuscripcion(sub) === input.interval) &&
+    // Codex b2-code #2: la versión de la oferta estándar y la periodicidad, sólo con una versión del editor LEÍDA (r2 R1: con la
+    // oferta ilegible, como B1, ninguna de las dos se compara).
+    (!delEditor ||
+      ((sub.metadata?.planOfferVersion ?? '') === (versionDelPedido !== null ? String(versionDelPedido) : '') &&
+        periodicidadDeLaSuscripcion(sub) === input.interval)) &&
     input.payNow
 
   if (mismoIntento && (pi?.status === 'requires_action' || pi?.status === 'requires_confirmation')) {
@@ -1577,9 +1579,10 @@ export async function activatePlan(
           organizationId,
           attempt,
           lease: nuestroLease,
-          delEditor: recuperacionDiferida,
-          // Sin versión del editor el comprobante no se lee (B0/B1 literal).
-          versionDelPedido: recuperacionDiferida ? versionQueNombraElComprobante(input.quoteToken, organizationId, now) : null,
+          // Codex b2-code r2 R1: sólo con una versión del editor LEÍDA (`estandar`). `recuperacionDiferida` también vale cuando leer la
+          // oferta falló (`lecturaFallida`): ahí, como B1, ni la versión ni la periodicidad se comparan y el comprobante no se lee.
+          delEditor: estandar !== undefined,
+          versionDelPedido: estandar !== undefined ? versionQueNombraElComprobante(input.quoteToken, organizationId, now) : null,
         }))
       } else if (!SUSCRIPCION_COBRADA.includes(estado as (typeof SUSCRIPCION_COBRADA)[number])) {
         logger.warn('activate-plan: suscripción recuperada en estado no concluyente', {
