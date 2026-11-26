@@ -479,6 +479,10 @@
         "sourceRef": "a4e7d854341cdef73bf94ff109a9b54e0f029bf9"
       },
       {
+        "pagina": "android/recibos/imprimir-y-reimprimir-recibo",
+        "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+      },
+      {
         "pagina": "android/reembolsos/hacer-cambio",
         "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
       },
@@ -561,6 +565,10 @@
       {
         "pagina": "windows/pedidos-en-linea/atender-pedidos-en-linea",
         "sourceRef": "a4e7d854341cdef73bf94ff109a9b54e0f029bf9"
+      },
+      {
+        "pagina": "windows/recibos/imprimir-y-reimprimir-recibo",
+        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
       },
       {
         "pagina": "windows/reembolsos/hacer-cambio",
@@ -4823,6 +4831,10 @@
         "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
       },
       {
+        "pagina": "android/recibos/imprimir-y-reimprimir-recibo",
+        "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+      },
+      {
         "pagina": "android/reembolsos/hacer-cambio",
         "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
       },
@@ -4972,6 +4984,10 @@
       },
       {
         "pagina": "windows/personal/checar-entrada-y-salida",
+        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+      },
+      {
+        "pagina": "windows/recibos/imprimir-y-reimprimir-recibo",
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
       },
       {
@@ -5887,6 +5903,10 @@
         "sourceRef": "4c92a98fab1256782524e72748f44bfe99e2052d"
       },
       {
+        "pagina": "tpv/mesas/descuento-en-la-cuenta-de-la-mesa",
+        "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660"
+      },
+      {
         "pagina": "tpv/mesas/fusionar-cuentas",
         "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660"
       },
@@ -6153,6 +6173,12 @@
       {
         "pagina": "tpv/pedidos-en-linea/abrir-y-cobrar-pedidos-pagados-en-linea",
         "sourceRef": "f659760ee224d71b54f4abf3d2ede18d73f7cc91"
+      }
+    ],
+    "avoqado-tpv:app/src/main/java/com/jaac/avoqado_tpv/features/payment/data/api/PaymentApiService.kt": [
+      {
+        "pagina": "tpv/ventas/vender-con-cobrar",
+        "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660"
       }
     ],
     "avoqado-tpv:app/src/main/java/com/jaac/avoqado_tpv/features/payment/data/ledger/BlumonAttemptResolver.kt": [
@@ -6707,6 +6733,12 @@
         "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660"
       }
     ],
+    "avoqado-tpv:app/src/main/java/com/jaac/avoqado_tpv/features/tables/data/api/TablesApiService.kt": [
+      {
+        "pagina": "tpv/mesas/descuento-en-la-cuenta-de-la-mesa",
+        "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660"
+      }
+    ],
     "avoqado-tpv:app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/AssignWaiterSheet.kt": [
       {
         "pagina": "tpv/mesas/reasignar-mesero",
@@ -6979,6 +7011,10 @@
         "sourceRef": "4c92a98fab1256782524e72748f44bfe99e2052d"
       },
       {
+        "pagina": "tpv/mesas/descuento-en-la-cuenta-de-la-mesa",
+        "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660"
+      },
+      {
         "pagina": "tpv/mesas/fusionar-cuentas",
         "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660"
       },
@@ -6996,6 +7032,10 @@
       },
       {
         "pagina": "tpv/reportes/ver-reportes-de-otros-dias",
+        "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660"
+      },
+      {
+        "pagina": "tpv/ventas/vender-con-cobrar",
         "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660"
       }
     ],

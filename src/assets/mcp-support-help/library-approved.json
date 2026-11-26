@@ -101,8 +101,10 @@
       ]
     },
     "android/cobro/dar-descuento-o-cortesia": {
-      "sha256": "3fde65582fb87233833cc4458445c4c20eff368293b98f24a270ed42c45e2193",
-      "requiredPermissions": []
+      "sha256": "7d3ce1a8f2d5c0db0b5a3cdb53149bad237eb260b82ef18e309c64e5d734f90f",
+      "requiredPermissions": [
+        "discounts:apply"
+      ]
     },
     "android/cobro/dividir-la-cuenta": {
       "sha256": "b9f84d09c5c3582121b83affe34d568f13a4d9081e5f48b213fc8d2e2732d196",
@@ -239,7 +241,7 @@
       "gateKind": "FEATURE"
     },
     "android/recibos/imprimir-y-reimprimir-recibo": {
-      "sha256": "db9da4142270a80edd215409650f459e5c21fda33e76d87df05d35ca4703f1f9",
+      "sha256": "aec3465c5b9b380523fd47dd0c51fdb7c4123a550fd2a884fe22c1bcf63f6385",
       "requiredPermissions": []
     },
     "android/reembolsos/hacer-cambio": {
@@ -325,8 +327,10 @@
       ]
     },
     "android/tarjetas-de-regalo/vender-y-cobrar-tarjeta-de-regalo": {
-      "sha256": "b284e4d1f87b516e4e533bd00c9f8561b0a00247ba7615921a8ce129712da854",
-      "requiredPermissions": []
+      "sha256": "45473203f4549310512bf02de2c0575537fbb4768ba75f145416a70aeec130ac",
+      "requiredPermissions": [
+        "giftCards:read"
+      ]
     },
     "dashboard/caja/corregir-conteo-de-caja": {
       "sha256": "203313c7166ca4363b38cefaa8fbcf9bfd2c7a175851bb7c844f8063f2c09ee2",
@@ -624,7 +628,9 @@
     },
     "dashboard/inicio/entender-inicio-dashboard": {
       "sha256": "5bde6138a9cf081369897781912c63ace27da38675a8ac716484cfe6668963a5",
-      "requiredPermissions": []
+      "requiredPermissions": [
+        "home:read"
+      ]
     },
     "dashboard/inicio/iniciar-sesion": {
       "sha256": "752413a31f9742668de093ebec3be4f184b976474c0947ab44b5198db0b9d83a",
@@ -838,8 +844,12 @@
       ]
     },
     "dashboard/reportes/comparar-inicio-y-resumen-de-ventas": {
-      "sha256": "ee8f3e04f90fdaafc226c86660f2b7fd69c9540c8ddb74037a13b76db7c3b9c6",
-      "requiredPermissions": []
+      "sha256": "2d6dad4de046129503e9c3d1b250d939df884f4c361dccff21280246687cccd6",
+      "requiredPermissions": [
+        "home:read",
+        "analytics:read",
+        "reports:read"
+      ]
     },
     "dashboard/reportes/reporte-de-promociones": {
       "sha256": "b675138de99024ec5bf4b1fb62e3666e0df3009408f5a7ea85aafb2fe2596bac",
@@ -1037,7 +1047,9 @@
     },
     "dashboard/ventas/resolver-cobros-de-la-maquina-en-duda": {
       "sha256": "5fcb1de5651e073e536e2228c349033426969cd7db5164104b9e9acbd1339afd",
-      "requiredPermissions": []
+      "requiredPermissions": [
+        "cash-machine:resolve"
+      ]
     },
     "dashboard/ventas/solicitar-activacion-uber-eats": {
       "sha256": "e40f5151fd9c415777f88ae1607e67a93a29d25549eb2d4c1b86ca6bb3b7720f",
@@ -1201,8 +1213,12 @@
       "gateKind": "FEATURE"
     },
     "tpv/mesas/descuento-en-la-cuenta-de-la-mesa": {
-      "sha256": "c91092a9080caf0f3ced6fb7a2a761a8d19a24faa1b114b6e702b229a1ac5793",
-      "requiredPermissions": []
+      "sha256": "b7f63938b8e06d23188dc583b68b2ff4241efd11f63744fe63ec40398f934756",
+      "requiredPermissions": [
+        "discounts:apply"
+      ],
+      "featureCode": "TABLE_SERVICE",
+      "gateKind": "FEATURE"
     },
     "tpv/mesas/fusionar-cuentas": {
       "sha256": "dd240b10c9b22ae8f8a3c77994118964ce941fa95b6f36da5d633e809b18fc03",
@@ -1241,7 +1257,7 @@
       ]
     },
     "tpv/recibos/no-imprime-pax": {
-      "sha256": "58a279cd9f6b563fe8d55d306f21600c2069797789b95a45714a33581ecf6cc9",
+      "sha256": "4b59595c2a19dab3187cc615b28ef9423acbf16a18643de875257938373ba364",
       "requiredPermissions": []
     },
     "tpv/reembolsos/reembolsar-cobro-nexgo": {
@@ -1271,8 +1287,10 @@
       "requiredPermissions": []
     },
     "tpv/ventas/vender-con-cobrar": {
-      "sha256": "526c483925e83b985937421c78469ca3e40b7ae3f0e0911e0889728fa50ca5cb",
-      "requiredPermissions": []
+      "sha256": "80e8c25a1b7fede59f63a118b008999f88aa52a4d2d5cb9fff920af0788a0c31",
+      "requiredPermissions": [
+        "payments:create"
+      ]
     },
     "windows/ayuda/ver-version-de-la-app": {
       "sha256": "dea954bb10492d99ce1a54d8836a27db48090ea53999cc2e371e4fbd634a06c4",
@@ -1370,8 +1388,10 @@
       ]
     },
     "windows/cobro/dar-descuento-o-cortesia": {
-      "sha256": "b415f6a254b7b941cf0d8919d30be4543d23bef25cdd9e46d30ab8160e2ed8c2",
-      "requiredPermissions": []
+      "sha256": "b3fcf8eddef95e0714f75c6491a4b8d294aeda267f11a9be4deff9e839e3d754",
+      "requiredPermissions": [
+        "discounts:apply"
+      ]
     },
     "windows/cobro/dividir-la-cuenta": {
       "sha256": "fdf7c5be6b214894f23d933f04d996d2b79b2728f82c9ec7a840c0c5d6910dd1",
@@ -1514,7 +1534,7 @@
       "gateKind": "FEATURE"
     },
     "windows/recibos/imprimir-y-reimprimir-recibo": {
-      "sha256": "39b7ca8de443cd41a53dcc9535e1ce6588237b9bc4fa4979c4d990d2c533555d",
+      "sha256": "9ea70181b79b7ba1594b2036065bca8ae3672bfbb3769cdb84858633347fa2bf",
       "requiredPermissions": []
     },
     "windows/reembolsos/hacer-cambio": {
@@ -1598,8 +1618,10 @@
       ]
     },
     "windows/tarjetas-de-regalo/vender-y-cobrar-tarjeta-de-regalo": {
-      "sha256": "ac4165158e3457d6066635afad54a9f236c75ac90b6c9bad23bd0c068c9565df",
-      "requiredPermissions": []
+      "sha256": "0d3f67480627ee6ab8d31b50ba3fe399f44c881ced6b0e8bd2f1d949706f80d5",
+      "requiredPermissions": [
+        "giftCards:read"
+      ]
     }
   }
 }
