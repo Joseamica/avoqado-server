@@ -46,6 +46,7 @@ import { ensureVenueForOnboarding } from './ensureVenue.service'
 import { primerCobroCubierto } from './primerCobroPagado'
 import { basicPlanValido, fusionarV2SetupData, MENSAJE_BASIC_PLAN_INVALIDO, parseV2Plan } from './onboardingProgress.service'
 import { modalidadDePrueba, type TrialModality } from '../billing/modalidadDePrueba'
+import { resolverPrecioDelPlan } from '../billing/precioDelPlan'
 import {
   isLegacyIntroEligible,
   LEGACY_INTRO_OFFER,
@@ -277,12 +278,17 @@ async function verificarPlanConfigurado(tier: PaidPlanTier): Promise<void> {
   )
 }
 
-async function verificarPrecioDeStripe(tier: PaidPlanTier, interval: PlanBillingInterval, esperado: number): Promise<void> {
+async function verificarPrecioDeStripe(
+  tier: PaidPlanTier,
+  interval: PlanBillingInterval,
+  esperado: number,
+): Promise<{ priceId: string; unitAmount: number }> {
   const tierCode = tier === 'PREMIUM' ? ('PLAN_PREMIUM' as const) : ('PLAN_PRO' as const)
   const lookupKey = planLookupKey(tierCode, interval)
   const prices = await stripe.prices.list({ lookup_keys: [lookupKey], limit: 1 })
-  const unitAmount = prices.data[0]?.unit_amount
-  if (unitAmount !== esperado) {
+  const price = prices.data[0]
+  const unitAmount = price?.unit_amount
+  if (!price || unitAmount !== esperado) {
     // 🚨 a propósito: significa que alguien movió el precio en Stripe debajo de una oferta viva.
     logger.error('🚨 activate-plan: el precio de Stripe no coincide con el snapshot — NO se cobra', {
       lookupKey,
@@ -294,6 +300,8 @@ async function verificarPrecioDeStripe(tier: PaidPlanTier, interval: PlanBilling
       stripe: unitAmount ?? null,
     })
   }
+  // El MISMO precio que se leyó aquí es el que se cobra: no se vuelve a listar la llave.
+  return { priceId: price.id, unitAmount }
 }
 
 /**
@@ -866,7 +874,7 @@ export async function activatePlan(
   const { expected, campaign, listPriceCents } = await cotizar(input, progress, now)
 
   // ---- PASO 4: verificación contra Stripe (sólo lecturas) ----
-  await verificarPrecioDeStripe(input.tier, input.interval, listPriceCents)
+  const precioVerificado = await verificarPrecioDeStripe(input.tier, input.interval, listPriceCents)
   await verificarPlanConfigurado(input.tier)
   const venueRecord = await prisma.venue.findUnique({
     where: { id: venue.id },
@@ -1097,11 +1105,31 @@ export async function activatePlan(
       // después, así que el plazo real es más largo, nunca más corto), con 10 s para confirmar la transacción. El 2.º
       // create no sale si no cabe: «no quedó tiempo» cae abajo como resultado desconocido (503, lugar RESERVED).
       const terminarAntesDe = Date.now() + TIMEOUT_DE_LA_TRANSACCION_MS - 10_000
+      const tierCode = input.tier === 'PREMIUM' ? ('PLAN_PREMIUM' as const) : ('PLAN_PRO' as const)
       const r = await autorizarObligacionNueva(
         venue.id,
         customerId,
         { tipo: 'PLAN', tier: input.tier },
-        () => {
+        async () => {
+          // 🔴 Codex B0 #1/#2: la llave se vuelve a leer JUSTO antes de cobrar (aún sin `intentoCobrar`). Si entre el PASO 4
+          // y aquí se movió a otro precio, cobrar con el verificado dejaba al cliente cobrado sin acceso (la entrega ya no
+          // reconoce ese precio por su llave) o, si se archivó, un rechazo de Stripe clasificado como «pudo cobrarse». Se
+          // responde 409 sin cobrar: el catch de abajo suelta el lease y libera el lugar como cualquier rechazo previo al
+          // cobro. Si coincide, se cobra con el priceId del PASO 4 (el que se comparó contra el monto consentido).
+          const vigente = await resolverPrecioDelPlan(tierCode, input.interval)
+          if (vigente.priceId !== precioVerificado.priceId) {
+            // 🚨 a propósito: alguien movió la llave del plan en Stripe a media alta.
+            logger.error('🚨 activate-plan: la llave del plan apunta a otro precio al momento de cobrar — NO se cobra', {
+              organizationId,
+              lookupKey: planLookupKey(tierCode, input.interval),
+              verificado: precioVerificado.priceId,
+              vigente: vigente.priceId,
+            })
+            throw new ConflictError('El precio del plan cambió. Vuelve a cargar la página.', 'PLAN_PRICE_MISMATCH', {
+              esperado: precioVerificado.unitAmount,
+              stripe: vigente.unitAmount,
+            })
+          }
           return createPlanSubscription({
             // «Pudo cobrarse» empieza justo antes del POST, no al entrar aquí (Codex C15).
             antesDeCobrar: () => {
@@ -1110,8 +1138,9 @@ export async function activatePlan(
             venueId: venue.id,
             customerId,
             paymentMethodId: input.paymentMethodId,
-            tierCode: input.tier === 'PREMIUM' ? 'PLAN_PREMIUM' : 'PLAN_PRO',
+            tierCode,
             interval: input.interval,
+            priceId: precioVerificado.priceId,
             // Con campaña SIEMPRE se paga el primer ciclo: la oferta no tiene prueba gratis.
             trialPeriodDays: campaign || input.payNow ? 0 : TRIAL_DAYS,
             coupon: cuponEsperado ?? undefined,

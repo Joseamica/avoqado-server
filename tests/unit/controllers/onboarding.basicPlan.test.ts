@@ -41,6 +41,9 @@ jest.mock('../../../src/services/onboarding/terminarAltaCobrada', () => ({
   __esModule: true,
   terminarAltaCobrada: (...a: unknown[]) => mockTerminar(...a),
 }))
+jest.mock('../../../src/services/billing/precioDelPlan', () => ({
+  resolverPrecioDelPlan: jest.fn().mockResolvedValue({ priceId: 'price_x', unitAmount: 0 }),
+}))
 jest.mock('../../../src/services/stripe.service', () => ({
   __esModule: true,
   createOnboardingSetupIntent: jest.fn(),

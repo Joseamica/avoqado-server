@@ -964,6 +964,35 @@ describe('camino ESTÁNDAR (sin campaña)', () => {
     )
   })
 
+  it('🔴 Codex B0 #1/#2: si la llave cambia entre el PASO 4 y la creación, 409 PLAN_PRICE_MISMATCH y no se cobra', async () => {
+    // Mismo importe, otro precio: si se cobrara con el verificado (A), la entrega ya no lo reconoce por su llave y el
+    // cliente queda cobrado sin acceso; si A se archivó, Stripe rechaza el POST ya marcado como «pudo cobrarse».
+    mockPriceList
+      .mockReset()
+      .mockResolvedValueOnce({ data: [{ id: 'price_A', unit_amount: 115884 }] })
+      .mockResolvedValue({ data: [{ id: 'price_B', unit_amount: 115884 }] })
+    await expect(activatePlan({ ...BASE, payNow: false, offer: { kind: 'STANDARD', expectedFirstChargeCents: 0 } })).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'PLAN_PRICE_MISMATCH',
+    })
+    expect(mockSubCreate).not.toHaveBeenCalled()
+    expect(mockPriceList).toHaveBeenCalledTimes(2)
+    // No queda pendiente: el lease se suelta al estado previo.
+    expect(prismaMock.onboardingProgress.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ data: { planActivationStatus: 'NONE', planActivationLeaseUntil: null } }),
+    )
+  })
+
+  it('si al cobrar la llave sigue en el precio verificado, se cobra con ése', async () => {
+    mockPriceList.mockReset().mockResolvedValue({ data: [{ id: 'price_A', unit_amount: 115884 }] })
+    await activatePlan({ ...BASE, payNow: false, offer: { kind: 'STANDARD', expectedFirstChargeCents: 0 } })
+    expect(mockSubCreate).toHaveBeenCalledTimes(1)
+    expect(mockSubCreate.mock.calls[0][0].items).toEqual([{ price: 'price_A' }])
+    expect(mockPriceList).toHaveBeenCalledTimes(2)
+    expect(mockPriceList.mock.calls[1][0]).toEqual({ lookup_keys: ['plan_pro_monthly'], limit: 1 })
+    expect(mockPriceList.mock.invocationCallOrder[1]).toBeLessThan(mockSubCreate.mock.invocationCallOrder[0])
+  })
+
   it('🔴 la promoción legacy NO se derrama a PREMIUM anual', async () => {
     mockPriceList.mockResolvedValue({ data: [{ id: 'price_pa', unit_amount: 1970840 }] })
     await activatePlan({ ...BASE, tier: 'PREMIUM', interval: 'annual', offer: { kind: 'STANDARD', expectedFirstChargeCents: 1970840 } })
@@ -1480,6 +1509,35 @@ describe('🔴 V5-A paso 6: el alta cobra dentro de la regla común y el acceso 
     )
     expect(prismaMock.launchCampaignRedemption.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({ data: expect.objectContaining({ status: 'RELEASED' }) }),
+    )
+    expect(mockEntregar).not.toHaveBeenCalled()
+  })
+
+  it('🔴 Codex B0 #1/#2: si la llave apunta a otro precio al momento de cobrar, responde 409 PLAN_PRICE_MISMATCH, no crea suscripción y libera el lease (y el lugar de campaña si lo había)', async () => {
+    mockPriceList
+      .mockReset()
+      .mockResolvedValueOnce({ data: [{ id: 'price_x', unit_amount: LISTA }] })
+      .mockResolvedValue({ data: [{ id: 'price_otro', unit_amount: LISTA }] })
+
+    await expect(activatePlan({ ...BASE, offer: OFERTA_LAUNCH } as never)).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'PLAN_PRICE_MISMATCH',
+    })
+
+    expect(mockSubCreate).not.toHaveBeenCalled()
+    // Nada quedó «confirmando tu pago»: el lease vuelve al estado previo, con la marca del dueño…
+    const nuestro = (prismaMock.onboardingProgress.updateMany as jest.Mock).mock.calls[0][0].data.planActivationLeaseUntil
+    expect(nuestro).toBeInstanceOf(Date)
+    const soltar = (prismaMock.onboardingProgress.updateMany as jest.Mock).mock.calls.find(
+      (c: any[]) => c[0]?.data?.planActivationStatus === 'NONE' && c[0]?.data?.planActivationLeaseUntil === null,
+    )
+    expect(soltar?.[0].where).toMatchObject({ planActivationStatus: 'IN_PROGRESS', planActivationLeaseUntil: nuestro })
+    // …y el lugar de la campaña se libera.
+    expect(prismaMock.launchCampaignRedemption.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { id: 'red-1', status: 'RESERVED' }, data: expect.objectContaining({ status: 'RELEASED' }) }),
+    )
+    expect(prismaMock.onboardingProgress.updateMany).not.toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ planActivationStatus: 'DECLINED' }) }),
     )
     expect(mockEntregar).not.toHaveBeenCalled()
   })
@@ -2107,14 +2165,13 @@ describe('🔴 D2: el banco pide autenticar el primer cobro (primer pedido)', ()
   })
 
   it('🔴 sin tiempo en el candado para el 2.º create ⇒ 503, intento IN_PROGRESS y lugar RESERVED', async () => {
-    // Codex r1 #4: cada consulta de precio tarda 140 s en este reloj; la de DENTRO del candado deja sin tiempo al #2.
+    // Codex r1 #4: el 1.er create tarda 140 s en este reloj (releer el precio antes de cobrar no lo mueve): al #2 no le queda tiempo.
     let reloj = Date.now()
     const ahora = jest.spyOn(Date, 'now').mockImplementation(() => reloj)
-    mockPriceList.mockImplementation(async () => {
+    mockSubCreate.mockImplementationOnce(async () => {
       reloj += 140_000
-      return { data: [{ id: 'price_x', unit_amount: LISTA, currency: 'mxn', recurring: { interval: 'month' }, tax_behavior: 'inclusive' }] }
+      throw errorDeAutenticacion()
     })
-    mockSubCreate.mockRejectedValueOnce(errorDeAutenticacion())
 
     try {
       await expect(activatePlan({ ...BASE, offer: OFERTA_LAUNCH })).rejects.toMatchObject({
