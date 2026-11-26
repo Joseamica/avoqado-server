@@ -329,7 +329,8 @@ describe('POST convert-from-demo → POST plan/checkout con la aceptación (B2, 
       details: { acceptanceId, tier: 'PRO', interval: 'monthly' },
     })
     // Con una aceptación viva, sin usar, «¿ya se usó?» se lee de Stripe con las opciones de compra (sin el tope de las lecturas).
-    expect(mockSubList).toHaveBeenCalledWith({ customer: 'cus_1', status: 'all', limit: 100 }, {})
+    // Sin tercer argumento: stripe-node lanza «Unknown arguments» con `{}` (Codex b2-mac r1 #1, 26-nov).
+    expect(mockSubList).toHaveBeenCalledWith({ customer: 'cus_1', status: 'all', limit: 100 })
 
     const otroPlan = await comprar({ tier: 'PREMIUM', acceptanceId })
     expect(otroPlan.status).toBe(409)
