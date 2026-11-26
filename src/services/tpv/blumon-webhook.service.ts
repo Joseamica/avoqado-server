@@ -36,8 +36,11 @@ const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
  * Blumon `operationType` values that move money BACK to the cardholder. They
  * are recorded but never run the sale-matching path, and never orphan-alert.
  * Single source of truth shared with the reconciliation job.
+ * `REVERSO` added on 2026-11-25 after being observed in production: it carries
+ * the same (operationNumber, reference) as the sale it reverses.
+ * Exact uppercase match only (as Blumon sends it).
  */
-export const REVERSAL_OPERATION_TYPES = ['DEVOLUCION', 'CANCELACION'] as const
+export const REVERSAL_OPERATION_TYPES = ['DEVOLUCION', 'CANCELACION', 'REVERSO'] as const
 
 export const BLUMON_WEBHOOK_ERROR_REASONS = {
   /** Blumon's `serialNumber` is not registered as a Terminal in our DB */
@@ -279,7 +282,7 @@ export interface BlumonWebhookPayload {
   reference?: string // Our transaction reference (may not be present in all webhooks)
   cardHolder?: string // Cardholder name (PCI - careful with logging)
   authorizationCode?: string // Bank authorization code
-  operationType?: 'VENTA' | 'DEVOLUCION' | 'CANCELACION' | string // VENTA = sale
+  operationType?: 'VENTA' | 'DEVOLUCION' | 'CANCELACION' | 'REVERSO' | string // VENTA = sale
   operationNumber?: number // Blumon's operation ID (numeric in payload, not string)
   descriptionResponse?: string // Response description (e.g., "APROBADA")
   dateTransaction?: string // Format: "20/01/2021 18:24:38"
@@ -329,7 +332,7 @@ export interface WebhookProcessingResult {
     | 'DUPLICATE' // Webhook already received before (Blumon re-delivered) — idempotent no-op
     | 'NOT_APPROVED' // codeResponse != "00" — informational
     | 'UNKNOWN_TERMINAL' // serialNumber not registered in our DB
-    | 'REVERSAL_RECEIVED' // DEVOLUCION/CANCELACION — recorded, excluded from sale matching
+    | 'REVERSAL_RECEIVED' // REVERSAL_OPERATION_TYPES — recorded, excluded from sale matching
     | 'AMBIGUOUS' // 2+ Payment candidates matched — quarantined, NEVER auto-linked
     | 'NO_AUTO_MATCH' // only weak-key candidates (partial reference) — human attribution required
     | 'ERROR' // Internal exception

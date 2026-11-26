@@ -368,7 +368,32 @@ describe('Task 5 — reversals never run sale logic and get their own event id',
     )
   })
 
-  it.each(['DEVOLUCION', 'CANCELACION'])('%s → REVERSAL_RECEIVED, no sale search, no orphan alert', async opType => {
+  // REVERSO was observed in production; it carries the same (operationNumber,
+  // reference) as its sale, so without the namespace it collides with it.
+  it('REVERSO gets the reversal namespace, distinct from its own sale', () => {
+    const sale = { operationNumber: 21372460, reference: '20260716084615', operationType: 'VENTA' } as any
+    const reverso = buildBlumonEventId({ ...sale, operationType: 'REVERSO' })
+
+    expect(reverso).toBe('blumon-tpv-reversal-reverso-21372460-20260716084615')
+    expect(reverso).not.toBe(buildBlumonEventId(sale))
+  })
+
+  it.each([['VENTA'], [undefined], ['OTRO']])('operationType %s keeps the historical sale id shape', opType => {
+    expect(buildBlumonEventId({ operationNumber: 21372460, reference: '20260716084615', operationType: opType } as any)).toBe(
+      'blumon-tpv-21372460-20260716084615',
+    )
+  })
+
+  it.each([['VENTA'], [undefined], ['OTRO']])('operationType %s is NOT a reversal: runs sale matching', async opType => {
+    const result = await reconcileBlumonEvent('evt_t5c', { ...ventaPayload, operationType: opType } as any, {
+      scopeVenueIds: ['venue_1'],
+    })
+
+    expect(result.action).not.toBe('REVERSAL_RECEIVED')
+    expect(mockedFindMany.mock.calls[0] ?? mockedFindFirst.mock.calls[0]).toBeDefined()
+  })
+
+  it.each(['DEVOLUCION', 'CANCELACION', 'REVERSO'])('%s → REVERSAL_RECEIVED, no sale search, no orphan alert', async opType => {
     const reversal = { ...ventaPayload, operationType: opType } as any
 
     const result = await reconcileBlumonEvent('evt_t5', reversal, { scopeVenueIds: ['venue_1'] })
