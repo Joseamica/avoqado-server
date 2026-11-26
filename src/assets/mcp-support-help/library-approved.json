@@ -241,7 +241,7 @@
       "gateKind": "FEATURE"
     },
     "android/recibos/imprimir-y-reimprimir-recibo": {
-      "sha256": "db9da4142270a80edd215409650f459e5c21fda33e76d87df05d35ca4703f1f9",
+      "sha256": "76449e08ddca4d28bcef299f2ce767392176a2841a3d0392378f66dbb281e3bb",
       "requiredPermissions": []
     },
     "android/reembolsos/hacer-cambio": {
@@ -1257,7 +1257,7 @@
       ]
     },
     "tpv/recibos/no-imprime-pax": {
-      "sha256": "58a279cd9f6b563fe8d55d306f21600c2069797789b95a45714a33581ecf6cc9",
+      "sha256": "4b59595c2a19dab3187cc615b28ef9423acbf16a18643de875257938373ba364",
       "requiredPermissions": []
     },
     "tpv/reembolsos/reembolsar-cobro-nexgo": {
@@ -1534,7 +1534,7 @@
       "gateKind": "FEATURE"
     },
     "windows/recibos/imprimir-y-reimprimir-recibo": {
-      "sha256": "39b7ca8de443cd41a53dcc9535e1ce6588237b9bc4fa4979c4d990d2c533555d",
+      "sha256": "f203012c6f83243cd150af7c9a4fcabfef7a5b5d8583ffdcee8faa31c0ea9d26",
       "requiredPermissions": []
     },
     "windows/reembolsos/hacer-cambio": {

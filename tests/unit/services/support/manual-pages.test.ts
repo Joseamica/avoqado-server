@@ -10,6 +10,7 @@ import {
   duplicateTitles,
   numberedSteps,
   readLibrarySources,
+  SUPPORT_LIBRARY_MANIFEST,
   SUPPORT_MANUAL_DIRECTORY,
   type LibrarySource,
 } from '@/services/support/libraryFiles'
@@ -51,6 +52,7 @@ function manualProblems(manualDir: string, evalRoot: string): Problems {
     source ? untested.push(source) : excluded.set(id, reason),
   )
   const all = [...sources, ...untested]
+  const retired = new Set(Object.keys(JSON.parse(fs.readFileSync(SUPPORT_LIBRARY_MANIFEST, 'utf8')).retired ?? {}))
   const repeated = duplicateTitles(all).flat()
   const walk = (dir: string): string[] =>
     fs.existsSync(dir)
@@ -94,9 +96,12 @@ function manualProblems(manualDir: string, evalRoot: string): Problems {
     for (const permission of page.gates?.requiredPermissions ?? [])
       if (!isValidPermission(permission)) problems.permissions.push(`${id}: ${permission}`)
     // hz:be99f328:D44: una página de dinero que entra a la biblioteca lleva candado; sin él, el bot le enseña los pasos a quien
-    // no puede hacerlos sin decirle que lo pida. La que todavía no entra (le falta su prueba) se decide al probarla.
+    // no puede hacerlos sin decirle que lo pida. La que todavía no entra (le falta su prueba) o está retirada se decide al
+    // probarla. Un `featureCode` con `CORE` no cuenta: el cargador lo tira (parseGates).
     const gates = page.gates
-    if (page.money && sources.includes(page) && !gates?.requiredPermissions.length && !gates?.featureCode && !gates?.activationKey)
+    const plan = !!gates?.featureCode && gates.gateKind !== 'CORE'
+    const loads = sources.includes(page) && !retired.has(id)
+    if (page.money && loads && !gates?.requiredPermissions.length && !plan && !gates?.activationKey)
       problems.permissions.push(`${id}: página de dinero sin candado`)
     const text = `${page.title}\n${page.summary}\n${page.body}`
     if (CONTACT.some(re => re.test(text)) || hasPhone(text)) problems.contact.push(`${id}: trae un enlace, correo o teléfono`)
@@ -296,6 +301,9 @@ ${o.steps.length ? `\n## Pasos\n\n${o.steps.map((s, i) => `${i + 1}. ${s}`).join
     )
     put(evalRoot, 'inventario/tpv.json', JSON.stringify(inventory('tpv', [id])))
     write('requiredPermissions: []')
+    expect(manualProblems(manual, evalRoot).permissions).toEqual([`${id}: página de dinero sin candado`])
+    // Un plan con `CORE` no es candado: el cargador lo tira.
+    write('requiredPermissions: []\nfeatureCode: TABLE_SERVICE\ngateKind: CORE')
     expect(manualProblems(manual, evalRoot).permissions).toEqual([`${id}: página de dinero sin candado`])
     write('requiredPermissions:\n  - payments:create')
     expect(manualProblems(manual, evalRoot)).toEqual(Object.fromEntries(CHECKS.map(c => [c, []])))

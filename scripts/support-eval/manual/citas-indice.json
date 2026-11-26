@@ -479,6 +479,10 @@
         "sourceRef": "a4e7d854341cdef73bf94ff109a9b54e0f029bf9"
       },
       {
+        "pagina": "android/recibos/imprimir-y-reimprimir-recibo",
+        "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+      },
+      {
         "pagina": "android/reembolsos/hacer-cambio",
         "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
       },
@@ -561,6 +565,10 @@
       {
         "pagina": "windows/pedidos-en-linea/atender-pedidos-en-linea",
         "sourceRef": "a4e7d854341cdef73bf94ff109a9b54e0f029bf9"
+      },
+      {
+        "pagina": "windows/recibos/imprimir-y-reimprimir-recibo",
+        "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
       },
       {
         "pagina": "windows/reembolsos/hacer-cambio",
