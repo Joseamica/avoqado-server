@@ -1421,15 +1421,33 @@ export async function completeV2Onboarding(req: Request, res: Response, next: Ne
     // 🔴 Planes editables (B2): con una versión del editor el alta larga ya no cobra (el cobro es `activate-plan`, con su comprobante).
     // Va ANTES del candado optimista: no marca `completedAt`, no crea ni activa el negocio y no llama a Stripe. Sólo se lee la oferta
     // cuando este carril cobraría; si esa lectura falla, falla cerrada (nunca se cobra por el carril viejo con la oferta ilegible).
-    if (
-      planEnabled &&
-      !planYaCobrado &&
-      !progress.launchCampaignId &&
-      planData &&
-      planData.tier !== 'FREE' &&
-      planData.paymentMethodId &&
-      (await versionQueCobra())
-    ) {
+    // 🔴 Codex b2-code r3 R3-3 (la regla única): salvo si hay un cobro anterior sin cerrar. Recuperar lo ya cobrado nunca se frena: con
+    // la oferta ilegible y ese cobro, el camino de hoy (B1), que lo ve en la regla común y lo entrega. El 503 «No se cobró nada» sólo
+    // sin cobro anterior.
+    const esteCarrilCobraria =
+      planEnabled && !planYaCobrado && !progress.launchCampaignId && !!planData && planData.tier !== 'FREE' && !!planData.paymentMethodId
+    let versionDelEditor: OfertaVigente | null = null
+    if (esteCarrilCobraria) {
+      try {
+        versionDelEditor = await versionQueCobra()
+      } catch (error) {
+        const cobroSinCerrar =
+          progress.planActivationStatus === PLAN_ACTIVATION_STATUS.IN_PROGRESS &&
+          (await planActivationService.hayCobroDelAltaSinCerrar({
+            organizationId,
+            planActivationStatus: progress.planActivationStatus,
+            planActivationAttempt: progress.planActivationAttempt,
+            planStripeSubscriptionId: progress.planStripeSubscriptionId,
+            planOfferVersionNumber: progress.planOfferVersionNumber,
+          }))
+        if (!cobroSinCerrar) throw error
+        logger.warn('[ONBOARDING] V2 complete: no se pudo leer la oferta y hay un cobro anterior sin cerrar; se recupera como hoy', {
+          organizationId,
+          error: error instanceof Error ? error.message : String(error),
+        })
+      }
+    }
+    if (versionDelEditor) {
       // Un intento anterior pudo cobrar (IN_PROGRESS con el lease vencido): decir «no se cobró nada» sería falso. Se responde lo mismo
       // que el resto de los carriles ante un cobro sin cerrar.
       if (

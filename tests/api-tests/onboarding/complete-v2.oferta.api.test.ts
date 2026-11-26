@@ -90,6 +90,7 @@ import request from 'supertest'
 import { prismaMock } from '@tests/__helpers__/setup'
 import { definicionDePrueba, idsDeLaVersion, punteroA, versionUno } from '@tests/__helpers__/planOfferFixtures'
 import { renovarSesionConLaSucursal } from '../../../src/services/onboarding/sesionTrasElAlta'
+import AppError from '../../../src/errors/AppError'
 
 const app = require('../../../src/app').default
 
@@ -300,6 +301,50 @@ describe('POST /onboarding/organizations/:organizationId/v2/complete — el alta
     const res = await terminar()
     expect(res.status).toBe(201)
     expect(mockSubCreate).toHaveBeenCalledTimes(1)
+  })
+
+  it('🔴 Codex b2-code r3 R3-3: con una v1 dañada y un cobro anterior sin cerrar (IN_PROGRESS con su suscripción viva), el reintento sigue el camino de hoy: la regla común ve el plan cobrando, se entrega y el alta termina (201), sin el 503 «No se cobró nada»', async () => {
+    prismaMock.planOfferPointer.findUnique.mockResolvedValue(punteroA('cv1', 1, { schemaVersion: 1, roto: true }) as never)
+    prismaMock.onboardingProgress.findUnique.mockResolvedValue(
+      progreso(PLAN_CON_TARJETA, {
+        planActivationStatus: 'IN_PROGRESS',
+        planActivationAttempt: 0,
+        planStripeSubscriptionId: 'sub_1',
+      }) as never,
+    )
+    mockHayCobro.mockResolvedValue(true)
+    // La regla común (simulada en su borde) ve que el negocio YA tiene su plan cobrando.
+    mockAutorizar.mockRejectedValue(
+      Object.assign(new AppError('Este negocio ya tiene un plan que Stripe sigue cobrando.', 409, true, 'PLAN_YA_CONTRATADO'), {
+        suscripciones: ['sub_1'],
+      }),
+    )
+
+    const res = await terminar()
+
+    expect(res.status).toBe(201)
+    expect(res.body.code).toBeUndefined()
+    expect(mockHayCobro).toHaveBeenCalledWith(expect.objectContaining({ organizationId: ORG, planStripeSubscriptionId: 'sub_1' }))
+    expect(mockAutorizar).toHaveBeenCalledTimes(1)
+    expect(mockEntregar).toHaveBeenCalledWith(expect.objectContaining({ subscriptionId: 'sub_1' }))
+    expect(mockSubCreate).not.toHaveBeenCalled()
+    expect(prismaMock.onboardingProgress.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ planActivationStatus: 'ACTIVE', planStripeSubscriptionId: 'sub_1' }) }),
+    )
+  })
+
+  it('Codex b2-code r3 R3-3: con una v1 dañada y SIN cobro anterior (IN_PROGRESS sin cobro posible), el 503 PLAN_NOT_CONFIGURED de T3-3, sin candado ni Stripe', async () => {
+    prismaMock.planOfferPointer.findUnique.mockResolvedValue(punteroA('cv1', 1, { schemaVersion: 1, roto: true }) as never)
+    prismaMock.onboardingProgress.findUnique.mockResolvedValue(progreso(PLAN_CON_TARJETA, { planActivationStatus: 'IN_PROGRESS' }) as never)
+    mockHayCobro.mockResolvedValue(false)
+
+    const res = await terminar()
+
+    expect(res.status).toBe(503)
+    expect(res.body.code).toBe('PLAN_NOT_CONFIGURED')
+    expect(prismaMock.onboardingProgress.updateMany).not.toHaveBeenCalled()
+    expect(mockAutorizar).not.toHaveBeenCalled()
+    expect(mockSubCreate).not.toHaveBeenCalled()
   })
 
   it('🔴 una v1 rota hace lanzar a versionQueCobra en el carril que cobra → 503 PLAN_NOT_CONFIGURED, sin updateMany ni Stripe', async () => {
