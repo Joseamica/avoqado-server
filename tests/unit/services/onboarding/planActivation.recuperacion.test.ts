@@ -482,20 +482,31 @@ describe('B2 Task 5: un intento anterior que pudo cobrar se recupera con su susc
     }
   })
 
-  it('Codex b2-code r3 (la regla única): sin un comprobante VÁLIDO en la petición no se compara versión ni periodicidad, como B1 — el reenvío sin comprobante legible (o el DASHBOARD de hoy, sin ninguno) reanuda el mismo reto', async () => {
-    for (const quoteToken of ['no-es-un-comprobante', undefined]) {
+  it('el reenvío del navegador sin comprobante legible no reanuda el reto de una versión del editor (la versión vacía no es la suya): se anula y el intento nuevo pide su comprobante', async () => {
+    mockSubRetrieve.mockResolvedValue(retoDeLaV2())
+    pagoConEstado('requires_action')
+
+    await expect(
+      pedir({ interval: 'annual', offer: { kind: 'STANDARD', expectedFirstChargeCents: PRO_A_V2 }, quoteToken: 'no-es-un-comprobante' }),
+    ).rejects.toMatchObject({ statusCode: 400, code: 'QUOTE_INVALID' })
+    expect(mockVoid).toHaveBeenCalledWith('in_1')
+    expect(mockSubCreate).not.toHaveBeenCalled()
+  })
+
+  it('🔴 Codex b2-code r4 #1: reto de Pro ANUAL de la v2 pendiente, la v3 legible y un pedido MENSUAL sin comprobante (o con uno inválido) con la misma tarjeta → nunca el secreto del reto anual: se anula y sale el rechazo de la petición', async () => {
+    for (const [quoteToken, rechazo] of [
+      [undefined, { statusCode: 409, code: 'OFFER_CHANGED', details: { reason: 'QUOTE_REQUIRED', offerVersion: 3 } }],
+      ['no-es-un-comprobante', { statusCode: 400, code: 'QUOTE_INVALID' }],
+    ] as const) {
       jest.clearAllMocks()
       prismaMock.$transaction.mockImplementation(async (cb: unknown) => (cb as (tx: unknown) => unknown)(prismaMock))
+      conVigente(v3(), 3)
       alta()
       mockSubRetrieve.mockResolvedValue(retoDeLaV2())
       pagoConEstado('requires_action')
 
-      await expect(pedir({ quoteToken })).rejects.toMatchObject({
-        statusCode: 409,
-        code: 'PLAN_PAYMENT_REQUIRES_ACTION',
-        details: { clientSecret: 'pi_reto_secret_x' },
-      })
-      expect(mockVoid).not.toHaveBeenCalled()
+      await expect(pedir({ quoteToken })).rejects.toMatchObject(rechazo)
+      expect(mockVoid).toHaveBeenCalledWith('in_1')
       expect(mockSubCreate).not.toHaveBeenCalled()
     }
   })
