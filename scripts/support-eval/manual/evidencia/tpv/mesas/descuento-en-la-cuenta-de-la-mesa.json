@@ -49,8 +49,8 @@
     {
       "paso": 3,
       "archivo": "avoqado-server/src/controllers/tpv/discount.tpv.controller.ts",
-      "linea": 41,
-      "cita": "(await tienePermisoEnVenue(req, 'orders:comp').catch(error => {"
+      "linea": 46,
+      "cita": "(await conPlazo(tienePermisoEnVenue(req, 'orders:comp'), PLAZO_DEL_PERMISO_DE_CORTESIA_MS).catch(error => {"
     },
     {
       "paso": 4,

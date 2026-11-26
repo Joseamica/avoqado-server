@@ -13,6 +13,7 @@ import { DiscountType } from '@prisma/client'
 import AppError from '@/errors/AppError'
 import logger from '@/config/logger'
 import { tienePermisoEnVenue } from '@/middlewares/permissionFlag.middleware'
+import { conPlazo } from '@/utils/conPlazo'
 import { conCortesiaSiRegala, pinDeLaCortesia, tieneCortesiaAutorizada } from '@/middlewares/cortesiaPidePermiso.middleware'
 
 /** D3: la sesión de la TPV no trae `staffVenueId`; `appliedById` es la membresía de quien llama (sin ella, sin autor). */
@@ -21,6 +22,9 @@ const membresiaDe = (req: Request) => discountTpvService.membresiaDeQuienLlama(r
 // ==========================================
 // GET AVAILABLE DISCOUNTS
 // ==========================================
+
+/** D51: cuánto espera la lista a la pregunta de `orders:comp` antes de marcar la cortesía en gris (la terminal se rinde a los 25 s). */
+export const PLAZO_DEL_PERMISO_DE_CORTESIA_MS = 3_000
 
 /**
  * Get available discounts for an order
@@ -35,10 +39,11 @@ export async function getAvailableDiscounts(req: Request, res: Response, next: N
     const disponibles = await discountTpvService.getAvailableDiscounts(venueId, orderId, customerId)
     // hz:b37dd7ea:D51: una cortesía que quien llama no puede dar (`checkCortesiaEnDescuento` pide `orders:comp`) sale marcada para
     // que la TPV la pinte en gris. La misma regla del candado (dueño de la org, SUPERADMIN, comodines); campo opcional y aditivo.
-    // Codex r2: si la pregunta falla, la lista sale igual con la cortesía en gris (falla cerrado), nunca un 500 para toda la hoja.
+    // Codex r2 y r3: si la pregunta falla o no contesta a tiempo, la lista sale igual con la cortesía en gris (falla cerrado), nunca un
+    // 500 ni una hoja esperando los 25 s de la terminal.
     const puedeRegalar =
       !disponibles.some(d => d.type === DiscountType.COMP) ||
-      (await tienePermisoEnVenue(req, 'orders:comp').catch(error => {
+      (await conPlazo(tienePermisoEnVenue(req, 'orders:comp'), PLAZO_DEL_PERMISO_DE_CORTESIA_MS).catch(error => {
         logger.warn('D51: no se pudo saber si quien llama da cortesías; van en gris', { venueId, orderId, error })
         return false
       }))

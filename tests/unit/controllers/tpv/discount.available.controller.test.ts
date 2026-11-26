@@ -14,6 +14,7 @@ jest.mock('@/middlewares/permissionFlag.middleware', () => ({
 }))
 
 import * as controller from '@/controllers/tpv/discount.tpv.controller'
+import { PLAZO_DEL_PERMISO_DE_CORTESIA_MS } from '@/controllers/tpv/discount.tpv.controller'
 import * as discountTpvService from '@/services/tpv/discount.tpv.service'
 import { tienePermisoEnVenue } from '@/middlewares/permissionFlag.middleware'
 
@@ -68,6 +69,28 @@ describe('GET descuentos disponibles TPV — cortesía sin permiso (D51)', () =>
 
     expect(res.status).toBe(200)
     expect(res.body.data).toEqual([porcentaje, { ...cortesia, missingPermission: 'orders:comp' }])
+  })
+
+  it('si la pregunta del permiso se cuelga, la lista sale a tiempo con la cortesía en gris (Codex r3)', async () => {
+    jest.useFakeTimers()
+    try {
+      disponiblesMock.mockResolvedValue([porcentaje, cortesia])
+      permisoMock.mockReturnValue(new Promise(() => {}))
+      // Directo al controlador (sin supertest): con relojes falsos, la petición HTTP no avanza sola.
+      const res = { status: jest.fn().mockReturnThis(), json: jest.fn() }
+      const req = { params: { venueId: 'v1', orderId: 'o1' }, query: {}, authContext: { venueId: 'v1', userId: 'staff-1' } }
+
+      const hecho = controller.getAvailableDiscounts(req as any, res as any, jest.fn())
+      await jest.advanceTimersByTimeAsync(PLAZO_DEL_PERMISO_DE_CORTESIA_MS)
+      await hecho
+
+      expect(res.status).toHaveBeenCalledWith(200)
+      expect(res.json).toHaveBeenCalledWith(
+        expect.objectContaining({ data: [porcentaje, { ...cortesia, missingPermission: 'orders:comp' }] }),
+      )
+    } finally {
+      jest.useRealTimers()
+    }
   })
 
   it('sin cortesías en la lista no pregunta por el permiso', async () => {
