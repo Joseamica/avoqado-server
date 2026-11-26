@@ -91,6 +91,7 @@ import { prismaMock } from '@tests/__helpers__/setup'
 import { definicionDePrueba, idsDeLaVersion, punteroA, versionUno } from '@tests/__helpers__/planOfferFixtures'
 import { renovarSesionConLaSucursal } from '../../../src/services/onboarding/sesionTrasElAlta'
 import AppError from '../../../src/errors/AppError'
+import { Prisma } from '@prisma/client'
 
 const app = require('../../../src/app').default
 
@@ -313,6 +314,35 @@ describe('POST /onboarding/organizations/:organizationId/v2/complete — el alta
       where: { organizationId: ORG, completedAt: { not: null } },
       data: { completedAt: null },
     })
+  })
+
+  it('🔴 Codex b2-code r5 A: sin cobro anterior, la compuerta lee la v1 y la relectura dentro de la regla común lanza un error crudo de la base (Prisma o de conexión) → el mismo 503 PLAN_NOT_CONFIGURED reintentable: completedAt se suelta, sin sesión y sin cobrar', async () => {
+    for (const caida of [
+      new Prisma.PrismaClientKnownRequestError('Server has closed the connection.', { code: 'P1017', clientVersion: '6.19.3' }),
+      new Error("Can't reach database server at `localhost:5432`"),
+    ]) {
+      jest.clearAllMocks()
+      prismaMock.$transaction.mockImplementation(async (cb: unknown) => (cb as (tx: unknown) => unknown)(prismaMock))
+      prismaMock.onboardingProgress.updateMany.mockResolvedValue({ count: 1 } as never)
+      prismaMock.planOfferPointer.findUnique
+        .mockReset()
+        .mockResolvedValueOnce(punteroA('cv1', 1, versionUno()) as never)
+        .mockRejectedValue(caida)
+      prismaMock.onboardingProgress.findUnique.mockResolvedValue(progreso(PLAN_CON_TARJETA) as never)
+
+      const res = await terminar()
+
+      expect(res.status).toBe(503)
+      expect(res.body.code).toBe('PLAN_NOT_CONFIGURED')
+      expect(mockAutorizar).toHaveBeenCalledTimes(1)
+      expect(mockSubCreate).not.toHaveBeenCalled()
+      expect(mockEntregar).not.toHaveBeenCalled()
+      expect(renovarSesionConLaSucursal).not.toHaveBeenCalled()
+      expect(prismaMock.onboardingProgress.updateMany).toHaveBeenLastCalledWith({
+        where: { organizationId: ORG, completedAt: { not: null } },
+        data: { completedAt: null },
+      })
+    }
   })
 
   it('Codex b2-code r4 #10, la guarda de la salida: sin versiones y sin precio de Stripe para la llave (B0), el alta larga termina como hoy en Gratis (201), sin cobrar', async () => {

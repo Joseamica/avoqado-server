@@ -26,7 +26,7 @@ import {
   suscripcionConTopeCorto,
 } from '../services/stripe.service'
 import { modalidadDePrueba } from '../services/billing/modalidadDePrueba'
-import { resolverPrecioDelPlan } from '../services/billing/precioDelPlan'
+import { LecturaDeLaOfertaFallida, resolverPrecioDelPlan } from '../services/billing/precioDelPlan'
 import { autorizarObligacionNueva } from '../services/access/autorizarObligacionNueva'
 import { resolvePlanNotificationTarget } from '../services/access/planNotification.service'
 import * as resendService from '../services/resend.service'
@@ -45,7 +45,7 @@ import { buildLaunchOfferView } from '../services/launchCampaigns/launchOfferMat
 import { toOfferRow } from '../services/launchCampaigns/launchCampaign.service'
 import { PLAN_ACTIVATION_STATUS } from '../services/launchCampaigns/launchCampaignEnums'
 import { standardPlanQuote } from '../services/access/planPricing.constants'
-import { MENSAJE_PLAN_NO_CONFIGURADO, esOfertaIlegible, versionQueCobra, type OfertaVigente } from '../services/billing/planOffer'
+import { MENSAJE_PLAN_NO_CONFIGURADO, versionQueCobra, type OfertaVigente } from '../services/billing/planOffer'
 import { ofertaCambio } from '../services/billing/opcionesDeCompra'
 import { basicoDeLaBienvenida } from '../services/billing/avisosDelBasico'
 import {
@@ -1639,9 +1639,9 @@ export async function completeV2Onboarding(req: Request, res: Response, next: Ne
           customerId,
           { tipo: 'PLAN', tier: paidTier },
           async () => {
-            // Codex b2-code #1: si la versión del editor se publicó después de la compuerta (antes del candado), este carril no la
-            // cobra: 409 OFFER_CHANGED antes de Stripe (el `catch` lo deja salir sin terminar el alta).
-            const { priceId } = await resolverPrecioDelPlan(tierCode, planData.interval, { soloSinVersionDelEditor: true })
+            // Codex b2-code #1 y r5 A: una versión publicada en medio → 409; la relectura fallida → 503 marcado (ver el `catch`).
+            const opcionesDelPrecio = { soloSinVersionDelEditor: true, marcarLaLecturaFallida: true }
+            const { priceId } = await resolverPrecioDelPlan(tierCode, planData.interval, opcionesDelPrecio)
             return createPlanSubscription({
               // «Pudo cobrarse» empieza justo antes del POST, no al entrar aquí (Codex C15).
               antesDeCobrar: () => {
@@ -1760,14 +1760,15 @@ export async function completeV2Onboarding(req: Request, res: Response, next: Ne
         // Codex b2-code #1: la relectura del precio vio una versión del editor publicada en medio. Nada se cobró en esta petición ni
         // quedó un cobro anterior por entregar: se suelta la marca y sale el 409 (sin terminar el alta ni renovar la sesión). La
         // siguiente petición entra por la compuerta, que ya ve la versión. Con un cobro anterior posible, el camino de hoy (abajo).
-        // 🔴 Codex b2-code r4 #10: igual si esa relectura no pudo leer la oferta (`esOfertaIlegible`, la misma clase que T3-3): 503 que
-        // se puede reintentar, nunca un 201 en Gratis que suelta en silencio el plan elegido. El 503 de una llave sin precio en Stripe
-        // (B0) y los rechazos de la regla común siguen como hoy (abajo).
+        // 🔴 Codex b2-code r4 #10 / r5 A: igual si esa relectura no pudo leer la oferta, por la razón que sea (marcada en su origen:
+        // `LecturaDeLaOfertaFallida`, la misma clase que T3-3): 503 que se puede reintentar, nunca un 201 en Gratis que suelta en
+        // silencio el plan elegido. El 503 de una llave sin precio en Stripe (B0) y los rechazos de la regla común siguen como hoy
+        // (abajo).
         if (
           !intentoCobrar &&
           !cobroSinEntregar &&
           planErr instanceof AppError &&
-          (planErr.code === 'OFFER_CHANGED' || esOfertaIlegible(planErr))
+          (planErr.code === 'OFFER_CHANGED' || planErr instanceof LecturaDeLaOfertaFallida)
         ) {
           await prisma.onboardingProgress.updateMany({
             where: { organizationId, completedAt: { not: null } },
