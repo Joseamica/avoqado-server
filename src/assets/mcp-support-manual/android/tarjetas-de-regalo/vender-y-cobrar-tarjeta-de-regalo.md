@@ -4,7 +4,8 @@ description: Vende una tarjeta de regalo, consulta su saldo o paga una venta con
 product: android
 category: tarjetas-de-regalo
 task: vender-y-cobrar-tarjeta-de-regalo
-requiredPermissions: []
+requiredPermissions:
+  - giftCards:read
 money: true
 versionMin: 2.25.22
 sourceRepo: avoqado-android

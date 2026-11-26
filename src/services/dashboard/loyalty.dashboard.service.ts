@@ -6,7 +6,7 @@
  * DESIGN DECISION: Points-based loyalty system with configurable earn/redeem rates per venue.
  * - Customers earn points on every purchase (e.g., 1 point per $1 spent)
  * - Points can be redeemed for discounts (e.g., 100 points = $1 discount)
- * - Points can expire after configurable period (e.g., 1 year)
+ * - Points expire after N days WITHOUT ACTIVITY when the venue turns expiration on (D27: `src/services/loyalty/vencimientoDePuntos.ts`)
  * - Staff can manually adjust points (corrections, bonuses, penalties)
  *
  * PATTERN: Thin Controller + Fat Service Architecture
@@ -29,6 +29,7 @@ import { leerSiEsCuentaDeTarjetas } from '../giftCards/giftCardMarks'
 import { ventaTieneReembolso } from '../shared/ligaDeClienteEnVenta'
 import { decidirPromoDeLaVentaEnTx, registrarUsoEnTx } from '../loyalty/promotions/promoDeLaVenta'
 import { puntosConPromo } from '../loyalty/promotions/evaluarPromo'
+import { vencerPuntosDelNegocio } from '../loyalty/vencimientoDePuntos'
 
 /**
  * Get or create loyalty configuration for a venue
@@ -48,7 +49,8 @@ export async function getOrCreateLoyaltyConfig(venueId: string, db: Pick<Prisma.
         pointsPerVisit: 0, // No bonus per visit
         redemptionRate: 0.01, // 100 points = $1 discount (1 point = $0.01)
         minPointsRedeem: 100, // Minimum 100 points to redeem
-        pointsExpireDays: 365, // Points expire after 1 year
+        // D27: la expiración nace APAGADA (como Square): los puntos sí vencen, así que prenderla es decisión del dueño, nunca un default.
+        pointsExpireDays: null,
         // Tier and activation are separate decisions. Creating/opening the
         // settings page must never silently turn on a money-valued reward.
         active: false,
@@ -165,10 +167,22 @@ export async function updateLoyaltyConfig(
     }
   }
 
-  const config = await prisma.loyaltyConfig.update({
-    where: { venueId },
-    data,
-  })
+  // D27: el reloj del vencimiento (`pointsExpireSince`) arranca HOY cuando el vencimiento queda prendido y antes no lo estaba (prender la
+  // expiración o reactivar el programa) o cuando se acortan los días: nadie pierde puntos de golpe por un cambio de configuración. Se decide
+  // con la fila tomada (Codex r1 #3): dos guardados cruzados no se saltan el arranque leyendo un estado viejo.
+  const config = await withDeadlockRetry(
+    async tx => {
+      const filas = await tx.$queryRaw<Array<{ active: boolean; pointsExpireDays: number | null }>>`
+        SELECT active, "pointsExpireDays" FROM "LoyaltyConfig" WHERE "venueId" = ${venueId} FOR UPDATE`
+      const antes = filas?.[0] ?? configActual
+      const venciaAntes = antes.active && (antes.pointsExpireDays ?? 0) > 0
+      const dias = data.pointsExpireDays !== undefined ? data.pointsExpireDays : antes.pointsExpireDays
+      const venceDespues = (data.active ?? antes.active) && (dias ?? 0) > 0
+      const arrancaElReloj = venceDespues && (!venciaAntes || (dias ?? 0) < (antes.pointsExpireDays ?? 0))
+      return tx.loyaltyConfig.update({ where: { venueId }, data: arrancaElReloj ? { ...data, pointsExpireSince: new Date() } : data })
+    },
+    { etiqueta: 'updateLoyaltyConfig', timeout: 15_000, maxWait: 5_000 },
+  )
 
   logAction({
     venueId,
@@ -185,6 +199,8 @@ export async function updateLoyaltyConfig(
       ...(data.stampRewardValue !== undefined ? { stampRewardValue: Number(config.stampRewardValue ?? 0) } : {}),
       ...(data.stampRewardLabel !== undefined ? { stampRewardLabel: config.stampRewardLabel } : {}),
       ...(data.maxStampsPerDay !== undefined ? { maxStampsPerDay: config.maxStampsPerDay } : {}),
+      ...(data.pointsExpireDays !== undefined ? { pointsExpireDays: config.pointsExpireDays } : {}),
+      ...(config.pointsExpireSince ? { pointsExpireSince: config.pointsExpireSince.toISOString() } : {}),
     },
   })
 
@@ -325,12 +341,15 @@ export async function earnPoints(
     redemptionRate: storedConfig.redemptionRate.toNumber(),
   }
 
-  if (!config.active) {
+  // hz:be99f328:D42 (founder, «A», 25-nov): `active` es el interruptor de los PUNTOS; la tarjeta de sellos tiene el suyo
+  // (`stampsEnabled`). Sólo se sale aquí si los dos están apagados. Con los puntos apagados y los sellos prendidos se sigue para
+  // sellar, y los puntos dan 0 más abajo (`calcularPuntosDeLaVenta` mira `active`), sin escribir nada.
+  if (!config.active && !config.stampsEnabled) {
     return { pointsEarned: 0, newBalance: 0 }
   }
 
   // R1 (tarjetas de regalo): comprar una tarjeta no da puntos ni sello. Cubre a quien llama directo (pago manual, ligas). Va después de
-  // las salidas baratas: sólo los negocios con lealtad activa pagan esta lectura.
+  // las salidas baratas: sólo los negocios con lealtad prendida (puntos o sellos) pagan esta lectura.
   if (await leerSiEsCuentaDeTarjetas(prisma, orderId)) return { pointsEarned: 0, newBalance: 0 }
 
   // ── SELLOS (Plan B) ────────────────────────────────────────────────────────
@@ -387,6 +406,7 @@ export async function earnPoints(
       deferredStampError,
       otorgadoHastaAhora,
       sinPromo: options?.skipStamp === true,
+      puntosPrendidos: config.active,
     })
   } catch (error) {
     throw conLoOtorgado(error, otorgadoHastaAhora)
@@ -425,8 +445,13 @@ async function acreditarPuntosTrasElSello(ctx: {
   otorgadoHastaAhora: { sello: boolean; puntos: boolean }
   /** La venta nueva de un cambio (`skipStamp`): no es una visita nueva, así que tampoco gana promo. */
   sinPromo: boolean
+  /**
+   * hz:be99f328:D42 (Codex r1 #2): el interruptor de PUNTOS de la MISMA lectura con que se decidió llegar hasta aquí. Apagado ⇒ 0
+   * puntos sin releer la config: si otro administrador los prendiera y apagara a media venta, esta venta no escribe un EARN.
+   */
+  puntosPrendidos: boolean
 }): Promise<ResultadoDeEarnPoints> {
-  const { venueId, customerId, amount, orderId, staffId, sello, deferredStampError, otorgadoHastaAhora, sinPromo } = ctx
+  const { venueId, customerId, amount, orderId, staffId, sello, deferredStampError, otorgadoHastaAhora, sinPromo, puntosPrendidos } = ctx
 
   // The payment callers already isolate loyalty failures from the approved
   // charge. We therefore persist points first, then surface a stamp failure so
@@ -476,7 +501,8 @@ async function acreditarPuntosTrasElSello(ctx: {
   }
 
   // Los puntos de la regla normal (regla 8: sin ellos, la promo tampoco da). La promo se suma dentro de la transacción.
-  const { total: pointsEarned, bono, pointsPerDollar } = await calcularPuntosDeLaVenta(venueId, amount)
+  const base = puntosPrendidos ? await calcularPuntosDeLaVenta(venueId, amount) : { total: 0, bono: 0, pointsPerDollar: 0 }
+  const { total: pointsEarned, bono, pointsPerDollar } = base
 
   if (pointsEarned === 0) {
     // H4, tercera ola: negocio de sólo sellos. «Ya sellada» con el sello de OTRO cliente quiere decir que la venta es de él:
@@ -891,73 +917,13 @@ export async function getLoyaltyTransactions(
 }
 
 /**
- * Expire old loyalty points based on config
- * Should be run periodically (e.g., daily cron job)
+ * D27: vence a mano los puntos de un negocio (`POST /loyalty/expire-old-points`). Es lo mismo que hace el job cada día: por inactividad,
+ * idempotente y con el reloj de `pointsExpireSince` (ver `src/services/loyalty/vencimientoDePuntos.ts`). La versión anterior vencía por
+ * lote con un corte de N × 24 h y, si se corría dos veces, volvía a vencer lo ya vencido.
  */
-export async function expireOldPoints(venueId: string): Promise<{ customersAffected: number; pointsExpired: number }> {
-  const config = await getOrCreateLoyaltyConfig(venueId)
-
-  if (!config.active || !config.pointsExpireDays) {
-    return { customersAffected: 0, pointsExpired: 0 }
-  }
-
-  const expirationDate = new Date()
-  expirationDate.setUTCDate(expirationDate.getUTCDate() - config.pointsExpireDays)
-
-  // Find all EARN transactions older than expiration date
-  const oldTransactions = await prisma.loyaltyTransaction.findMany({
-    where: {
-      customer: {
-        venueId,
-      },
-      type: LoyaltyTransactionType.EARN,
-      createdAt: { lt: expirationDate },
-    },
-    include: {
-      customer: {
-        select: {
-          id: true,
-          loyaltyPoints: true,
-        },
-      },
-    },
-  })
-
-  let totalPointsExpired = 0
-  const affectedCustomerIds = new Set<string>()
-
-  for (const transaction of oldTransactions) {
-    const pointsToExpire = Math.min(transaction.points, transaction.customer.loyaltyPoints)
-
-    if (pointsToExpire > 0) {
-      // Create EXPIRE transaction and update customer balance
-      await withDeadlockRetry(
-        async tx => {
-          await tx.loyaltyTransaction.create({
-            data: {
-              customerId: transaction.customerId,
-              type: LoyaltyTransactionType.EXPIRE,
-              points: -pointsToExpire,
-              reason: `Expired ${pointsToExpire} points from transaction ${transaction.id} (older than ${config.pointsExpireDays} days)`,
-            },
-          })
-          await tx.customer.update({
-            where: { id: transaction.customerId },
-            data: {
-              loyaltyPoints: { decrement: pointsToExpire },
-            },
-          })
-        },
-        { etiqueta: 'expireOldPoints' },
-      )
-
-      totalPointsExpired += pointsToExpire
-      affectedCustomerIds.add(transaction.customerId)
-    }
-  }
-
-  return {
-    customersAffected: affectedCustomerIds.size,
-    pointsExpired: totalPointsExpired,
-  }
+export async function expireOldPoints(venueId: string): Promise<{ customersAffected: number; pointsExpired: number; fallidos: number }> {
+  // `fallidos` es nuevo y opcional para quien lee: los clientes que tronaron no quedan escondidos tras un 200 (Codex r3 #8); el job los
+  // vuelve a intentar cada hora.
+  const { customersAffected, pointsExpired, fallidos } = await vencerPuntosDelNegocio(venueId)
+  return { customersAffected, pointsExpired, fallidos }
 }

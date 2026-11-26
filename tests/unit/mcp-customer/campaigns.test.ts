@@ -17,6 +17,7 @@ import type { McpScope } from '../../../src/mcp/scope'
 
 const mockFindMany = jest.fn()
 const mockCount = jest.fn()
+const mockGroupBy = jest.fn()
 const mockObtener = jest.fn()
 const mockCambiar = jest.fn()
 const mockAudit = jest.fn()
@@ -47,6 +48,7 @@ jest.mock('@/utils/prismaClient', () => ({
       findMany: (...a: unknown[]) => mockFindMany(...(a as [])),
       count: (...a: unknown[]) => mockCount(...(a as [])),
     },
+    customerCampaignDelivery: { groupBy: (...a: unknown[]) => mockGroupBy(...(a as [])) },
   },
 }))
 
@@ -69,6 +71,7 @@ beforeEach(() => {
   permisosPedidos.length = 0
   mockFindMany.mockResolvedValue([])
   mockCount.mockResolvedValue(0)
+  mockGroupBy.mockResolvedValue([])
 })
 
 describe('list_customer_campaigns', () => {
@@ -91,6 +94,20 @@ describe('list_customer_campaigns', () => {
     const args = mockFindMany.mock.calls[0][0]
     expect(args.where).toEqual({ venueId: 'v1' })
     expect(args.orderBy).toEqual([{ createdAt: 'desc' }, { id: 'desc' }])
+  })
+
+  it('🔴 D37: entregados, fallidos y estado salen de los envíos, no de la columna que nace en 0', async () => {
+    mockFindMany.mockResolvedValue([{ id: 'c1', name: 'Navidad', subject: 'x', status: 'ENQUEUED', totalRecipients: 5, createdAt: null }])
+    mockCount.mockResolvedValue(1)
+    mockGroupBy.mockResolvedValue([
+      { campaignId: 'c1', status: 'SENT', _count: { _all: 3 } },
+      { campaignId: 'c1', status: 'PENDING', _count: { _all: 1 } },
+      { campaignId: 'c1', status: 'DEAD', _count: { _all: 1 } },
+    ])
+    const r = parse(await call('list_customer_campaigns', { venueId: 'v1' }))
+    expect(mockFindMany.mock.calls[0][0].select.sentCount ?? false).toBe(false)
+    expect(mockGroupBy.mock.calls[0][0].where).toEqual({ venueId: 'v1', campaignId: { in: ['c1'] } })
+    expect(r.campaigns[0]).toMatchObject({ estado: 'SENDING', destinatarios: 5, entregados: 3, fallidos: 1, omitidos: 0 })
   })
 
   it('un venue fuera de tu alcance no se lee', async () => {

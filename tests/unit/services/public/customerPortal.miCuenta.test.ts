@@ -372,6 +372,16 @@ describe('S13 · el portal', () => {
     expect(prismaMock.stampReward.findFirst).not.toHaveBeenCalled()
   })
 
+  // hz:be99f328:D42: el interruptor de PUNTOS (`active`) ya no esconde el premio de sellos.
+  it('D42: con los puntos apagados y los sellos prendidos el premio sí sale (y los puntos no)', async () => {
+    armar({ active: false, stampsEnabled: true, redemptionRate: new Prisma.Decimal('0.05') })
+    crudas({})
+    prismaMock.stampReward.findFirst.mockResolvedValue({ id: 'cpremio', rewardLabel: 'Un café gratis' } as any)
+    const r: any = await getCustomerPortal(VENUE, ELLA, SIN_CONTACTO)
+    expect(r.premioDisponible).toEqual({ id: 'cpremio', etiqueta: 'Un café gratis' })
+    expect(r.puntos).toBeNull()
+  })
+
   it('tarjetas: sólo las guardadas por ella (su customerId) y NUNCA un saldo a favor; el saldo a favor sale aparte y no ocupa lugar', async () => {
     crudas({
       tarjetas: [[tarjeta(0)]],

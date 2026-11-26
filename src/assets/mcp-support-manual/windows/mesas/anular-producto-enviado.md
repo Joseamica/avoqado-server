@@ -4,7 +4,8 @@ description: Quita de la cuenta de una mesa un producto que ya se mandó a cocin
 product: windows
 category: mesas
 task: anular-producto-enviado
-requiredPermissions: []
+requiredPermissions:
+  - orders:void
 featureCode: TABLE_SERVICE
 gateKind: FEATURE
 money: true

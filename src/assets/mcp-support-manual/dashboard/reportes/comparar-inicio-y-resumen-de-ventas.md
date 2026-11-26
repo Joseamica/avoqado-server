@@ -4,7 +4,10 @@ description: Inicio suma lo cobrado el día del cobro; Resumen de Ventas, las cu
 product: dashboard
 category: reportes
 task: comparar-inicio-y-resumen-de-ventas
-requiredPermissions: []
+requiredPermissions:
+  - home:read
+  - analytics:read
+  - reports:read
 sourceRepo: avoqado-web-dashboard
 sourceRef: aa8a35a4edcec79df6fb8746d4b1e11d0be803e0
 keywords:

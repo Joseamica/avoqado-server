@@ -81,9 +81,25 @@
     }
   ],
   "aparato": {
-    "estado": "NO PROBADO EN APARATO",
-    "fotos": [],
-    "filasCreadas": []
+    "estado": "PROBADO",
+    "aparato": "SAMSUNG del laboratorio del Alien (serial R8YL200592L)",
+    "version": "2.25.58-dev (develop 6afdcc28), copia de QA com.avoqado.pos.d36 compilada en la nube (avq-verify), contra el SERVIDOR aislado (develop 6409b3562 con #633, base av-db-25-d36) en :3004",
+    "apkSha256": "f4d8048d40f9014f141dc037c60f83afbcc5690bbdc02ec7ee949f12302adca5",
+    "fecha": "2026-11-25",
+    "fotos": [
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/android/and-62-escaneo-tarjeta.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/android/and-63-escaneo-tarjeta.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/android/and-64-premio-aviso.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/android/and-65-premio-en-carrito.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/android/and-66-premio-quitado.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/android/and-67-cobro-con-premio.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/android/and-68-premio-cobrado.png"
+    ],
+    "filasCreadas": [
+      "WalletPass emitido con el servicio para QA-D36 Referida (el alta por el cartel pide LOYALTY_WALLET, que esta base no trae)",
+      "Sellos 2/2 en dos ventas escaneadas → StampReward REDEEMED en una orden de $25.50 (−$4.50) en efectivo"
+    ],
+    "nota": "25-nov (D36): Configuración: Tarjeta digital con 2 sellos y 15 %; el Programa de Lealtad tuvo que pasar a Activo: con él inactivo, la venta no suma sello (loyalty.dashboard.service.ts: if (!config.active) return) aunque el aviso diga «esta compra le suma otro» (se agregó a Problemas). El lector se emuló con un teclado USB de mentira (comando uinput de Android, ~10 ms por tecla); `adb input` no sirve (deviceId −1). La primera lectura perdió el primer carácter y salió «Producto no encontrado» (LectorHid: «el precio es un carácter suelto la primera vez»; se agregó a Problemas). Con la tarjeta: «0 de 2 sellos · esta compra le suma otro» + Listo; tras 2 ventas: «🎁 Tiene un premio por cobrar: 15% de descuento» → «Aplicar 15% de descuento» → renglón «Premio: 15% de descuento» −$4.50; la X (Quitar premio) lo quita; de nuevo y cobro en efectivo. No se probó: «No aplica a esta venta», cobro por partes, «Revisa el premio», sin red."
   },
   "codex": {
     "lote": 4,

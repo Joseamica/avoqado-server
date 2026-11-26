@@ -154,6 +154,14 @@ export async function getReferralSummary(venueId: string) {
   const couponsEmittedThisMonth = await prisma.discount.count({
     where: { venueId, source: 'REFERRAL_TIER', createdAt: { gte: startOfMonth } },
   })
+  // D32: «Premios emitidos» del panel = TODOS los premios de nivel del mes, también el producto gratis (que no crea
+  // descuento). Cada premio deja una sola fila de `ReferralRewardGrant` (única por cliente, nivel y premio), y un premio
+  // revocado después sigue contando porque sí se emitió. Campo propio: `couponsEmittedThisMonth` conserva su significado.
+  // ponytail: filtra por el índice de `venueId` y luego por fecha; los premios son pocos por negocio (≤ 3 niveles por
+  // cliente que llega a nivel). Si un negocio llega a miles de premios, índice `(venueId, createdAt)`.
+  const rewardsIssuedThisMonth = await prisma.referralRewardGrant.count({
+    where: { venueId, createdAt: { gte: startOfMonth } },
+  })
 
   const topReferrer = await prisma.customer.findFirst({
     where: { venueId, referralCount: { gt: 0 } },
@@ -168,6 +176,7 @@ export async function getReferralSummary(venueId: string) {
     qualifiedThisMonth,
     pendingThisMonth,
     couponsEmittedThisMonth,
+    rewardsIssuedThisMonth,
     topReferrer,
   }
 }

@@ -27,4 +27,4 @@ Si al imprimir sale *No se pudo imprimir*, el cobro sí quedó aprobado: no lo v
 2. Toca *Volver al recibo* y vuelve a tocar *Imprimir*.
 3. Si dice «Impresora ocupada» o «Cabezal caliente», espera un momento antes de volver a imprimir.
 4. Si en el recibo no sale *Imprimir* y la terminal tiene impresora, entra a *Configuración* y, en *Configuración de Pago*, enciende *Opciones de Recibo*. Hace falta permiso para configurar la terminal.
-5. Para probar la impresora sin cobrar, toca *Imprimir Prueba* en *Configuración*.
+5. Para probar la impresora sin cobrar, toca *Imprimir Prueba* en *Configuración* (pide el mismo permiso del paso 4).

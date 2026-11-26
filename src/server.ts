@@ -93,6 +93,7 @@ import { inventoryPostingSweeperJob } from './jobs/inventory-posting-sweeper.job
 import { paymentLinkHoldSweeperJob } from './jobs/payment-link-hold-sweeper.job'
 import { mercadoPagoCierrePerdidoJob } from './jobs/mercadopago-cierre-perdido.job'
 import { loyaltyReconciliationJob } from './jobs/loyalty-reconciliation.job'
+import { loyaltyPointsExpiryJob } from './jobs/loyalty-points-expiry.job'
 import { kitchenTicketsReconciliationJob } from './jobs/kitchen-tickets-reconciliation.job'
 import { paymentEffectsJob } from './jobs/payment-effects.job'
 import { cancelOrderEffectsJob } from './jobs/cancel-order-effects.job'
@@ -209,6 +210,7 @@ const gracefulShutdown = async (signal: string) => {
       paymentLinkHoldSweeperJob.stop()
       mercadoPagoCierrePerdidoJob.stop()
       loyaltyReconciliationJob.stop()
+      loyaltyPointsExpiryJob.stop()
       kitchenTicketsReconciliationJob.stop()
       paymentEffectsJob.stop()
       cancelOrderEffectsJob.stop()
@@ -591,6 +593,8 @@ const startApplication = async (retries = 3) => {
       // Cobros de Mercado Pago aprobados sin venta (el aviso responde 200 aunque falle): los retoma y cierra una sola vez.
       mercadoPagoCierrePerdidoJob.start()
       loyaltyReconciliationJob.start()
+      // D27: vence los puntos de quien pasó N días sin moverlos (negocios con la expiración prendida), una vez por día local.
+      loyaltyPointsExpiryJob.start()
       // Etapa 3 del KDS: arma las comandas de pantalla que un proceso caído dejó con su marca.
       kitchenTicketsReconciliationJob.start()
       paymentEffectsJob.start()

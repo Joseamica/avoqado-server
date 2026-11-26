@@ -547,6 +547,16 @@ describe('awardLoyaltyForLateCustomer', () => {
     expect(r).toMatchObject({ stampsEnabled: false, stamped: false, reason: null, saleCard: null })
   })
 
+  // hz:be99f328:D42: el interruptor de PUNTOS (`active`) ya no apaga los sellos.
+  it('D42: puntos apagados y sellos prendidos: stampsEnabled true y el tope del día sí se cuenta', async () => {
+    prismaMock.loyaltyConfig.findUnique.mockResolvedValue({ active: false, stampsEnabled: true, maxStampsPerDay: 1 } as any)
+    awardMock.mockResolvedValue({ complete: true, errors: [] })
+    prismaMock.stampEvent.count.mockResolvedValue(1)
+    const r = await awardLoyaltyForLateCustomer({ venueId: VENUE, orderId: ORDER, customerId: CUST })
+    expect(awardMock).toHaveBeenCalledTimes(1)
+    expect(r).toMatchObject({ stampsEnabled: true, stamped: false, reason: 'DAILY_LIMIT' })
+  })
+
   it('sin el plan (LOYALTY_PROGRAM): stampsEnabled false', async () => {
     featureMock.mockResolvedValue(false)
     awardMock.mockResolvedValue({ complete: true, errors: [] })
@@ -1121,6 +1131,15 @@ describe('previewSaleStamp (vista previa del MCP)', () => {
       orderNumber: 'ORD-1',
     })
     expect(awardMock).not.toHaveBeenCalled()
+  })
+
+  it('D42: con los puntos apagados y los sellos prendidos la vista previa dice que sí hay sellos', async () => {
+    conVenta({ orderCustomers: [] })
+    prismaMock.loyaltyConfig.findUnique.mockResolvedValue({ active: false, stampsEnabled: true, maxStampsPerDay: 1 } as any)
+    expect(await previewSaleStamp({ venueId: VENUE, orderId: ORDER, customerId: CUST })).toMatchObject({
+      decision: 'ELIGIBLE',
+      stampsEnabled: true,
+    })
   })
 })
 

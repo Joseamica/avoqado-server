@@ -10,7 +10,7 @@ roles:
   - OWNER
   - ADMIN
   - MANAGER
-lastVerified: 2026-05-20
+lastVerified: 2026-11-25
 sourceRepo: avoqado-web-dashboard
 relatedArticles:
   - gestionar-clientes
@@ -21,6 +21,8 @@ keywords:
   - no puede canjear sus puntos
   - puntos incorrectos
   - reglas de canje
+  - puntos vencidos
+  - se le borraron los puntos
 ---
 
 ## Antes de empezar
@@ -41,6 +43,8 @@ También revisa si el programa aplica a todas las sucursales o solo a una. Las r
 ## Problemas frecuentes
 
 Si un cliente no acumula puntos, revisa si el programa está activo y si la compra cumple condiciones. Si no puede redimir, valida saldo, reglas y vigencia. Si los puntos parecen incorrectos, revisa historial y sucursal. Si no ves la sección, puede faltar permiso o la función no estar habilitada.
+
+El vencimiento de puntos viene apagado: mientras no lo prendas, los puntos nunca vencen. Si lo prendes y un cliente pasa los días configurados sin movimientos en sus puntos (ganar, canjear o un ajuste), vencen todos sus puntos y queda escrito en su historial; por eso, si los puntos de un cliente bajaron a cero sin que canjeara, revisa si la expiración está prendida. Al prender la expiración o al bajar los días, los días sin movimientos empiezan a contar desde ese día. El botón *Guardar Cambios* está en la barra de abajo de la página.
 
 Cuando hagas una corrección, registra el caso internamente con cliente, fecha y motivo para que el equipo pueda explicar el cambio.
 

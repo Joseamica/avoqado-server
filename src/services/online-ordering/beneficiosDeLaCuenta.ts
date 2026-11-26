@@ -164,7 +164,8 @@ export interface LealtadDeLaCuenta {
  * si su EARN es de ella y una devolución no lo quitó, con el avance de HOY de la cartilla donde cayó («llevas 7 de 10»). Si esa
  * cartilla ya se llenó, dice «10 de 10»: es la verdad de esa cartilla y su premio nació ahí; el avance de la cartilla nueva no se mezcla
  * con esta venta. Si una devolución reabrió la cartilla, dice lo que quedó. Los puntos, de su EARN. Sólo con clienta y con el programa
- * prendido (`active`; el sello además con `stampsEnabled`). `null` si no hay nada que decir: nunca «no sumaste».
+ * prendido: el sello con `stampsEnabled` y los puntos con `active` (D42: uno no depende del otro). `null` si no hay nada que decir:
+ * nunca «no sumaste».
  * ponytail: los puntos son los del EARN; una devolución parcial posterior no se descuenta aquí (sí en «Mi cuenta»).
  */
 export async function lealtadDeLaCuenta(p: {
@@ -175,13 +176,15 @@ export async function lealtadDeLaCuenta(p: {
   const customerId = p.customerId
   if (!customerId) return null
   const config = await prisma.loyaltyConfig.findUnique({ where: { venueId: p.venueId }, select: { active: true, stampsEnabled: true } })
-  if (!config?.active) return null
+  if (!config || (!config.active && !config.stampsEnabled)) return null
   const [sellos, puntos] = await Promise.all([
     config.stampsEnabled ? prisma.$queryRaw<SelloDeLaVenta[]>(sqlSelloDeLaVenta(p.venueId, p.orderId)) : Promise.resolve([]),
-    prisma.loyaltyTransaction.findFirst({
-      where: { orderId: p.orderId, customerId, type: LoyaltyTransactionType.EARN },
-      select: { points: true },
-    }),
+    config.active
+      ? prisma.loyaltyTransaction.findFirst({
+          where: { orderId: p.orderId, customerId, type: LoyaltyTransactionType.EARN },
+          select: { points: true },
+        })
+      : Promise.resolve(null),
   ])
   const lealtad: LealtadDeLaCuenta = {}
   const [sello] = sellos ?? []

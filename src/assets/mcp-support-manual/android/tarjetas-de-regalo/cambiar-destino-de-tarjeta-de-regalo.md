@@ -11,6 +11,7 @@ money: true
 versionMin: 2.25.53
 sourceRepo: avoqado-android
 sourceRef: 78e5372f37ed7791d86fc1fe621d4a073e5a09ff
+deviceTested: 2026-11-25
 keywords:
   - cambiar destino de la tarjeta
   - mandar la tarjeta a otro número
@@ -20,12 +21,12 @@ keywords:
 
 ## Antes de empezar
 
-Es en la pantalla *Tarjetas de regalo* de la venta (se abre al terminar de cobrarla, o en *Más* › *Pedidos* al abrir la venta pagada que dice *Tarjetas de regalo*). *Cambiar destino* pide el permiso de administrar tarjetas de regalo (de fábrica, gerente, administrador y dueño). Repone el código: el de antes deja de servir.
+Es en la pantalla *Tarjetas de regalo* de la venta (al terminar de cobrarla, toca *Entregar tarjeta de regalo*; o en *Más* › *Pedidos*, abre la venta pagada que dice *Tarjetas de regalo*). *Cambiar destino* pide el permiso de administrar tarjetas de regalo (de fábrica, gerente, administrador y dueño). Repone el código: el de antes deja de servir.
 
 ## Pasos
 
 1. En la tarjeta («•••• …»), toca *Cambiar destino*.
-2. Elige *WhatsApp* o *Correo*.
+2. Elige *WhatsApp* o *Correo*. En versiones anteriores a la 2.25.59, toca el círculo de la opción: la palabra no responde.
 3. Escribe el celular a 10 dígitos o el correo de quien la recibe.
 4. Toca *Cambiar destino*: sale «Destino actualizado».
 

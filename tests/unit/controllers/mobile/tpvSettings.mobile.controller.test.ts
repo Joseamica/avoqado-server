@@ -810,3 +810,121 @@ describe('getVenueTpvSettings (mobile) — Menú del aparato', () => {
     expect(res.__json.data.deviceTerminal).toBeNull()
   })
 })
+
+describe('el sondeo guarda el reporte de dibujo del POS de Windows (hz:a5fa2439:D1)', () => {
+  const VENUE_A = 'venue-a'
+  const VENUE_B = 'venue-b'
+  const URL_DE = (v: string) => `/api/v1/mobile/venues/${v}/display-mode-request`
+  const REPORTE = 'v=1;proc=3fa9c1d2;rev=2;api=SOFTWARE_FAST;paint=712;perf=LIGHT;set=FAST;cpu=Intel(R) i5;cores=4;ram=7.9;screen=1920x1080'
+  const auth = {
+    'x-test-auth-context': JSON.stringify({ userId: 'staff-1', venueId: VENUE_A, allowedVenueIds: [VENUE_A, VENUE_B] }),
+    'x-device-id': 'pc-1',
+  }
+  // La ficha EXACTA de cada sucursal: el mismo aparato tiene una en A y otra en B.
+  const fichaDe = (v: string) => ({
+    id: v === VENUE_A ? 'terminal-de-a' : 'terminal-de-b',
+    customerDisplayRequest: null,
+    customerDisplayRequestExpiresAt: null,
+  })
+  const app = () => {
+    const a = express()
+    a.use(express.json())
+    a.use('/api/v1/mobile', mobileRoutes)
+    a.use((e: any, _q: Request, s: Response, _n: NextFunction) => s.status(e.statusCode ?? 500).json({ code: e.code, message: e.message }))
+    return a
+  }
+  const vaciar = () => new Promise(r => setImmediate(r))
+  const sentencias = () =>
+    prismaMock.$executeRaw.mock.calls.map(([q]: any[]) => q).filter((q: any) => typeof q?.sql === 'string') as Array<{
+      sql: string
+      values: unknown[]
+    }>
+
+  // El cuerpo de HOY, fijo: el reporte no le agrega ni le quita nada.
+  const cuerpoDeHoy = (terminalId: string) => ({
+    data: {
+      terminalId,
+      request: null,
+      fingerprints: {},
+      capabilities: { customerDisplayDesign: 2 },
+      capabilityReport: { requested: true },
+    },
+  })
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+    prismaMock.terminal.findFirst.mockImplementation((args: any) => Promise.resolve(fichaDe(args.where.venueId)))
+    prismaMock.$transaction.mockImplementation((cb: any) => cb(prismaMock))
+    prismaMock.$executeRaw.mockResolvedValue(1)
+  })
+
+  it('con y sin la cabecera la respuesta es idéntica a la de hoy', async () => {
+    const sinCabecera = await request(app()).get(URL_DE(VENUE_A)).set(auth)
+    const conCabecera = await request(app()).get(URL_DE(VENUE_A)).set(auth).set('x-device-diagnostics', REPORTE)
+    await vaciar()
+
+    expect(sinCabecera.status).toBe(200)
+    expect(conCabecera.status).toBe(200)
+    expect(sinCabecera.body).toEqual(cuerpoDeHoy('terminal-de-a'))
+    expect(conCabecera.body).toEqual(sinCabecera.body)
+    expect(sentencias()).toHaveLength(1) // sólo el sondeo con cabecera escribe
+  })
+
+  it('la respuesta se envía ANTES de que termine la escritura (con la escritura retenida, ya llegó)', async () => {
+    let soltar!: (v: unknown) => void
+    prismaMock.$transaction.mockImplementationOnce(() => new Promise(r => (soltar = r)))
+
+    const r = await request(app()).get(URL_DE(VENUE_A)).set(auth).set('x-device-diagnostics', REPORTE)
+
+    expect(r.status).toBe(200)
+    expect(r.body).toEqual(cuerpoDeHoy('terminal-de-a'))
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(1) // la escritura empezó y sigue retenida
+    soltar(1)
+    await vaciar()
+  })
+
+  it.each([
+    ['la cabecera dos veces', [REPORTE, REPORTE]],
+    ['ñ§;;;', 'ñ§;;;'],
+    ['5 000 caracteres', `${REPORTE};x=${'a'.repeat(5_000)}`],
+  ])('con %s ⇒ 200, mismo cuerpo y sin escritura', async (_caso, valor) => {
+    const r = await request(app())
+      .get(URL_DE(VENUE_A))
+      .set(auth)
+      .set('x-device-diagnostics', valor as any)
+    await vaciar()
+
+    expect(r.status).toBe(200)
+    expect(r.body).toEqual(cuerpoDeHoy('terminal-de-a'))
+    expect(prismaMock.$transaction).not.toHaveBeenCalled()
+  })
+
+  it('el sondeo a la sucursal B guarda el reporte en la ficha de B, no en la de A', async () => {
+    const r = await request(app()).get(URL_DE(VENUE_B)).set(auth).set('x-device-diagnostics', REPORTE)
+    await vaciar()
+
+    expect(r.body.data.terminalId).toBe('terminal-de-b')
+    const [escritura] = sentencias()
+    expect(escritura.values).toContain('terminal-de-b')
+    expect(escritura.values).not.toContain('terminal-de-a')
+  })
+
+  it('el reporte no toca lastHeartbeat ni escribe la ficha por el modelo', async () => {
+    await request(app()).get(URL_DE(VENUE_A)).set(auth).set('x-device-diagnostics', REPORTE)
+    await vaciar()
+
+    const [escritura] = sentencias()
+    expect(escritura.sql).not.toMatch(/lastHeartbeat/)
+    expect(prismaMock.terminal.update).not.toHaveBeenCalled()
+    expect(prismaMock.terminal.updateMany).not.toHaveBeenCalled()
+  })
+
+  it('si guardar falla, el sondeo ya respondió 200 y no pasa el error a next', async () => {
+    prismaMock.$transaction.mockRejectedValueOnce(new Error('lock timeout'))
+    const r = await request(app()).get(URL_DE(VENUE_A)).set(auth).set('x-device-diagnostics', REPORTE)
+    await vaciar()
+
+    expect(r.status).toBe(200)
+    expect(r.body).toEqual(cuerpoDeHoy('terminal-de-a'))
+  })
+})
