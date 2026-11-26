@@ -18,10 +18,11 @@ process.env.ENABLE_VENUE_BASE_SUBSCRIPTION = 'true'
 const mockSubCreate = jest.fn()
 const mockCustomersCreate = jest.fn()
 const mockPriceList = jest.fn()
+const mockPriceRetrieve = jest.fn()
 jest.mock('stripe', () =>
   jest.fn().mockImplementation(() => ({
     subscriptions: { create: mockSubCreate, retrieve: jest.fn(), list: jest.fn() },
-    prices: { list: mockPriceList, retrieve: jest.fn() },
+    prices: { list: mockPriceList, retrieve: mockPriceRetrieve },
     customers: { create: mockCustomersCreate, retrieve: jest.fn(), update: jest.fn() },
     paymentMethods: { retrieve: jest.fn() },
   })),
@@ -88,6 +89,7 @@ import request from 'supertest'
 
 import { prismaMock } from '@tests/__helpers__/setup'
 import { definicionDePrueba, idsDeLaVersion, punteroA, versionUno } from '@tests/__helpers__/planOfferFixtures'
+import { renovarSesionConLaSucursal } from '../../../src/services/onboarding/sesionTrasElAlta'
 
 const app = require('../../../src/app').default
 
@@ -148,6 +150,7 @@ beforeEach(() => {
   mockCustomersCreate.mockReset().mockResolvedValue('cus_1')
   mockSubCreate.mockReset().mockResolvedValue({ id: 'sub_1' })
   mockPriceList.mockReset().mockResolvedValue({ data: [{ id: 'price_key_pro_m', unit_amount: 115884 }] })
+  mockPriceRetrieve.mockReset()
   mockAutorizar.mockReset().mockImplementation(async (_v: string, _c: string, _i: unknown, crear: () => Promise<unknown>) => crear())
   mockEntregar
     .mockReset()
@@ -264,6 +267,31 @@ describe('POST /onboarding/organizations/:organizationId/v2/complete — el alta
     const gratis = await terminar()
     expect(gratis.body.code).not.toBe('PLAN_FLOW_RETIRED')
     expect(gratis.status).toBe(201)
+  })
+
+  it('🔴 Codex b2-code #1: la compuerta no ve versión del editor y la v2 se publica antes de resolver el precio → 409 OFFER_CHANGED reason VERSION, sin cobrar en Stripe ni abrir sesión; completedAt se suelta', async () => {
+    // La 1.ª lectura (la compuerta, antes del candado) no ve versión; la relectura del precio, dentro del carril, ya ve la v2.
+    prismaMock.planOfferPointer.findUnique.mockResolvedValueOnce(null).mockResolvedValue(punteroA('cv2', 2, v2()) as never)
+    mockPriceRetrieve.mockResolvedValue({ id: 'price_v2_pro_m', active: true, unit_amount: 115884 })
+    prismaMock.onboardingProgress.findUnique.mockResolvedValue(progreso(PLAN_CON_TARJETA) as never)
+
+    const res = await terminar()
+
+    expect(res.status).toBe(409)
+    expect(res.body).toMatchObject({
+      code: 'OFFER_CHANGED',
+      message: 'La oferta cambió. Revisa el precio antes de pagar. No se te cobró nada.',
+      details: { reason: 'VERSION', offerVersion: 2 },
+    })
+    expect(mockSubCreate).not.toHaveBeenCalled()
+    expect(mockPriceRetrieve).not.toHaveBeenCalled()
+    expect(mockEntregar).not.toHaveBeenCalled()
+    expect(renovarSesionConLaSucursal).not.toHaveBeenCalled()
+    // El candado temprano se suelta: el siguiente intento entra por la compuerta (ahora con la v2: PLAN_FLOW_RETIRED).
+    expect(prismaMock.onboardingProgress.updateMany).toHaveBeenLastCalledWith({
+      where: { organizationId: ORG, completedAt: { not: null } },
+      data: { completedAt: null },
+    })
   })
 
   it('con sólo la v1 el carril viejo cobra como hoy', async () => {

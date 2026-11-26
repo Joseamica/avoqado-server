@@ -218,6 +218,28 @@ describe('POST /dashboard/venues/:venueId/plan/checkout — el precio de la sesi
     expect(mockPriceRetrieve).toHaveBeenCalledWith('price_v2_pro_m', { timeout: 15_000, maxNetworkRetries: 0 })
   })
 
+  it('🔴 Codex b2-code #1: sin versión al entrar y la v2 publicada antes de resolver el precio (con el monto de hoy) → 409 OFFER_CHANGED reason VERSION, sin regla común ni sesión de Stripe', async () => {
+    // La 1.ª lectura (la compuerta) no ve versión del editor; la relectura del precio ya ve la v2, que conserva el monto de hoy.
+    prismaMock.planOfferPointer.findUnique
+      .mockResolvedValueOnce(null)
+      .mockResolvedValue(punteroA('cv2', 2, definicionDePrueba({ ids: idsDeLaVersion('v2') })) as never)
+    mockPriceRetrieve.mockResolvedValue({ id: 'price_v2_pro_m', active: true, unit_amount: PRO_M_HOY })
+    mockPriceList.mockResolvedValue({ data: [{ id: 'price_key_pro_m', unit_amount: PRO_M_HOY }] })
+
+    const res = await pedir()
+
+    expect(res.status).toBe(409)
+    expect(res.body).toMatchObject({
+      code: 'OFFER_CHANGED',
+      message: 'La oferta cambió. Revisa el precio antes de pagar. No se te cobró nada.',
+      details: { reason: 'VERSION', offerVersion: 2 },
+    })
+    expect(mockAutorizar).not.toHaveBeenCalled()
+    expect(mockSessionCreate).not.toHaveBeenCalled()
+    expect(mockPriceRetrieve).not.toHaveBeenCalled()
+    expect(mockPriceList).not.toHaveBeenCalled()
+  })
+
   it('con la v2 vigente y su precio archivado → 503 PLAN_NOT_CONFIGURED y no se abre sesión', async () => {
     prismaMock.planOfferPointer.findUnique.mockResolvedValue(punteroA('cv2', 2, definicionDePrueba({ ids: idsDeLaVersion('v2') })) as never)
     mockPriceRetrieve.mockResolvedValue({ id: 'price_v2_pro_m', active: false, unit_amount: 115884 })

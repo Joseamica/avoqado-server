@@ -2066,7 +2066,9 @@ export async function createVenuePlanCheckoutSession(
   // 🔴 Codex B0 #3: ANTES de la regla común. La regla vence las compras abiertas del cliente antes de crear: si este 409
   // saliera dentro, el enlace de pago válido de otra pestaña quedaba vencido y el cliente sin uno nuevo. La sesión se abre
   // con este mismo priceId; dentro no se vuelve a leer.
-  const { priceId, unitAmount } = await resolverPrecioDelPlan(tierCode, interval)
+  // Codex b2-code #1: este carril no cita comprobante. Si la relectura del precio ya ve una versión del editor (se publicó después de
+  // la compuerta de arriba), 409 OFFER_CHANGED sin abrir sesión: nunca se cobra la versión nueva sin su comprobante.
+  const { priceId, unitAmount } = await resolverPrecioDelPlan(tierCode, interval, { soloSinVersionDelEditor: true })
   const esperado = STANDARD_PLAN_GROSS_CENTS[tier][interval]
   if (unitAmount !== esperado) {
     logger.error('🚨 plan-checkout: el precio de Stripe no coincide con las constantes — NO se abre la sesión', {

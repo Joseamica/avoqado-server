@@ -3,6 +3,7 @@ import AppError from '../../errors/AppError'
 import logger from '../../config/logger'
 import { stripe, STRIPE_DENTRO_DEL_CANDADO, planLookupKey, stripeAfirmaQueNoExiste, type PlanTierCode } from '../stripe.service'
 import { MENSAJE_PLAN_NO_CONFIGURADO, precioDeLaOferta, versionQueCobra, type PlanPagado } from './planOffer'
+import { ofertaCambio } from './opcionesDeCompra'
 
 export { MENSAJE_PLAN_NO_CONFIGURADO }
 
@@ -63,13 +64,20 @@ export async function exigirPrecioDeStripe(
  * - **Con ella** (`versionQueCobra()`): el `priceId` de su ranura, leído con `prices.retrieve`. Se exige `active` y que el
  *   monto sea el bruto de la versión; si no, o si Stripe dice que no existe (404), 503 `PLAN_NOT_CONFIGURED`: no se cobra
  *   un precio que no es el publicado. Otro error de Stripe (tiempo agotado, 5xx) sube tal cual, como el de la llave.
+ *
+ * `soloSinVersionDelEditor` (Codex b2-code #1): lo piden los carriles que cobran SIN versión del editor (el alta larga y el
+ * checkout de «Tu plan» sin comprobante), que ya leyeron la compuerta. Si esta relectura ve una versión del editor (se publicó en
+ * medio), 409 `OFFER_CHANGED` reason `VERSION` con su número, sin leer ningún precio de Stripe: ese carril no cobra con la versión
+ * nueva sin su comprobante. Sin versión del editor, la llave de B0, igual.
  */
 export async function resolverPrecioDelPlan(
   tierCode: PlanTierCode,
   interval: 'monthly' | 'annual',
+  opciones: { soloSinVersionDelEditor?: boolean } = {},
 ): Promise<{ priceId: string; unitAmount: number }> {
   const version = await versionQueCobra()
   if (!version) return resolverPrecioPorLlave(tierCode, interval)
+  if (opciones.soloSinVersionDelEditor) throw ofertaCambio('VERSION', version.number)
 
   const tier: PlanPagado = tierCode === 'PLAN_PREMIUM' ? 'PREMIUM' : 'PRO'
   const ranura = precioDeLaOferta(version.definition, tier, interval)

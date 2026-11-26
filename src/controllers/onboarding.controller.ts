@@ -1621,7 +1621,9 @@ export async function completeV2Onboarding(req: Request, res: Response, next: Ne
           customerId,
           { tipo: 'PLAN', tier: paidTier },
           async () => {
-            const { priceId } = await resolverPrecioDelPlan(tierCode, planData.interval)
+            // Codex b2-code #1: si la versión del editor se publicó después de la compuerta (antes del candado), este carril no la
+            // cobra: 409 OFFER_CHANGED antes de Stripe (el `catch` lo deja salir sin terminar el alta).
+            const { priceId } = await resolverPrecioDelPlan(tierCode, planData.interval, { soloSinVersionDelEditor: true })
             return createPlanSubscription({
               // «Pudo cobrarse» empieza justo antes del POST, no al entrar aquí (Codex C15).
               antesDeCobrar: () => {
@@ -1731,6 +1733,16 @@ export async function completeV2Onboarding(req: Request, res: Response, next: Ne
         // R0 ronda 5 (Codex): el negocio se borró mientras se creaba su cliente de Stripe. Eso NO es un
         // tropiezo de Stripe: no hay negocio que dar por terminado. Se suelta la marca y se propaga.
         if (planErr instanceof AppError && planErr.code === 'VENUE_NOT_FOUND') {
+          await prisma.onboardingProgress.updateMany({
+            where: { organizationId, completedAt: { not: null } },
+            data: { completedAt: null },
+          })
+          throw planErr
+        }
+        // Codex b2-code #1: la relectura del precio vio una versión del editor publicada en medio. Nada se cobró en esta petición ni
+        // quedó un cobro anterior por entregar: se suelta la marca y sale el 409 (sin terminar el alta ni renovar la sesión). La
+        // siguiente petición entra por la compuerta, que ya ve la versión. Con un cobro anterior posible, el camino de hoy (abajo).
+        if (!intentoCobrar && !cobroSinEntregar && planErr instanceof AppError && planErr.code === 'OFFER_CHANGED') {
           await prisma.onboardingProgress.updateMany({
             where: { organizationId, completedAt: { not: null } },
             data: { completedAt: null },
