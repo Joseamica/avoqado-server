@@ -45,6 +45,7 @@ import { scheduleJob } from '../observability/jobContext'
 import { getPlanState } from '@/services/dashboard/planState.service'
 import { MARGEN_OFERTA_MS } from '@/services/billing/cobroDiferido'
 import { modalidadDePrueba } from '@/services/billing/modalidadDePrueba'
+import { avisoDeLaPruebaSinTarjeta, LECTURA_ACOTADA } from '@/services/billing/tarjetaQueCobraria'
 import {
   avisarPlanTerminado,
   avisoDelPlanApagado,
@@ -466,30 +467,63 @@ export class PlanRenewalReminderJob {
           continue
         }
 
+        // Planes editables (B2, Task 9, §18): una prueba SIN tarjeta (su metadata, Ruling P6; sólo mientras está en prueba) no dice
+        // «cobraremos a tu tarjeta»: dice qué tarjeta cobrará Stripe ahora (o que no hay y sigue en Gratis) y cuánto. Mismo sello.
+        const sinTarjeta = modalidadDePrueba(sub).sinTarjeta === true
         // 🔴 No list-price fallback: unknown amount → no email, no stamp; tomorrow's run (still in the window) retries.
-        const amountCents = await montoDelSiguienteCobro(stripe, vf.stripeSubscriptionId!)
-        if (amountCents === null) {
-          sinMonto++
-          continue
+        // B2 Task 9: la prueba sin tarjeta lee la vista previa con el tope de las lecturas que sólo informan; la de hoy, como hoy.
+        const amountCents = sinTarjeta
+          ? await montoDelSiguienteCobro(stripe, vf.stripeSubscriptionId!, LECTURA_ACOTADA)
+          : await montoDelSiguienteCobro(stripe, vf.stripeSubscriptionId!)
+
+        let sent: boolean
+        if (sinTarjeta) {
+          // `undefined` = no se pudo leer la tarjeta: nunca se dice «sin tarjeta». Sin correo ni sello; la corrida siguiente
+          // (todavía en la ventana) lo vuelve a intentar, como un monto desconocido de hoy.
+          const tarjeta = (await avisoDeLaPruebaSinTarjeta(sub)).tarjetaQueCobrara
+          if (tarjeta === undefined) {
+            errorCount++
+            logger.warn(`renewal reminder: no se pudo leer qué tarjeta cobrará Stripe en la prueba sin tarjeta; se reintenta mañana`, {
+              venueFeatureId: vf.id,
+              subscriptionId: vf.stripeSubscriptionId,
+            })
+            continue
+          }
+          // El correo de Task 6. Sin monto también sale (no promete un cobro), sin la frase del monto. Sin llave, como el de hoy.
+          sent = await emailService.sendPlanFreeTrialEndingEmail(target.email, {
+            locale: target.locale,
+            venueName: target.venueName,
+            endDate: new Date(periodEndMs),
+            planName: vf.feature?.code === 'PLAN_PREMIUM' ? 'Premium' : 'Pro',
+            timeZone: zonaValida(vf.venue?.timezone),
+            billingUrl: billingPageUrl(vf.venue?.slug),
+            ...(amountCents !== null ? { montoAlTerminarCents: amountCents } : {}),
+            tarjeta,
+          })
+        } else {
+          if (amountCents === null) {
+            sinMonto++
+            continue
+          }
+
+          const interval = sub.items.data[0]?.price.recurring?.interval === 'year' ? 'annual' : 'monthly'
+          // Plan Básico «Tu Pro sube»: sólo en el último periodo con descuento (misma regla que `canEndProNow`).
+          const basicOffer = await ofertaDelBasico(stripe, sub, vf.feature?.code, 'DISCOUNT_ENDS', new Date(now))
+
+          sent = await emailService.sendPlanRenewalReminderEmail(target.email, {
+            locale: target.locale,
+            venueName: target.venueName,
+            interval,
+            renewalDate: new Date(periodEndMs),
+            amountCents,
+            billingPortalUrl: billingPageUrl(vf.venue?.slug),
+            planName: vf.feature?.code === 'PLAN_PREMIUM' ? 'Premium' : 'Pro',
+            isTrialEnd: sub.status === 'trialing',
+            // An empty or non-IANA zone ("GMT-6") makes toLocaleDateString throw: fall back to CDMX instead of never sending.
+            timeZone: zonaValida(vf.venue?.timezone),
+            ...(basicOffer ? { basicOffer } : {}),
+          })
         }
-
-        const interval = sub.items.data[0]?.price.recurring?.interval === 'year' ? 'annual' : 'monthly'
-        // Plan Básico «Tu Pro sube»: sólo en el último periodo con descuento (misma regla que `canEndProNow`).
-        const basicOffer = await ofertaDelBasico(stripe, sub, vf.feature?.code, 'DISCOUNT_ENDS', new Date(now))
-
-        const sent = await emailService.sendPlanRenewalReminderEmail(target.email, {
-          locale: target.locale,
-          venueName: target.venueName,
-          interval,
-          renewalDate: new Date(periodEndMs),
-          amountCents,
-          billingPortalUrl: billingPageUrl(vf.venue?.slug),
-          planName: vf.feature?.code === 'PLAN_PREMIUM' ? 'Premium' : 'Pro',
-          isTrialEnd: sub.status === 'trialing',
-          // An empty or non-IANA zone ("GMT-6") makes toLocaleDateString throw: fall back to CDMX instead of never sending.
-          timeZone: zonaValida(vf.venue?.timezone),
-          ...(basicOffer ? { basicOffer } : {}),
-        })
         // Not delivered → no stamp, so the next daily run retries.
         if (!sent) {
           logger.warn(`renewal reminder: email not sent for venueFeature ${vf.id}; will retry on the next run`)

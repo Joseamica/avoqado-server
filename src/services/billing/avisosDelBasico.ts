@@ -23,13 +23,28 @@ import { OPERATIONAL_VENUE_STATUSES } from '@/lib/venueStatus.constants'
 import { BASIC_PLAN_DEFINITION_WHERE } from '@/services/launchCampaigns/basicPlanAccess'
 import { TIPO_AVISOS_SIN_COBRO } from '@/services/notifications/avisosSinCobro'
 import { descuentoDelPlan } from './descuentoDelPlan'
+import { versionQueCobra } from './planOffer'
 import { isLastDiscountedPeriod, type SuscripcionConDescuento } from './ultimoPeriodoConDescuento'
 
 /** Holgura entre `ended_at` y el fin que se esperaba (Stripe borra en el segundo del fin; un reloj de prueba, igual). */
 const HOLGURA_S = 3600
 
-/** El Básico publicado hoy, o `null` (sin publicar, o no se pudo leer: entonces no se ofrece, nunca se inventa un precio). */
+/**
+ * El Básico publicado hoy, o `null` (sin publicar, o no se pudo leer: entonces no se ofrece, nunca se inventa un precio).
+ *
+ * Planes editables (B2, Task 9, b2-r2 #10): con una versión del editor (`versionQueCobra()`) el Básico ya no está a la venta, así
+ * que es `null` y los avisos («Tu prueba termina», «Tu Pro terminó», el fin de prueba de Stripe) salen con su texto de hoy sin él.
+ * Sin versión del editor, lo de hoy. Si leer la oferta falla (b2-r9 #8: p. ej. una v1 que no pasa el esquema), también lo de hoy:
+ * leer la oferta nunca tumba un aviso. `getPublicBasicPlan` no cambia.
+ */
 export async function basicoPublicado() {
+  try {
+    if ((await versionQueCobra()) !== null) return null
+  } catch (error) {
+    logger.warn('avisosDelBasico: no se pudo leer la oferta de los planes; el aviso sigue como hoy', {
+      error: error instanceof Error ? error.message : String(error),
+    })
+  }
   try {
     // Import diferido: el catálogo híbrido no tiene por qué cargarse con el job ni con el webhook.
     const { getPublicBasicPlan } = await import('@/services/launchCampaigns/hybridCampaign.service')

@@ -13,7 +13,7 @@ import { subscriptionPeriod } from '@/utils/stripeSubscriptionPeriod'
 import logger from '@/config/logger'
 import { billingPageUrl } from '@/utils/dashboardLinks'
 import { zonaValida } from '@/utils/datetime'
-import emailService from './email.service'
+import emailService, { marcaLegible } from './email.service'
 import { resolvePlanNotificationTarget } from './access/planNotification.service'
 import { createNotification } from './dashboard/notification.dashboard.service'
 import { NotificationType, NotificationChannel, NotificationPriority, StaffRole, Prisma } from '@prisma/client'
@@ -29,6 +29,8 @@ import {
   type FulfillPlanCheckoutResult,
 } from './stripe.service'
 import { montoDelSiguienteCobro, noHabraCobro } from './billing/siguienteCobro'
+import { avisoDeLaPruebaSinTarjeta, LECTURA_ACOTADA, type TarjetaVisible } from './billing/tarjetaQueCobraria'
+import { modalidadDePrueba } from './billing/modalidadDePrueba'
 import { avisarPlanTerminado, ofertaDelBasico } from './billing/avisosDelBasico'
 import { PAID_PLAN_TIER_CODES } from './access/basePlan.service'
 import socketManager from '../communication/sockets'
@@ -1082,6 +1084,38 @@ async function sendTrialEndingNotifications(venueId: string, venueName: string, 
 }
 
 /**
+ * B2 Task 9: no se pudo leer qué tarjeta cobrará Stripe en una prueba sin tarjeta. Sale del `try` que se traga los errores de los
+ * avisos, como un `retrieve` fallido: el evento queda FAILED y la conciliación lo repite (nunca se dice «sin tarjeta» por una
+ * lectura fallida).
+ */
+class TarjetaDeLaPruebaIlegible extends Error {
+  constructor(subscriptionId: string) {
+    super(`No se pudo leer qué tarjeta cobrará Stripe al terminar la prueba ${subscriptionId}`)
+    this.name = 'TarjetaDeLaPruebaIlegible'
+  }
+}
+
+/**
+ * B2 Task 9 (§18): el aviso en la app de una prueba SIN tarjeta, con el mismo texto que su correo (Task 6): qué tarjeta cobrará
+ * Stripe (la marca como la lee una persona, `marcaLegible`) o, sin ninguna, que la ponga en «Tu plan» o se queda en Gratis; y
+ * cuánto. Sin monto (`null`), la frase sin monto.
+ */
+function avisoEnLaAppDeLaPruebaSinTarjeta(args: {
+  plan: string
+  fecha: string
+  monto: string | null
+  tarjeta: TarjetaVisible | null
+}): string {
+  const { plan, fecha, monto, tarjeta } = args
+  const inicio = `Tu prueba de ${plan} termina el ${fecha}.`
+  if (tarjeta) {
+    const cual = `${marcaLegible(tarjeta.brand) ?? ''} ••••${tarjeta.last4 ?? '····'}`.trim()
+    return `${inicio} Ese día ${monto ? `se cobrarán ${monto}` : 'se cobrará tu plan'} en tu tarjeta ${cual}; puedes cambiarla o cancelar en «Tu plan».`
+  }
+  return `${inicio} Para seguir con ${plan}, pon tu tarjeta en «Tu plan»${monto ? `: ese día se cobrarán ${monto}` : ''}. Si no la pones, tu negocio sigue en Gratis.`
+}
+
+/**
  * `trial_will_end` of a PLAN_PRO / PLAN_PREMIUM subscription (≈3 days before the first charge): the plan trial-end reminder
  * with the amount Stripe will really charge, instead of the loose-feature "your feature will be deactivated" email.
  *
@@ -1096,6 +1130,13 @@ async function sendTrialEndingNotifications(venueId: string, venueName: string, 
  *   OWNER/ADMIN on top of the plan email (and would mail it when there is no amount).
  * - One plan email per subscription, to the recipient `resolvePlanNotificationTarget` resolves (skipped only when it has
  *   none), not one per OWNER/ADMIN: the staff list only decides who gets the in-app notice. Dates use the venue's zone.
+ * - Planes editables (B2, Task 9, §18): a trial WITHOUT a card (subscription metadata `sinTarjeta: 'true'`, Ruling P6) does not
+ *   say «cobraremos a tu tarjeta». After the same skips, it says what Stripe has NOW: which card it will charge
+ *   (`tarjetaQueCobraria`) or that there is none and the venue stays on Gratis, and how much (the preview). The email is Task 6's
+ *   (`sendPlanFreeTrialEndingEmail`) and the in-app notice carries the same text. Without an amount it still goes out (it
+ *   promises no charge), without the amount sentence. 🔴 If the card cannot be read, nothing says «sin tarjeta»: nothing is sent
+ *   and the event FAILS (like a failed retrieve) so stripe-webhook-reconciliation replays it; nothing was sent, so a replay
+ *   cannot duplicate. Without `sinTarjeta`, everything as today.
  */
 async function sendPlanTrialEndingNotifications(
   venueFeature: Prisma.VenueFeatureGetPayload<{ include: { feature: true; venue: true } }>,
@@ -1127,7 +1168,24 @@ async function sendPlanTrialEndingNotifications(
       return
     }
 
-    const amountCents = await montoDelSiguienteCobro(stripe, subscription.id)
+    // B2 Task 9: la prueba sin tarjeta lee la vista previa con el tope de las lecturas que sólo informan; la de hoy, como hoy.
+    const sinTarjeta = modalidadDePrueba(subscription).sinTarjeta === true
+    const amountCents = sinTarjeta
+      ? await montoDelSiguienteCobro(stripe, subscription.id, LECTURA_ACOTADA)
+      : await montoDelSiguienteCobro(stripe, subscription.id)
+    // La tarjeta que Stripe cobrará ahora (`null` = ninguna). `undefined` = no se pudo leer: entonces no se avisa.
+    let tarjeta: TarjetaVisible | null = null
+    if (sinTarjeta) {
+      const leida = (await avisoDeLaPruebaSinTarjeta(subscription)).tarjetaQueCobrara
+      if (leida === undefined) {
+        logger.warn('⚠️ Plan trial ending (sin tarjeta): no se pudo leer qué tarjeta cobrará Stripe; sin aviso, el evento se repite', {
+          venueId,
+          subscriptionId: subscription.id,
+        })
+        throw new TarjetaDeLaPruebaIlegible(subscription.id)
+      }
+      tarjeta = leida
+    }
 
     // OWNER/ADMIN of a venue are a handful; `take` is the cap the bounded-queries rule asks for.
     const staffMembers = await prisma.staffVenue.findMany({
@@ -1144,10 +1202,12 @@ async function sendPlanTrialEndingNotifications(
     const timeZone = zonaValida(venue.timezone)
     const billingPortalUrl = billingPageUrl(venue.slug)
     const fecha = trialEnd.toLocaleDateString('es-MX', { day: 'numeric', month: 'long', year: 'numeric', timeZone })
-    const cobro =
-      amountCents === null
-        ? 'se cobrará'
-        : `cobraremos ${new Intl.NumberFormat('es-MX', { style: 'currency', currency: 'MXN' }).format(amountCents / 100)}`
+    const monto =
+      amountCents === null ? null : new Intl.NumberFormat('es-MX', { style: 'currency', currency: 'MXN' }).format(amountCents / 100)
+    const cobro = monto === null ? 'se cobrará' : `cobraremos ${monto}`
+    const message = sinTarjeta
+      ? avisoEnLaAppDeLaPruebaSinTarjeta({ plan: `Avoqado ${planName}`, fecha, monto, tarjeta })
+      : `Tu prueba de Avoqado ${planName} termina el ${fecha}. Ese día ${cobro} a tu tarjeta; cancela antes desde Facturación si no quieres continuar.`
 
     for (const { staff } of staffMembers) {
       try {
@@ -1156,7 +1216,7 @@ async function sendPlanTrialEndingNotifications(
           venueId,
           type: NotificationType.SUBSCRIPTION_TRIAL_ENDING,
           title: `⏰ Prueba gratuita terminando pronto`,
-          message: `Tu prueba de Avoqado ${planName} termina el ${fecha}. Ese día ${cobro} a tu tarjeta; cancela antes desde Facturación si no quieres continuar.`,
+          message,
           metadata: {
             featureName: venueFeature.feature.name,
             trialEndDate: trialEnd.toISOString(),
@@ -1171,6 +1231,27 @@ async function sendPlanTrialEndingNotifications(
           error: notificationError instanceof Error ? notificationError.message : 'Unknown error',
         })
       }
+    }
+
+    if (sinTarjeta) {
+      // B2 Task 9: el correo de Task 6, también sin monto (no promete un cobro). Sin llave de Resend, como el de hoy.
+      const target = await resolvePlanNotificationTarget(venueId)
+      if (!target.email) {
+        logger.warn('⚠️ Plan trial ending: no email recipient resolved; email skipped', { venueId, subscriptionId: subscription.id })
+        return
+      }
+      const emailSent = await emailService.sendPlanFreeTrialEndingEmail(target.email, {
+        locale: target.locale,
+        venueName: venue.name,
+        endDate: trialEnd,
+        planName,
+        timeZone,
+        billingUrl: billingPortalUrl,
+        ...(amountCents !== null ? { montoAlTerminarCents: amountCents } : {}),
+        tarjeta,
+      })
+      if (!emailSent) logger.warn('⚠️ Plan trial ending email failed to send', { venueId, subscriptionId: subscription.id })
+      return
     }
 
     if (amountCents === null) {
@@ -1199,6 +1280,8 @@ async function sendPlanTrialEndingNotifications(
     })
     if (!emailSent) logger.warn('⚠️ Plan trial ending email failed to send', { venueId, subscriptionId: subscription.id })
   } catch (error) {
+    // B2 Task 9: la tarjeta de la prueba sin tarjeta no se leyó y no salió nada: el evento queda FAILED para repetirse.
+    if (error instanceof TarjetaDeLaPruebaIlegible) throw error
     // Log but don't throw - notifications should not block webhook success
     logger.error('❌ Failed to send plan trial ending notifications', {
       venueId,
