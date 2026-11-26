@@ -13,7 +13,8 @@ gateKind: FEATURE
 money: true
 versionMin: 2.25.59
 sourceRepo: avoqado-android
-sourceRef: db119c61e189d2c2ea0e6d306c9120ded94887f6
+sourceRef: 98a114df07c2eb0a6a3e7d1c336e6c152de38a1b
+deviceTested: 2026-11-26
 keywords:
   - canjear puntos
   - canjear recompensa
@@ -32,6 +33,7 @@ keywords:
   - reintentar el canje
   - reintentar el canje no responde
   - cuenta pagada de más con puntos
+  - no se sabe si el pago entró
 ---
 
 ## Antes de empezar
@@ -75,6 +77,7 @@ En *Pedidos* los puntos pueden cubrir toda la cuenta. Si la cuenta queda en $0.0
 - Si el canje se quedó sin respuesta (se fue la red o tardó), sale «No se sabe si el canje entró…» y el botón cambia a *Reintentar el canje*: toca ese botón. Manda lo mismo y nunca canjea dos veces: si el primero ya había entrado, sale «Recompensa aplicada…» con ese mismo canje. En una versión anterior del POS puede salir «No se volvió a canjear: la cuenta ya cambió…»: revisa que la cuenta traiga el descuento «Recompensas».
 - Mientras se canjea, o si un canje se quedó sin respuesta, *Cobrar* no se abre en esa cuenta (sin internet sale «Hay un canje de puntos sin terminar en esta cuenta…»): reintenta el canje con red y después cóbrala.
 - Si con internet *Reintentar el canje* sigue sin traer respuesta (por ejemplo, porque el programa de lealtad se apagó en el panel mientras tanto), cierra la app y vuelve a abrirla: la cuenta se vuelve a leer y dice si trae el descuento «Recompensas». Después cóbrala con red.
+- En una cuenta con puntos canjeados, si al cobrar sale «No se sabe si el pago entró…» (se fue la red o el servidor tardó), toca *Reintentar* con conexión: si el pago ya había entrado, no se cobra otra vez. No la vuelvas a cobrar desde el principio.
 - Si la app se cerró a media canje, al volver revisa que la cuenta traiga el descuento «Recompensas» antes de cobrarla. Si ya se cobró por el importe de antes (por ejemplo, con *Ya pagó de otra forma*) y el descuento entró después, la cuenta queda pagada de más: devuelve la diferencia con un reembolso.
 
 ## Sin internet

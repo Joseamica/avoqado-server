@@ -1,7 +1,7 @@
 {
   "pagina": "windows/lealtad/canjear-puntos",
   "sourceRepo": "avoqado-android",
-  "sourceRef": "db119c61e189d2c2ea0e6d306c9120ded94887f6",
+  "sourceRef": "98a114df07c2eb0a6a3e7d1c336e6c152de38a1b",
   "version": "2.25.60",
   "pasos": [
     {
@@ -43,7 +43,7 @@
     {
       "paso": 1,
       "archivo": "desktop/pos/src/main/kotlin/com/avoqado/pos/escritorio/AppEscritorio.kt",
-      "linea": 49,
+      "linea": 80,
       "cita": "val windowSizeClass = WindowSizeClass.calculateFromSize(DpSize(maxWidth, maxHeight))"
     },
     {
@@ -166,12 +166,12 @@
     {
       "afirmacion": "En Pedidos, una cuenta de «Pagar después» con un canje de esta caja no se cobra sin internet: «Esta cuenta tiene puntos canjeados: se cobra con conexión. Espera a que vuelva la red.»",
       "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/CobroDeCuentaScreen.kt",
-      "linea": 622
+      "linea": 625
     },
     {
       "afirmacion": "Sin red, «Recompensas» de Pedidos sale en gris con el texto sin conexión de Mesas",
       "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/CobroDeCuentaScreen.kt",
-      "linea": 504
+      "linea": 507
     }
   ],
   "rutas": [
@@ -233,27 +233,27 @@
     {
       "ruta": "Pedidos › cuenta de «Pagar después»: botón «Recompensas» debajo de Cobrar",
       "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/CobroDeCuentaScreen.kt",
-      "linea": 1118
+      "linea": 1120
     },
     {
       "ruta": "La cuenta en $0.00 se cierra con «Cerrar cuenta ($0.00)»",
       "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/CobroDeCuentaScreen.kt",
-      "linea": 675
+      "linea": 678
     },
     {
       "ruta": "Canje sin respuesta: «No se sabe si el canje entró…» y el botón «Reintentar el canje»",
       "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/CobroDeCuentaScreen.kt",
-      "linea": 618
+      "linea": 621
     },
     {
       "ruta": "Cobrar bloqueado con un canje sin terminar: «Hay un canje de puntos sin terminar en esta cuenta…»",
       "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/CobroDeCuentaScreen.kt",
-      "linea": 626
+      "linea": 629
     },
     {
       "ruta": "Sin permiso: «No tienes permiso para canjear puntos. Pídeselo a tu gerente.»",
       "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/CobroDeCuentaScreen.kt",
-      "linea": 629
+      "linea": 632
     },
     {
       "ruta": "Canje con un cobro con tarjeta en curso en la terminal",
@@ -264,6 +264,11 @@
       "ruta": "Cobro con terminal con el importe de antes del canje: «tiene puntos canjeados: falta $…»",
       "archivo": "avoqado-server/src/services/terminal-payment.service.ts",
       "linea": 2142
+    },
+    {
+      "ruta": "Cobro de una cuenta con canje que se queda sin respuesta: «No se sabe si el pago entró. Toca «Reintentar» con conexión…»; «Reintentar» no cobra dos veces",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowViewModel.kt",
+      "linea": 182
     }
   ],
   "aparato": {

@@ -1,7 +1,7 @@
 {
   "pagina": "android/lealtad/canjear-puntos",
   "sourceRepo": "avoqado-android",
-  "sourceRef": "db119c61e189d2c2ea0e6d306c9120ded94887f6",
+  "sourceRef": "98a114df07c2eb0a6a3e7d1c336e6c152de38a1b",
   "version": "2.25.60",
   "pasos": [
     {
@@ -160,12 +160,12 @@
     {
       "afirmacion": "En Pedidos, una cuenta de «Pagar después» con un canje de esta caja no se cobra sin internet: «Esta cuenta tiene puntos canjeados: se cobra con conexión. Espera a que vuelva la red.»",
       "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/CobroDeCuentaScreen.kt",
-      "linea": 622
+      "linea": 625
     },
     {
       "afirmacion": "Sin red, «Recompensas» de Pedidos sale en gris con el texto sin conexión de Mesas",
       "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/CobroDeCuentaScreen.kt",
-      "linea": 504
+      "linea": 507
     }
   ],
   "rutas": [
@@ -227,27 +227,27 @@
     {
       "ruta": "Pedidos › cuenta de «Pagar después»: botón «Recompensas» debajo de Cobrar",
       "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/CobroDeCuentaScreen.kt",
-      "linea": 1118
+      "linea": 1120
     },
     {
       "ruta": "La cuenta en $0.00 se cierra con «Cerrar cuenta ($0.00)»",
       "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/CobroDeCuentaScreen.kt",
-      "linea": 675
+      "linea": 678
     },
     {
       "ruta": "Canje sin respuesta: «No se sabe si el canje entró…» y el botón «Reintentar el canje»",
       "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/CobroDeCuentaScreen.kt",
-      "linea": 618
+      "linea": 621
     },
     {
       "ruta": "Cobrar bloqueado con un canje sin terminar: «Hay un canje de puntos sin terminar en esta cuenta…»",
       "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/CobroDeCuentaScreen.kt",
-      "linea": 626
+      "linea": 629
     },
     {
       "ruta": "Sin permiso: «No tienes permiso para canjear puntos. Pídeselo a tu gerente.»",
       "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/CobroDeCuentaScreen.kt",
-      "linea": 629
+      "linea": 632
     },
     {
       "ruta": "Canje con un cobro con tarjeta en curso en la terminal",
@@ -258,24 +258,47 @@
       "ruta": "Cobro con terminal con el importe de antes del canje: «tiene puntos canjeados: falta $…»",
       "archivo": "avoqado-server/src/services/terminal-payment.service.ts",
       "linea": 2142
+    },
+    {
+      "ruta": "Cobro de una cuenta con canje que se queda sin respuesta: «No se sabe si el pago entró. Toca «Reintentar» con conexión…»; «Reintentar» no cobra dos veces",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowViewModel.kt",
+      "linea": 182
     }
   ],
   "aparato": {
-    "estado": "NO PROBADO EN APARATO",
+    "estado": "PROBADO",
+    "aparato": "D3 del laboratorio Alien (D40625BRJ0469), Android, pantalla 1920×1080",
+    "version": "2.25.59-dev (com.avoqado.pos.d39, ANDROID 98a114df)",
+    "apkSha256": "8033b11961352361e6f3c356c81c2bd86748c85efecbecedabd2e1004c839d49",
+    "fecha": "2026-11-26",
     "fotos": [
-      "docs/audit/2026-11-25-defectos-lealtad-referidos/pos/full-testing/02-menu-carrito-con-red.png",
-      "docs/audit/2026-11-25-defectos-lealtad-referidos/pos/full-testing/03-menu-con-cliente-con-puntos.png",
-      "docs/audit/2026-11-25-defectos-lealtad-referidos/pos/full-testing/04-menu-sin-red.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d39/full-testing/d3/01-cuenta-pagar-despues-con-recompensas.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d39/full-testing/d3/02-dialogo-recompensas.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d39/full-testing/d3/03-recompensa-aplicada.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d39/full-testing/d3/04-cobrada-en-efectivo.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d39/full-testing/d3/05-respuesta-perdida-error-timeout.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d39/full-testing/d3/06-cuenta-en-cero-cerrar.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d39/full-testing/d3/07-cerrada-en-cero.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d39/full-testing/d3/08-sin-respuesta-texto-honesto.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d39/full-testing/d3/09-reintentar-mismo-pago.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d39/full-testing/d3/10-sin-red-cuenta-con-canje.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d39/full-testing/d3/11-colgado-cobro-bloqueado.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d39/full-testing/d3/12-colgado-canje-en-duda.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d39/full-testing/d3/13-colgado-reintento-aplicado.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d39/full-testing/d3/14-perdida-canje-en-duda.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d39/full-testing/d3/15-perdida-reintento-mismo-canje.png",
       "docs/audit/2026-11-25-defectos-lealtad-referidos/pos/full-testing/05-mesa-cliente-asignado.png",
-      "docs/audit/2026-11-25-defectos-lealtad-referidos/pos/full-testing/06a-acciones-recompensas.png",
       "docs/audit/2026-11-25-defectos-lealtad-referidos/pos/full-testing/06-recompensas-dialogo.png",
       "docs/audit/2026-11-25-defectos-lealtad-referidos/pos/full-testing/08-descuentos-aplicados.png"
     ],
     "filasCreadas": [
-      "Cliente de prueba FULLTEST-D31 Puntos con 500 puntos (ajuste del panel)",
-      "Cuenta de la mesa M3: canje de 400 puntos por $4.00 (LoyaltyTransaction REDEEM −400, OrderDiscount «Recompensas — 400 puntos»), quitado desde Descuentos (ADJUST +400) y la cuenta anulada"
+      "Base desechable av-db-25-d39: cliente FULLTEST-D31 Puntos con +3,000 puntos (ADJUST «QA D39 full-testing (CPAD)»)",
+      "ORD-…014 «Pagar después» $60: canje 1,000 pts (REDEEM −1000, OrderDiscount «Recompensas — 1000 puntos», versión 1→2, un recibo HTTP_OP_V1) y efectivo $50 (PAID); EARN +50",
+      "ORD-…015 $20: canje 2,000 pts y «Cerrar cuenta ($0.00)» → efectivo $0.00, PAID",
+      "ORD-…016 $25: canje 150 pts; sin red no se cobra; servidor colgado → canje 100 pts al reintentar (un REDEEM, un recibo); respuesta perdida → canje 100 pts aplicado una vez, el reintento devolvió el mismo",
+      "SAMSUNG 25-nov (Mesas): canje de 400 pts en la mesa M3, quitado desde Descuentos (ADJUST +400) y la cuenta anulada"
     ],
-    "nota": "Lo de Mesas se probó en la SAMSUNG el 25-nov con 06e80115 (fotos y filas de arriba). La sección de «Pagar después» (D39 fase 1, db119c61) falta probarla en la SAMSUNG con y sin WiFi y con el servidor colgado; al pasar, esta evidencia vuelve a PROBADO con el APK de db119c61 y la página de ANDROID lleva deviceTested."
+    "nota": "«Pagar después» se probó el 26-nov en la D3 (la SAMSUNG estaba desconectada del Alien) con red, sin red (alien-adb sin-red) y con el SERVIDOR colgado y con la respuesta perdida (Toxiproxy), contra el SERVIDOR de la rama sobre una base desechable. Salieron dos errores, arreglados con TDD antes de este APK: «Recompensas» se cancelaba con el scope del botón (b422c05d) y el cobro sin respuesta decía «No se pudo registrar el pago» aunque sí entró (98a114df). Mesas se probó el 25-nov en la SAMSUNG (06e80115); su diálogo no cambió desde entonces."
   },
   "codex": {
     "lote": 4,
