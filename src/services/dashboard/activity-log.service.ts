@@ -49,23 +49,27 @@ export async function logAction(params: LogActionParams): Promise<void> {
   // (e.g. RESERVATION_NO_SHOW) records what happened; the absence of staffId
   // already signals "no human did this".
   //
-  // Fuera del try a propósito: el catch lo necesita para el reintento sin actor.
+  // Fuera del try a propósito: el catch lo necesita para los reintentos.
   const { staffId, data } = normalizeLegacyActivityActor(params.staffId, params.data)
-
-  try {
-    await prisma.activityLog.create({
+  // 🔴 La organización viaja en TODOS los intentos: el asiento que más falta hace —un token de alguien ya borrado— es justo
+  // el que no puede quedarse sin a quién atribuirlo.
+  const escribir = (actor: string | null, datos: Prisma.InputJsonValue | undefined) =>
+    prisma.activityLog.create({
       data: {
-        staffId,
+        staffId: actor,
         venueId: params.venueId ?? null,
         organizationId: params.organizationId ?? null,
         action: params.action,
         entity: params.entity ?? null,
         entityId: params.entityId ?? null,
-        data,
+        data: datos,
         ipAddress: params.ipAddress ?? null,
         userAgent: params.userAgent ?? null,
       },
     })
+
+  try {
+    await escribir(staffId, data)
   } catch (error) {
     // 🔴 Un actor que ya no existe NO puede costarnos la entrada de auditoría.
     //
@@ -82,24 +86,28 @@ export async function logAction(params: LogActionParams): Promise<void> {
     const isMissingActorFk = staffId !== null && fkMessage.includes('ActivityLog_staffId_fkey')
 
     if (isMissingActorFk) {
+      // 🔴 D33: varios escritores mandan el id de la ficha persona-sucursal (`StaffVenue.id`) porque su propia tabla
+      // (`LoyaltyTransaction`, `Discount`, `CreditTransaction`…) apunta ahí. Antes de rendirse se firma con la persona de esa
+      // ficha: así «Ajustar puntos» y los demás dicen quién fue, sin tocar a cada llamador. Sólo cuesta en el camino que ya
+      // falló. Si la consulta falla o la ficha ya no existe, se sigue al reintento sin actor de siempre.
+      let personaDeLaFicha: string | null = null
       try {
-        await prisma.activityLog.create({
-          data: {
-            staffId: null,
-            venueId: params.venueId ?? null,
-            // 🔴 La organización se conserva TAMBIÉN aquí: el asiento que más falta hace —un token
-            // de alguien ya borrado— es justo el que no puede quedarse sin a quién atribuirlo.
-            organizationId: params.organizationId ?? null,
-            action: params.action,
-            entity: params.entity ?? null,
-            entityId: params.entityId ?? null,
-            // El actor desconocido se conserva en `data`: es lo único que queda
-            // para rastrear de quién era ese token.
-            data: preserveUnknownStaffId(params.data, staffId),
-            ipAddress: params.ipAddress ?? null,
-            userAgent: params.userAgent ?? null,
-          },
-        })
+        personaDeLaFicha = (await prisma.staffVenue.findUnique({ where: { id: staffId }, select: { staffId: true } }))?.staffId ?? null
+      } catch {
+        // `logAction` nunca lanza: sin la consulta, se sigue al reintento sin actor
+      }
+      if (personaDeLaFicha) {
+        try {
+          await escribir(personaDeLaFicha, data)
+          return
+        } catch {
+          // cae al reintento sin actor
+        }
+      }
+
+      try {
+        // El actor desconocido se conserva en `data`: es lo único que queda para rastrear de quién era ese token.
+        await escribir(null, preserveUnknownStaffId(params.data, staffId))
         logger.warn('[ActivityLog] Actor desconocido — auditado sin staffId', {
           action: params.action,
           unknownStaffId: staffId,
