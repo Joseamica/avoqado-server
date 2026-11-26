@@ -38,6 +38,7 @@ describe('createPlanSubscription', () => {
       venueId: 'v1',
       customerId: 'cus_1',
       paymentMethodId: 'pm_1',
+      priceId: 'price_cotizado',
       tierCode: 'PLAN_PRO',
       interval: 'monthly',
       trialPeriodDays: 30,
@@ -56,6 +57,7 @@ describe('createPlanSubscription', () => {
       venueId: 'v1',
       customerId: 'cus_1',
       paymentMethodId: 'pm_1',
+      priceId: 'price_cotizado',
       tierCode: 'PLAN_PRO',
       interval: 'monthly',
       trialPeriodDays: 0,
@@ -66,19 +68,32 @@ describe('createPlanSubscription', () => {
     expect(arg.discounts).toEqual([{ coupon: 'INTRO_PRO_3M' }])
   })
 
-  it('annual: uses the annual price lookup_key, no coupon', async () => {
-    mockPriceList.mockResolvedValue({ data: [{ id: 'price_annual' }] })
+  it('annual: no coupon, cobra con el priceId recibido', async () => {
     await createPlanSubscription({
       venueId: 'v1',
       customerId: 'cus_1',
       paymentMethodId: 'pm_1',
+      priceId: 'price_cotizado',
       tierCode: 'PLAN_PRO',
       interval: 'annual',
       trialPeriodDays: 0,
     })
-    expect(mockPriceList).toHaveBeenCalledWith(expect.objectContaining({ lookup_keys: ['plan_pro_annual'] }), expect.anything())
     const arg = mockSubCreate.mock.calls[0][0]
-    expect(arg.items[0].price).toBe('price_annual')
+    expect(arg.items[0].price).toBe('price_cotizado')
+  })
+
+  it('usa el priceId recibido y no lista por llave', async () => {
+    await createPlanSubscription({
+      venueId: 'v1',
+      customerId: 'cus_1',
+      paymentMethodId: 'pm_1',
+      priceId: 'price_cotizado',
+      tierCode: 'PLAN_PRO',
+      interval: 'monthly',
+      trialPeriodDays: 0,
+    })
+    expect(mockSubCreate.mock.calls[0][0].items).toEqual([{ price: 'price_cotizado' }])
+    expect(mockPriceList).not.toHaveBeenCalled()
   })
 })
 
@@ -95,6 +110,7 @@ describe('cobra, pero NO escribe el acceso', () => {
       venueId: 'v1',
       customerId: 'cus_1',
       paymentMethodId: 'pm_1',
+      priceId: 'price_cotizado',
       tierCode: 'PLAN_PRO',
       interval: 'monthly',
       trialPeriodDays: 30,
@@ -115,6 +131,7 @@ describe('reusar sólo lo que todavía puede cobrar', () => {
       venueId: 'v1',
       customerId: 'cus_1',
       paymentMethodId: 'pm_1',
+      priceId: 'price_cotizado',
       tierCode: 'PLAN_PRO',
       interval: 'monthly',
       trialPeriodDays: 0,
@@ -160,6 +177,7 @@ describe('alCrearEnStripe: el rastro del cargo, antes que cualquier otra escritu
       venueId: 'v1',
       customerId: 'cus_1',
       paymentMethodId: 'pm_1',
+      priceId: 'price_cotizado',
       tierCode: 'PLAN_PRO',
       interval: 'monthly',
       trialPeriodDays: 30,
@@ -176,6 +194,7 @@ describe('alCrearEnStripe: el rastro del cargo, antes que cualquier otra escritu
       venueId: 'v1',
       customerId: 'cus_1',
       paymentMethodId: 'pm_1',
+      priceId: 'price_cotizado',
       tierCode: 'PLAN_PRO',
       interval: 'monthly',
       trialPeriodDays: 30,
@@ -200,6 +219,7 @@ describe('antesDeCobrar: la frontera entre «preparar» y «pudo cobrarse» (Cod
       venueId: 'v1',
       customerId: 'cus_1',
       paymentMethodId: 'pm_1',
+      priceId: 'price_cotizado',
       tierCode: 'PLAN_PRO',
       interval: 'monthly',
       trialPeriodDays: 0,
@@ -209,8 +229,9 @@ describe('antesDeCobrar: la frontera entre «preparar» y «pudo cobrarse» (Cod
     expect(orden).toEqual(['antes', 'post'])
   })
 
-  it('NO se invoca si falla la preparación (no hay precio): nada pudo cobrarse', async () => {
-    mockPriceList.mockResolvedValue({ data: [] })
+  it('NO se invoca si falla la preparación (no hay plan en el catálogo): nada pudo cobrarse', async () => {
+    const prisma = (await import('@/utils/prismaClient')).default as unknown as { feature: { findFirst: jest.Mock } }
+    prisma.feature.findFirst.mockResolvedValueOnce(null)
     const antesDeCobrar = jest.fn()
 
     await expect(
@@ -218,6 +239,7 @@ describe('antesDeCobrar: la frontera entre «preparar» y «pudo cobrarse» (Cod
         venueId: 'v1',
         customerId: 'cus_1',
         paymentMethodId: 'pm_1',
+        priceId: 'price_cotizado',
         tierCode: 'PLAN_PRO',
         interval: 'monthly',
         trialPeriodDays: 0,
@@ -234,16 +256,13 @@ describe('🔴 Codex C3: cobra bajo el candado de la regla', () => {
       venueId: 'v1',
       customerId: 'cus_1',
       paymentMethodId: 'pm_1',
+      priceId: 'price_cotizado',
       tierCode: 'PLAN_PRO',
       interval: 'monthly',
       trialPeriodDays: 0,
       idempotencyKey: 'k1',
     })
 
-    expect(mockPriceList).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.objectContaining({ timeout: expect.any(Number), maxNetworkRetries: 0 }),
-    )
     expect(mockSubCreate.mock.calls[0][1]).toMatchObject({ idempotencyKey: 'k1', maxNetworkRetries: 0, timeout: expect.any(Number) })
   })
 })
@@ -279,6 +298,7 @@ describe('🔴 D2: el banco pide autenticar el primer cobro', () => {
       venueId: 'v1',
       customerId: 'cus_1',
       paymentMethodId: 'pm_1',
+      priceId: 'price_cotizado',
       tierCode: 'PLAN_PRO',
       interval: 'monthly',
       trialPeriodDays: 0,
@@ -393,8 +413,8 @@ describe('🔴 D2: el banco pide autenticar el primer cobro', () => {
   })
 
   /**
-   * 🔴 Codex r1 #4 y r2 #2: el #2 corre dentro del candado de la regla común, después de la consulta de reuso,
-   * `prices.list` y el #1. Cada POST del #2 —el primero y su único reintento— sale sólo si JUSTO antes de mandarlo
+   * 🔴 Codex r1 #4 y r2 #2: el #2 corre dentro del candado de la regla común, después de la consulta de reuso
+   * y el #1. Cada POST del #2 —el primero y su único reintento— sale sólo si JUSTO antes de mandarlo
    * quedan ≥ 15 s (el `timeout` de una llamada) antes de `terminarAntesDe`. El reloj falso cubre también la espera del
    * `retry`: medir en `shouldRetry` (antes de la espera) no basta, y la 7d es la que lo distingue.
    */
@@ -423,10 +443,6 @@ describe('🔴 D2: el banco pide autenticar el primer cobro', () => {
         adelantar(15_000)
         return { id: 'sub_vieja', status: 'canceled' }
       })
-      mockPriceList.mockImplementation(async () => {
-        adelantar(15_000)
-        return { data: [{ id: 'price_monthly' }] }
-      })
     })
 
     afterEach(() => {
@@ -435,8 +451,8 @@ describe('🔴 D2: el banco pide autenticar el primer cobro', () => {
       mockSubRetrieve.mockReset()
     })
 
-    it('🔴 si tras la consulta de reuso, prices.list y el #1 quedan < 15 s, el #2 NO se manda y lanza «no quedó tiempo»', async () => {
-      primeroTardaYPideAutenticar(100_000) // 15 + 15 + 100 = 130 s ⇒ quedan 10 s
+    it('🔴 si tras la consulta de reuso y el #1 quedan < 15 s, el #2 NO se manda y lanza «no quedó tiempo»', async () => {
+      primeroTardaYPideAutenticar(115_000) // 15 + 115 = 130 s ⇒ quedan 10 s
 
       const veredicto = cobrarConReloj()
       await jest.runAllTimersAsync()
@@ -447,7 +463,7 @@ describe('🔴 D2: el banco pide autenticar el primer cobro', () => {
     })
 
     it('el reintento del #2 no sale si al ir a mandarlo quedan < 15 s', async () => {
-      primeroTardaYPideAutenticar(80_000) // quedan 30 s
+      primeroTardaYPideAutenticar(95_000) // quedan 30 s
       mockSubCreate.mockImplementationOnce(async () => {
         adelantar(16_000) // el 1.er POST del #2 tarda 16 s y se cae la red ⇒ quedan 14 s
         throw errorDeConexion()
@@ -486,7 +502,7 @@ describe('🔴 D2: el banco pide autenticar el primer cobro', () => {
     })
 
     it('🔴 reintento autorizado con ≥ 16 s, pero el reloj avanza DURANTE la espera: NO sale el 2.º POST si al despertar quedan < 15 s', async () => {
-      primeroTardaYPideAutenticar(90_000) // quedan 20 s
+      primeroTardaYPideAutenticar(105_000) // quedan 20 s
       mockSubCreate.mockRejectedValueOnce(errorDeConexion()) // 1.er POST del #2 sale (20 ≥ 15) y se cae sin mover el reloj
 
       const veredicto = cobrarConReloj()

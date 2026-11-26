@@ -54,6 +54,8 @@ import {
   createTrialSetupIntent,
 } from '../stripe.service'
 import { autorizarObligacionNueva } from '../access/autorizarObligacionNueva'
+import { resolverPrecioDelPlan } from '../billing/precioDelPlan'
+import { STANDARD_PLAN_GROSS_CENTS } from '../access/planPricing.constants'
 import { ventaSueltaAbierta } from '../access/ventaSuelta'
 import { notifySuperadminsNewKycSubmission } from '../superadmin/kycReview.service'
 import { cleanDemoData } from '../onboarding/demoCleanup.service'
@@ -1811,6 +1813,25 @@ export async function createVenuePlanCheckoutSession(
   // antes, que miraban el ACCESO (un plan suspendido que Stripe sigue cobrando no contaba) y no impedían dos pestañas:
   // ahora se expiran las compras abiertas y se lee lo que el negocio tiene vivo en Stripe.
   const cliente = stripeCustomerId
+  // El precio de Stripe se lee UNA vez; si no es el que el dashboard muestra, NO se abre sesión (nada se cobra).
+  // 🔴 Codex B0 #3: ANTES de la regla común. La regla vence las compras abiertas del cliente antes de crear: si este 409
+  // saliera dentro, el enlace de pago válido de otra pestaña quedaba vencido y el cliente sin uno nuevo. La sesión se abre
+  // con este mismo priceId; dentro no se vuelve a leer.
+  const { priceId, unitAmount } = await resolverPrecioDelPlan(tierCode, interval)
+  const esperado = STANDARD_PLAN_GROSS_CENTS[tier][interval]
+  if (unitAmount !== esperado) {
+    logger.error('🚨 plan-checkout: el precio de Stripe no coincide con las constantes — NO se abre la sesión', {
+      venueId,
+      tierCode,
+      interval,
+      esperado,
+      stripe: unitAmount,
+    })
+    throw new ConflictError('El precio del plan cambió. Recarga la página para ver el precio vigente.', 'PLAN_PRICE_MISMATCH', {
+      esperado,
+      stripe: unitAmount,
+    })
+  }
   const checkoutUrl = await autorizarObligacionNueva(venueId, cliente, { tipo: 'PLAN', tier }, async () => {
     // D3: dentro de la regla común (bajo su candado). Con una prueba regalada del MISMO plan, el primer cobro es el fin de
     // la prueba; la fecha la decide el servidor, nunca el cliente.
@@ -1853,6 +1874,7 @@ export async function createVenuePlanCheckoutSession(
     return createPlanCheckoutSession({
       venueId,
       customerId: cliente,
+      priceId,
       interval,
       tierCode,
       successUrl: `${billingBase}?checkout=success${trialEnd ? '&sinCobroHoy=1' : ''}`,
