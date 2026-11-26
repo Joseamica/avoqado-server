@@ -10,8 +10,12 @@
  * necesita saber a quién le está cobrando, no su teléfono ni su correo.
  */
 import { Prisma } from '@prisma/client'
+import { venueHasFeatureAccess } from '@/services/access/basePlan.service'
 import { scanWalletPass } from '../../../../src/services/wallet/scanWalletPass.service'
 import { prismaMock } from '../../../__helpers__/setup'
+
+jest.mock('@/services/access/basePlan.service', () => ({ __esModule: true, venueHasFeatureAccess: jest.fn() }))
+const conPlan = venueHasFeatureAccess as jest.MockedFunction<typeof venueHasFeatureAccess>
 
 const PASE = { id: 'wp1', venueId: 'v1', customerId: 'c1', qrToken: 'tok-qr', active: true }
 const CLIENTE = { id: 'c1', firstName: 'Ana', lastName: 'Ruiz', phone: '5551234567', email: 'ana@correo.com' }
@@ -21,10 +25,99 @@ describe('scanWalletPass', () => {
     jest.clearAllMocks()
     prismaMock.walletPass.findFirst.mockResolvedValue(PASE as any)
     prismaMock.customer.findFirst.mockResolvedValue(CLIENTE as any)
-    prismaMock.loyaltyConfig.findUnique.mockResolvedValue({ stampsRequired: 7, stampRewardLabel: 'Un café gratis' } as any)
+    prismaMock.loyaltyConfig.findUnique.mockResolvedValue({
+      stampsRequired: 7,
+      stampRewardLabel: 'Un café gratis',
+      stampsEnabled: true,
+      maxStampsPerDay: 1,
+    } as any)
     prismaMock.stampCard.findFirst.mockResolvedValue({ stampsEarned: 3, stampsRequired: 7 } as any)
     prismaMock.stampReward.count.mockResolvedValue(0)
     prismaMock.stampReward.findMany.mockResolvedValue([] as any)
+    prismaMock.venue.findUnique.mockResolvedValue({ timezone: 'America/Mexico_City' } as any)
+    prismaMock.stampEvent.count.mockResolvedValue(0)
+    conPlan.mockResolvedValue(true)
+  })
+
+  // ── D50 (hz:b37dd7ea:D50): el aviso del POS decía «esta compra le suma otro» con texto fijo, aunque la clienta ya tuviera su
+  // sello del día. El SERVIDOR pronostica con la MISMA regla que usa al sellar (plan, interruptor de sellos y tope del día).
+  describe('🔴 D50: ¿esta compra le suma sello?', () => {
+    it('con el sello del día disponible, sí suma', async () => {
+      const r = await scanWalletPass('v1', 'tok-qr')
+
+      expect(r.stampThisSale).toEqual({ willStamp: true })
+    })
+
+    it('si ya recibió su sello de hoy (tope 1), no suma y dice por qué', async () => {
+      prismaMock.stampEvent.count.mockResolvedValue(1)
+
+      const r = await scanWalletPass('v1', 'tok-qr')
+
+      expect(r.stampThisSale).toEqual({ willStamp: false, reason: 'DAILY_LIMIT_REACHED' })
+      // Cuenta VISITAS (la parte 0) de ESA clienta, igual que `grantStamp`.
+      const consulta = prismaMock.stampEvent.count.mock.calls[0][0] as any
+      expect(consulta.where).toMatchObject({ venueId: 'v1', part: 0, stampCard: { customerId: 'c1' } })
+    })
+
+    it('tope 0 = sin tope: aunque ya haya sellado hoy, suma', async () => {
+      prismaMock.loyaltyConfig.findUnique.mockResolvedValue({ stampsRequired: 7, stampsEnabled: true, maxStampsPerDay: 0 } as any)
+      prismaMock.stampEvent.count.mockResolvedValue(5)
+
+      const r = await scanWalletPass('v1', 'tok-qr')
+
+      expect(r.stampThisSale).toEqual({ willStamp: true })
+    })
+
+    it('con la tarjeta de sellos apagada, no suma', async () => {
+      prismaMock.loyaltyConfig.findUnique.mockResolvedValue({ stampsRequired: 7, stampsEnabled: false, maxStampsPerDay: 1 } as any)
+
+      const r = await scanWalletPass('v1', 'tok-qr')
+
+      expect(r.stampThisSale).toEqual({ willStamp: false, reason: 'STAMPS_DISABLED' })
+    })
+
+    it('sin el plan con lealtad, no suma (como `grantStamp` vía la lealtad de la venta)', async () => {
+      conPlan.mockResolvedValue(false)
+
+      const r = await scanWalletPass('v1', 'tok-qr')
+
+      expect(r.stampThisSale).toEqual({ willStamp: false, reason: 'STAMPS_DISABLED' })
+    })
+
+    it('🔴 si el pronóstico falla, el escaneo sale igual y dice «sin comprobar» (la app ni promete ni niega)', async () => {
+      // Codex D50 r1 #2: sin el campo, la app nueva diría «le suma otro» aunque la clienta ya tenga su sello de hoy.
+      conPlan.mockRejectedValue(new Error('se cayó la lectura del plan'))
+
+      const r = await scanWalletPass('v1', 'tok-qr')
+
+      expect(r.found).toBe(true)
+      expect(r.customer?.firstName).toBe('Ana')
+      expect(r.stampThisSale).toEqual({ willStamp: false, reason: 'UNCHECKED' })
+    })
+
+    it('🔴 si el pronóstico tarda más de 1 s, el escaneo no lo espera (Codex D50 r1 #1)', async () => {
+      jest.useFakeTimers()
+      try {
+        conPlan.mockReturnValue(new Promise<boolean>(() => {}))
+
+        const escaneo = scanWalletPass('v1', 'tok-qr')
+        await jest.advanceTimersByTimeAsync(1000)
+        const r = await escaneo
+
+        expect(r.found).toBe(true)
+        expect(r.stampThisSale).toEqual({ willStamp: false, reason: 'UNCHECKED' })
+      } finally {
+        jest.useRealTimers()
+      }
+    })
+
+    it('una tarjeta que no se encuentra no trae pronóstico', async () => {
+      prismaMock.walletPass.findFirst.mockResolvedValue(null)
+
+      const r = await scanWalletPass('v1', 'tok-qr')
+
+      expect(r.stampThisSale).toBeUndefined()
+    })
   })
 
   it('resuelve el QR al cliente y su avance', async () => {

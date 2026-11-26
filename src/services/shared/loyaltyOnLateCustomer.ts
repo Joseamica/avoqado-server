@@ -201,7 +201,7 @@ type Venta = Prisma.OrderGetPayload<{ select: typeof VENTA_SELECT }> & { reembol
 /** El cliente global o el de una transacción (la reapertura lee DENTRO de la transacción de la liga). */
 type LectorDeVenta = Pick<Prisma.TransactionClient, 'order' | 'payment' | 'exchange'>
 
-interface Programa {
+export interface Programa {
   stampsEnabled: boolean
   maxStampsPerDay: number
 }
@@ -504,7 +504,7 @@ export async function otorgarLealtadRespetandoReembolsos(
 }
 
 /** Los candados que ya exigen `earnPoints` + `grantStamp`: plan y sellos prendidos (D42: el interruptor de PUNTOS no apaga los sellos). */
-async function leerPrograma(venueId: string): Promise<Programa> {
+export async function leerPrograma(venueId: string): Promise<Programa> {
   const [config, conPlan] = await Promise.all([
     prisma.loyaltyConfig.findUnique({ where: { venueId }, select: { stampsEnabled: true, maxStampsPerDay: true } }),
     venueHasFeatureAccess(venueId, 'LOYALTY_PROGRAM'),
@@ -520,7 +520,7 @@ const horaDeLaVenta = (v: { loyaltySaleAt: Date | null; loyaltyEligibleAt: Date 
  * El MISMO conteo que `grantStamp`: VISITAS del cliente (la parte 0 de cada venta, ruling 8) en el día del VENUE de la hora de la
  * VENTA. Tope 0 = sin tope.
  */
-async function topeDelDiaAlcanzado(venueId: string, customerId: string, programa: Programa, soldAt: Date): Promise<boolean> {
+export async function topeDelDiaAlcanzado(venueId: string, customerId: string, programa: Programa, soldAt: Date): Promise<boolean> {
   if (!programa.stampsEnabled || programa.maxStampsPerDay <= 0) return false
   const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
   const tz = venue?.timezone ?? 'America/Mexico_City'
