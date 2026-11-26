@@ -420,19 +420,27 @@ export async function quickCreateCustomer(venueId: string, data: QuickCreateCust
         select: { slug: true, name: true },
       })
       const { generateReferralCode } = await import('@/services/referrals/referralCode.service')
-      const code = await generateReferralCode({
+      const generated = await generateReferralCode({
         venueId,
         venuePrefix: cfg.codePrefix ?? venue?.slug ?? venueId.slice(-8),
         customerName: [customer.firstName, customer.lastName].filter(Boolean).join(' '),
       })
-      await withDeadlockRetry(tx => tx.customer.update({ where: { id: customer.id }, data: { referralCode: code } }), {
-        etiqueta: 'quickCreateCustomer',
-      })
+      // Sólo si sigue sin código: el reparto en segundo plano (al activar o reactivar referidos) pudo darle uno, quizá ya
+      // compartido. Entonces ése es el suyo y es el que va en el correo (D28, Codex r5 #2).
+      const { count } = await withDeadlockRetry(
+        tx => tx.customer.updateMany({ where: { id: customer.id, referralCode: null }, data: { referralCode: generated } }),
+        { etiqueta: 'quickCreateCustomer' },
+      )
+      const code =
+        count === 1
+          ? generated
+          : // Sin fila (se borró entretanto) no hay código guardado: nunca se manda uno que no existe (Codex r6).
+            ((await prisma.customer.findUnique({ where: { id: customer.id }, select: { referralCode: true } }))?.referralCode ?? null)
 
       // TPV quick-add does not capture marketingConsent, so we fetch
       // it explicitly. Default to false — if a customer hasn't opted
       // in via dashboard, no email goes out.
-      if (customer.email && venue) {
+      if (code && customer.email && venue) {
         try {
           const flags = await prisma.customer.findUnique({
             where: { id: customer.id },

@@ -10,6 +10,7 @@ requiredPermissions:
 money: true
 sourceRepo: avoqado-web-dashboard
 sourceRef: 501e37072a13f5ed8f22e3d650f2598d3d8820b6
+browserTested: 2026-11-25
 keywords:
   - descuento vencido en la liga
   - quitar descuento de la liga de pago

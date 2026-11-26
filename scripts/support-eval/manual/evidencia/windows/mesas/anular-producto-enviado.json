@@ -69,19 +69,19 @@
     {
       "permiso": "orders:void",
       "archivo": "avoqado-server/src/routes/mobile.routes.ts",
-      "linea": 3643
+      "linea": 3655
     },
     {
       "permiso": "orders:comp",
       "archivo": "avoqado-server/src/routes/mobile.routes.ts",
-      "linea": 3626
+      "linea": 3638
     }
   ],
   "plan": [
     {
       "featureCode": "TABLE_SERVICE",
       "archivo": "avoqado-server/src/routes/mobile.routes.ts",
-      "linea": 3641
+      "linea": 3653
     }
   ],
   "sinInternet": [

@@ -86,9 +86,21 @@
     "filasCreadas": []
   },
   "navegador": {
-    "estado": "NO PROBADO EN NAVEGADOR",
-    "fotos": [],
-    "filasCreadas": []
+    "estado": "PROBADO",
+    "herramienta": "playwright",
+    "servidor": "DASHBOARD develop 1a878e36 (vite en :5903) + SERVIDOR aislado (develop 6409b3562 con #633, base av-db-25-d36) en :3004",
+    "fecha": "2026-11-25",
+    "fotos": [
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/dashboard/d-02-tarjeta.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/dashboard/d-03-cambiar-destino.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/dashboard/d-04-telefono-invalido.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/dashboard/d-05-correo-listo.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/dashboard/d-06-repuesta.png"
+    ],
+    "filasCreadas": [
+      "GiftCard •••• BTJ1 (ORD-0000000000014) repuesta como •••• 2BZJ con destino correo (@example.com; Resend apagado)"
+    ],
+    "nota": "25-nov (D36): Clientes › Tarjetas de regalo → •••• BTJ1 → Entrega › Cambiar destino → pantalla «Cambiar destino» con el aviso de reposición y «¿Cómo la mandamos?». WhatsApp con «123» → Reponer y enviar → «Escribe los 10 dígitos del teléfono.». Correo → «Correo de quien la recibe» → Reponer y enviar → «Se repuso el código y la tarjeta va en camino al destino nuevo.» y la tarjeta cambia a •••• 2BZJ. No se probaron: la tarjeta guardada en la de un cliente, «No supimos si se guardó»."
   },
   "codex": {
     "lote": 4,

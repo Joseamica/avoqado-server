@@ -745,4 +745,37 @@ describe('Codex S1 r2', () => {
     expect(await svc.entrarSinRespuestaYProgramar(s.requestId, f.venueId, 'TERMINAL_GONE', { terminalId: f.serial })).toBe(true)
     expect(cancelEmit).toHaveBeenCalledWith('terminal:payment_cancel', expect.objectContaining({ requestId: s.requestId }))
   })
+
+  /* ── Revisión de apps viejas al publicar (Codex, 25-nov): el vigía también decide «se fue» y no miraba las entregas. ── */
+
+  it('vigía · una reentrega registrada entre su lectura y su UPDATE gana también por TERMINAL_GONE: la fila sigue en vuelo y no recibe cancel', async () => {
+    const s = await f.solicitud({ acknowledgedAt: hace(61_000), deliveryProvenance: entrega('DURABLE', hace(61_000)), deliveryAttempts: 1 })
+    const ahora = new Date()
+    conectada = false
+    // Primera pasada: sólo anota que la vio sin conexión.
+    expect(await terminalPaymentService.preguntarPorSolicitudesSinFinal(ahora)).toMatchObject({ entradas: 0 })
+    const original = svc.entrarSinRespuestaYProgramar.bind(svc)
+    const espia = jest.spyOn(svc, 'entrarSinRespuestaYProgramar').mockImplementationOnce(async (...args: unknown[]) => {
+      // La TPV reconectó y el servidor registró la reentrega cuando el vigía ya había decidido con su lectura.
+      conectada = true
+      expect(await svc.recordDelivery(s.requestId, f.venueId, { terminalPaymentAckVersion: 1 }, SOCKET, true)).toBe(true)
+      return original(...args)
+    })
+    try {
+      expect(await terminalPaymentService.preguntarPorSolicitudesSinFinal(new Date(ahora.getTime() + 11_000))).toMatchObject({ entradas: 0 })
+    } finally {
+      espia.mockRestore()
+    }
+    expect(await fila(s.requestId)).toMatchObject({ status: 'SENT', noResponseAt: null })
+    expect(cancelEmit).not.toHaveBeenCalled()
+  })
+
+  it('vigía · sin reentrega de por medio, la terminal que sigue fuera ≥ 10 s entra por TERMINAL_GONE como antes', async () => {
+    const s = await f.solicitud({ acknowledgedAt: hace(61_000), deliveryProvenance: entrega('DURABLE', hace(61_000)), deliveryAttempts: 1 })
+    const ahora = new Date()
+    conectada = false
+    expect(await terminalPaymentService.preguntarPorSolicitudesSinFinal(ahora)).toMatchObject({ entradas: 0 })
+    expect(await terminalPaymentService.preguntarPorSolicitudesSinFinal(new Date(ahora.getTime() + 11_000))).toMatchObject({ entradas: 1 })
+    expect(await fila(s.requestId)).toMatchObject({ status: 'UNKNOWN', resultJson: expect.objectContaining({ noChargeCause: 'TERMINAL_GONE' }) })
+  })
 })

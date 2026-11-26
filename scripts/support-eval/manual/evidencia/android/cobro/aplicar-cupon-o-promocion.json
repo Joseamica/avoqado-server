@@ -108,9 +108,28 @@
     }
   ],
   "aparato": {
-    "estado": "NO PROBADO EN APARATO",
-    "fotos": [],
-    "filasCreadas": []
+    "estado": "PROBADO",
+    "aparato": "SAMSUNG del laboratorio del Alien (serial R8YL200592L)",
+    "version": "2.25.58-dev (develop 6afdcc28), copia de QA com.avoqado.pos.d36 compilada en la nube (avq-verify), contra el SERVIDOR aislado (develop 6409b3562 con #633, base av-db-25-d36) en :3004",
+    "apkSha256": "f4d8048d40f9014f141dc037c60f83afbcc5690bbdc02ec7ee949f12302adca5",
+    "fecha": "2026-11-25",
+    "fotos": [
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/android/and-70-cupones.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/android/and-71-cupon-invalido.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/android/and-72-cupon-valido.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/android/and-73-cupon-aplicado.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/android/and-74-cupon-cobrado.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/android/and-75-promociones.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/android/and-76-promo-detalle.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/android/and-77-promo-elegida.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/android/and-78-promo-en-carrito.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/android/and-79-promo-cobrada.png"
+    ],
+    "filasCreadas": [
+      "CouponRedemption de WPHC55P7 (10 %), orden de $27.00 en efectivo",
+      "Orden de $150.00 en efectivo con OrderPromotion «Paquete QA dividir»"
+    ],
+    "nota": "25-nov (D36): Atajos › Cupones → «Ingresa el código del cupón». NOVALE1 → «No encontramos ese código de cupón.». WPHC55P7 → nombre y «10%», sin «Ahorro estimado» (sólo sale si el servidor lo calcula: ShortcutsGridView.kt:1026; se corrigió el paso 3) → Aplicar cupón → −$3.00 → cobro en efectivo. Promociones → «Paquete QA dividir» → «Falta elegir «Tamaño»…» → Chico → «Agregar al carrito · $150.00» → entra con sus partes → cobro en efectivo. No se probó sin red."
   },
   "codex": {
     "lote": 4,

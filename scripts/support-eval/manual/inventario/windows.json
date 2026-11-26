@@ -416,7 +416,7 @@
       "nombre": "Recompensas",
       "origen": "app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderScreen.kt:2531",
       "quienLaVe": "Quien ve Mesas: rol WAITER, CASHIER, MANAGER, ADMIN, OWNER o SUPERADMIN (RoleManager.canAccessPOS, app/src/main/java/com/avoqado/pos/core/domain/RoleManager.kt:55-56), aparato en modo Restaurante (app/src/main/java/com/avoqado/pos/navigation/MainTabsPolicy.kt:38) y plan TABLE_SERVICE (Pro) (app/src/main/java/com/avoqado/pos/tables/presentation/TablesScreen.kt:143). Quien abre la mesa, con un cliente con puntos en la cuenta (app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderScreen.kt:2532); canjea con «Canjear» (:3347).",
-      "paginas": []
+      "paginas": ["windows/lealtad/canjear-puntos"]
     },
     {
       "id": "accion:nav:\"table-order\"/aplicar-cobro-por-servicio",
@@ -3005,6 +3005,30 @@
       "origen": "app/src/main/java/com/avoqado/pos/maquina/ui/MaquinaDeEfectivoSheet.kt:181",
       "quienLaVe": "En Ajustes › Máquina de efectivo, «Lo que la máquina les debe a clientes» (app/src/main/java/com/avoqado/pos/maquina/ui/MaquinaDeEfectivoSheet.kt:167), junto a cada folio con monto. Rama feat/maquina-de-efectivo-1a (e7d51ad0), posterior a la ref de este inventario: no existe en las versiones vivas y sus páginas llevan versionMin.",
       "paginas": ["windows/maquina-de-efectivo/pagar-te-debemos-de-la-maquina"]
+    },
+    {
+      "id": "accion:escritorio:aviso-de-dibujo/activar-modo-rapido",
+      "tipo": "accion",
+      "nombre": "Activar modo rápido",
+      "origen": "desktop/pos/src/main/kotlin/com/avoqado/pos/escritorio/dibujo/AvisoDeDibujo.kt:76",
+      "quienLaVe": "Sólo en WINDOWS, cualquiera con la app abierta: la banda va arriba de la app (desktop/pos/src/main/kotlin/com/avoqado/pos/escritorio/AppEscritorio.kt:95) cuando la PC tardó en dibujar al abrir, no usa DIRECT3D, no está fijada a mano y está en automático (desktop/pos/src/main/kotlin/com/avoqado/pos/escritorio/dibujo/ModoDeDibujo.kt:101); «Ahora no» la calla (:82). Rama feat/windows-modo-rapido (8f540228), posterior a la ref de este inventario: no existe en las versiones vivas y su página lleva versionMin.",
+      "paginas": ["windows/ayuda/pantalla-lenta-o-trabada"]
+    },
+    {
+      "id": "accion:nav:MainTab.MORE.route/modo-de-dibujo",
+      "tipo": "accion",
+      "nombre": "Modo de dibujo",
+      "origen": "desktop/pos/src/main/kotlin/com/avoqado/pos/escritorio/dibujo/AvisoDeDibujo.kt:124",
+      "quienLaVe": "Sólo en WINDOWS, quien esté en sesión, en Más junto a Ajustes (app/src/main/java/com/avoqado/pos/settings/MoreMenuScreen.kt:803); «Automático» o «Modo rápido», se aplica al volver a abrir el POS (desktop/pos/src/main/kotlin/com/avoqado/pos/escritorio/dibujo/AvisoDeDibujo.kt:141). No sale con el apagador de soporte (:125). Rama feat/windows-modo-rapido (8f540228), posterior a la ref de este inventario: no existe en las versiones vivas y su página lleva versionMin.",
+      "paginas": ["windows/ayuda/pantalla-lenta-o-trabada"]
+    },
+    {
+      "id": "accion:nav:MainTab.MORE.route/diagnostico-de-esta-computadora",
+      "tipo": "accion",
+      "nombre": "Diagnóstico de esta computadora",
+      "origen": "desktop/pos/src/main/kotlin/com/avoqado/pos/escritorio/dibujo/AvisoDeDibujo.kt:126",
+      "quienLaVe": "Sólo en WINDOWS, quien esté en sesión, en Más junto a Ajustes (app/src/main/java/com/avoqado/pos/settings/MoreMenuScreen.kt:803), también con el apagador de soporte; muestra el veredicto de la PC (desktop/pos/src/main/kotlin/com/avoqado/pos/escritorio/diagnostico/Veredicto.kt:23). Rama feat/windows-modo-rapido (8f540228), posterior a la ref de este inventario: no existe en las versiones vivas y su página lleva versionMin.",
+      "paginas": ["windows/ayuda/pantalla-lenta-o-trabada"]
     }
   ]
 }

@@ -60,7 +60,7 @@ describe('Extras: inventario y duración al crear y editar (CFG-01)', () => {
   it('el alta rechaza una materia prima de OTRO negocio y no crea nada', async () => {
     prismaMock.rawMaterial.findFirst.mockResolvedValue(null)
     await expect(createModifier(params.venueId, params.modifierGroupId, parseAlta(altaDelDashboard))).rejects.toThrow(
-      `Raw material with ID ${RAW_MATERIAL_ID} not found in venue ${params.venueId}.`,
+      'No se encontró este insumo: pudo borrarse o archivarse. Actualiza la pantalla.',
     )
     expect(prismaMock.rawMaterial.findFirst).toHaveBeenCalledWith(
       expect.objectContaining({ where: { id: RAW_MATERIAL_ID, venueId: params.venueId } }),

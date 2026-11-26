@@ -4,13 +4,15 @@ description: En el carrito de Cobrar, escribe el código de referido de quien re
 product: android
 category: clientes
 task: capturar-codigo-de-referido
-requiredPermissions: []
+requiredPermissions:
+  - referral:read
 featureCode: REFERRAL_PROGRAM
 gateKind: FEATURE
 money: true
 versionMin: 2.17.1
 sourceRepo: avoqado-android
 sourceRef: 78e5372f37ed7791d86fc1fe621d4a073e5a09ff
+deviceTested: 2026-11-25
 keywords:
   - código de referido
   - me recomendó alguien

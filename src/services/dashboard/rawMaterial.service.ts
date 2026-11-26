@@ -3,7 +3,7 @@ import { Decimal } from '@prisma/client/runtime/library'
 import prisma from '../../utils/prismaClient'
 import AppError, { BadRequestError, NotFoundError } from '../../errors/AppError'
 import { CreateRawMaterialDto, UpdateRawMaterialDto, AdjustStockDto } from '../../schemas/dashboard/inventory.schema'
-import { createStockBatch, deductStockFIFO, deductStockFIFOInTx } from './fifoBatch.service'
+import { createStockBatch, deductStockFIFO, deductStockFIFOInTx, INSUMO_NO_ENCONTRADO } from './fifoBatch.service'
 import { wasteHistoryFields } from './productInventory.service'
 import { withSerializableRetry } from '../../utils/serializableRetry'
 import { sendLowStockAlertNotification } from './notification.service'
@@ -211,7 +211,7 @@ export async function createRawMaterial(
   })
 
   if (existing) {
-    throw new AppError(`Raw material with SKU ${data.sku} already exists`, 400)
+    throw new AppError(`Ya existe un insumo con el SKU ${data.sku}. Usa otro SKU o edita el insumo que ya lo tiene.`, 400)
   }
 
   // Extract unit from data and convert to typed enum
@@ -347,7 +347,7 @@ export async function updateRawMaterial(
     // WHY: This live read follows the target RM UPDATE lock whenever either
     // graph input is supplied, so cost/unit decisions never use a stale snapshot.
     const existing = await tx.rawMaterial.findFirst({ where: { id: rawMaterialId, venueId, deletedAt: null } })
-    if (!existing) throw new AppError(`Raw material with ID ${rawMaterialId} not found`, 404)
+    if (!existing) throw new AppError(INSUMO_NO_ENCONTRADO, 404)
     if (expectedUpdatedAt && existing.updatedAt.toISOString() !== expectedUpdatedAt)
       throw new AppError('El insumo cambió. Solicita una nueva vista previa antes de editarlo.', 409)
     const costChanging = data.costPerUnit !== undefined && !new Decimal(data.costPerUnit).equals(existing.costPerUnit)
@@ -433,7 +433,12 @@ async function recomputeRecipesUsingRawMaterial(
 
   for (const recipe of recipes) {
     if (recipe.lines.some(line => line.rawMaterial.venueId !== venueId)) {
-      throw new AppError('Recipe contains an ingredient from another venue', 422, true, 'RECIPE_COST_INPUT_INVALID')
+      throw new AppError(
+        'No se pudo recalcular el costo: una receta que usa este insumo tiene un ingrediente de otra sucursal. Revisa esa receta.',
+        422,
+        true,
+        'RECIPE_COST_INPUT_INVALID',
+      )
     }
     const calculated = calculateRawMaterialRecipeCostV1(
       { portionYield: recipe.portionYield, lines: recipe.lines },
@@ -482,7 +487,7 @@ export async function deleteRawMaterial(venueId: string, rawMaterialId: string, 
   })
 
   if (!existing) {
-    throw new NotFoundError(`Raw material with ID ${rawMaterialId} not found`)
+    throw new NotFoundError(INSUMO_NO_ENCONTRADO)
   }
 
   // Check if material is used in any recipes
@@ -547,7 +552,7 @@ export async function deactivateRawMaterial(venueId: string, rawMaterialId: stri
   })
 
   if (!existing) {
-    throw new NotFoundError(`Raw material with ID ${rawMaterialId} not found`)
+    throw new NotFoundError(INSUMO_NO_ENCONTRADO)
   }
 
   if (!existing.active) {
@@ -582,7 +587,7 @@ export async function reactivateRawMaterial(venueId: string, rawMaterialId: stri
   })
 
   if (!existing) {
-    throw new NotFoundError(`Raw material with ID ${rawMaterialId} not found`)
+    throw new NotFoundError(INSUMO_NO_ENCONTRADO)
   }
 
   if (existing.active) {
@@ -622,14 +627,17 @@ export async function adjustStock(venueId: string, rawMaterialId: string, data: 
   })
 
   if (!rawMaterial) {
-    throw new AppError(`Raw material with ID ${rawMaterialId} not found`, 404)
+    throw new AppError(INSUMO_NO_ENCONTRADO, 404)
   }
 
   const previousStock = rawMaterial.currentStock
   const newStock = previousStock.add(data.quantity)
 
   if (newStock.lessThan(0)) {
-    throw new AppError(`Insufficient stock. Current: ${previousStock}, Requested: ${data.quantity}`, 400)
+    throw new AppError(
+      `No alcanza el inventario de este insumo: hay ${previousStock} y el ajuste quita ${previousStock.sub(newStock)}. Si alguien lo usó o ajustó mientras tanto, actualiza la pantalla.`,
+      400,
+    )
   }
 
   let updatedRawMaterial: RawMaterial
@@ -814,7 +822,7 @@ export async function getRawMaterialRecipes(venueId: string, rawMaterialId: stri
   })
 
   if (!rawMaterial) {
-    throw new AppError(`Raw material with ID ${rawMaterialId} not found`, 404)
+    throw new AppError(INSUMO_NO_ENCONTRADO, 404)
   }
 
   // Find all recipe lines that use this raw material

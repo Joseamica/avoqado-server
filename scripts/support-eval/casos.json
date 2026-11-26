@@ -460,7 +460,7 @@
         "agrégale los puntos a mano"
       ]
     },
-    "nota": "Tienda. La guía de lealtad: revisar si el programa está activo y si la compra cumple condiciones. [T-F4, 17-nov] Vale también la página nueva configurar-puntos-de-lealtad (palabra clave «no le suman puntos»), que da las dos condiciones concretas: «Con Estado del Programa en Inactivo, las ventas no suman puntos ni sellos.» y «Para que una venta sume puntos, tiene que llevar al cliente.». La segunda debeDecir acepta las dos formas: «si la compra cumple condiciones» (configurar-lealtad) o que la venta lleve al cliente."
+    "nota": "Tienda. La guía de lealtad: revisar si el programa está activo y si la compra cumple condiciones. [T-F4, 17-nov] Vale también la página nueva configurar-puntos-de-lealtad (palabra clave «no le suman puntos»), que da las dos condiciones concretas: «Con Programa de Puntos en Inactivo, las ventas no suman puntos.» (D42, 26-nov: antes decía «Estado del Programa» y «ni sellos») y «Para que una venta sume puntos, tiene que llevar al cliente.». La segunda debeDecir acepta las dos formas: «si la compra cumple condiciones» (configurar-lealtad) o que la venta lleve al cliente."
   },
   {
     "id": "c20",

@@ -86,9 +86,16 @@ describe('getStampCardHandler', () => {
     expect(contarVersionDeCartilla).toHaveBeenCalledWith('c1')
     expect(r.json).toHaveBeenCalledWith(expect.objectContaining({ version: 4, stampsEnabled: true, stampsEarned: 3 }))
   })
+  // hz:be99f328:D42: el interruptor de PUNTOS (`active`) ya no apaga los sellos; antes este caso decía `false`.
+  it('D42: con los puntos apagados y los sellos prendidos dice stampsEnabled:true', async () => {
+    p.loyaltyConfig.findUnique.mockResolvedValue({ active: false, stampsEnabled: true })
+    const r = res()
+    await getStampCardHandler(req('st1'), r)
+    expect(r.json).toHaveBeenCalledWith(expect.objectContaining({ stampsEnabled: true }))
+  })
   it.each([
-    ['programa apagado', { active: false, stampsEnabled: true }],
     ['sellos apagados', { active: true, stampsEnabled: false }],
+    ['sellos y puntos apagados', { active: false, stampsEnabled: false }],
     ['sin config', null],
   ])('dice stampsEnabled:false con %s', async (_n, cfg) => {
     p.loyaltyConfig.findUnique.mockResolvedValue(cfg)

@@ -68,6 +68,34 @@ describe('configure_loyalty (config write)', () => {
     expect(mockUpdate).not.toHaveBeenCalled() // and definitely no write/activate on a preview
   })
 
+  it('D27: turning the program ON with days already saved says in the preview that points will expire', async () => {
+    mockFindFirst.mockResolvedValueOnce({
+      active: false,
+      pointsPerDollar: 1,
+      pointsPerVisit: 0,
+      redemptionRate: 0.01,
+      minPointsRedeem: 100,
+      pointsExpireDays: 365,
+    })
+    const out = parse(await call({ venueId: 'v1', active: true }))
+    expect(out.requiresConfirmation).toBe(true)
+    expect(out.message).toContain('vencen todos sus puntos')
+    expect(out.message).toContain('365')
+  })
+
+  it('D27: turning the program ON with no expiration days does not mention expiration', async () => {
+    mockFindFirst.mockResolvedValueOnce({
+      active: false,
+      pointsPerDollar: 1,
+      pointsPerVisit: 0,
+      redemptionRate: 0.01,
+      minPointsRedeem: 100,
+      pointsExpireDays: null,
+    })
+    const out = parse(await call({ venueId: 'v1', active: true }))
+    expect(out.message).not.toContain('vencen')
+  })
+
   it('confirm:true passes only supplied fields (mapping minPointsToRedeem) and audits', async () => {
     mockUpdate.mockResolvedValueOnce({
       id: 'lc1',

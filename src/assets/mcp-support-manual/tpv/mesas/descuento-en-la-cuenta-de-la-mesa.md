@@ -4,11 +4,15 @@ description: En el cobro de una mesa, aplica uno de los descuentos del negocio a
 product: tpv
 category: mesas
 task: descuento-en-la-cuenta-de-la-mesa
-requiredPermissions: []
+requiredPermissions:
+  - discounts:apply
+featureCode: TABLE_SERVICE
+gateKind: FEATURE
 money: true
 versionMin: 2.8.1
 sourceRepo: avoqado-tpv
 sourceRef: 031f14db2969606125a4a04c9f8f30bdd402a660
+deviceTested: 2026-11-25
 keywords:
   - descuento en la mesa
   - descuento a la cuenta

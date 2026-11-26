@@ -135,4 +135,20 @@ describe('updateRawMaterial — locked recipe-cost graph', () => {
     expect(acquireRecipeCostGraphVenueLockV1).not.toHaveBeenCalled()
     expect(prisma.recipe.findMany).not.toHaveBeenCalled()
   })
+
+  // hz:cea3b289:D1 (25-nov): al recalcular costos, una receta con un ingrediente de otra sucursal se explica en español.
+  it('una receta con un ingrediente de otra sucursal detiene el cambio con el aviso en español y el mismo código', async () => {
+    const ajena = recipeUsing(Unit.KILOGRAM, Unit.KILOGRAM)
+    ajena.lines[0].rawMaterial = { ...ajena.lines[0].rawMaterial, venueId: 'otro-negocio' }
+    ;(prisma.rawMaterial.findFirst as jest.Mock).mockResolvedValue(rawMaterial(Unit.GRAM))
+    ;(prisma.rawMaterial.update as jest.Mock).mockResolvedValue(rawMaterial(Unit.KILOGRAM))
+    ;(prisma.recipe.findMany as jest.Mock).mockResolvedValue([ajena])
+
+    await expect(updateRawMaterial(VENUE_ID, 'rm-protein', { unit: Unit.KILOGRAM } as any, 'staff-1')).rejects.toMatchObject({
+      statusCode: 422,
+      code: 'RECIPE_COST_INPUT_INVALID',
+      message: 'No se pudo recalcular el costo: una receta que usa este insumo tiene un ingrediente de otra sucursal. Revisa esa receta.',
+    })
+    expect(prisma.recipeLine.update).not.toHaveBeenCalled()
+  })
 })

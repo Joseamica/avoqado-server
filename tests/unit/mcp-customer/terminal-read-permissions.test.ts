@@ -22,11 +22,12 @@ beforeEach(() => {
   jest.clearAllMocks()
   register()
 })
-it.each(['audit_terminals', 'list_devices', 'terminal_checkout_screens', 'terminal_payment_requests'])(
+it.each(['audit_terminals', 'list_devices', 'get_device_performance', 'terminal_checkout_screens', 'terminal_payment_requests'])(
   '%s exige permiso del venue antes de cualquier consulta',
   async name => {
-    await expect(handlers.get(name)!({ venueId: 'norte' })).rejects.toThrow(/permission/i)
+    await expect(handlers.get(name)!({ venueId: 'norte', terminalId: 'cterminal0000000000000001' })).rejects.toThrow(/permission/i)
     expect(prismaMock.terminal.findMany).not.toHaveBeenCalled()
+    expect(prismaMock.terminal.findFirst).not.toHaveBeenCalled()
     expect((prismaMock as any).terminalPaymentRequest.findMany).not.toHaveBeenCalled()
   },
 )

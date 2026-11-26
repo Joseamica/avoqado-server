@@ -230,11 +230,14 @@ describe('POST …/raw-materials/:id/adjust-stock — la forma de la respuesta',
     expect(r.body.data.currentStock).toBe('3')
   })
 
-  it('un insumo que no existe sigue siendo 404 con el mismo mensaje', async () => {
+  it('un insumo que no existe sigue siendo 404, ahora en español (hz:cea3b289:D1)', async () => {
     const missing = 'cl' + 'x'.repeat(23)
     const r = await call(AdjustStockSchema, adjustStock, { venueId, rawMaterialId: missing }, { type: 'SPOILAGE', quantity: -1 })
 
-    expect(r.error).toMatchObject({ statusCode: 404, message: `Raw material with ID ${missing} not found` })
+    expect(r.error).toMatchObject({
+      statusCode: 404,
+      message: 'No se encontró este insumo: pudo borrarse o archivarse. Actualiza la pantalla.',
+    })
   })
 })
 

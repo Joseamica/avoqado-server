@@ -47,7 +47,13 @@
       "cita": "const val IMPRIMIR = \"Imprimir\""
     }
   ],
-  "permisos": [],
+  "permisos": [
+    {
+      "permiso": "payments:read",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 1130
+    }
+  ],
   "plan": [],
   "sinInternet": [],
   "rutas": [
@@ -70,6 +76,11 @@
       "ruta": "Problema: sin papel (reimpresión desde Ventas)",
       "archivo": "app/src/main/java/com/avoqado/pos/transactions/presentation/TransactionsViewModel.kt",
       "linea": 921
+    },
+    {
+      "ruta": "Problema: *Ventas* sólo para cajero, gerente, administrador y dueño (por puesto, no por permiso)",
+      "archivo": "app/src/main/java/com/avoqado/pos/core/domain/RoleManager.kt",
+      "linea": 124
     }
   ],
   "aparato": {

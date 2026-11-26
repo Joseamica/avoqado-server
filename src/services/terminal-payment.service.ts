@@ -8887,7 +8887,7 @@ class TerminalPaymentService {
           where: { status: TerminalPaymentRequestStatus.SENT, acknowledgedAt: { lte: new Date(now.getTime() - SIN_FINAL_TRAS_ACUSE_MS) } },
           orderBy: [{ acknowledgedAt: 'asc' }, { id: 'asc' }],
           take: 50,
-          select: { requestId: true, venueId: true, terminalId: true, acknowledgedAt: true, probeActiveAt: true, amountCents: true, tipCents: true },
+          select: { requestId: true, venueId: true, terminalId: true, acknowledgedAt: true, probeActiveAt: true, amountCents: true, tipCents: true, deliveryAttempts: true },
         }),
       { retries: 3, shouldRetry: shouldRetryDbConnectionError, context: 'terminal-payment-watchdog:findSentWithoutFinal' },
     )
@@ -8901,6 +8901,9 @@ class TerminalPaymentService {
           terminalId: f.terminalId,
           emitirCancel: true,
           soloDesde: 'SENT',
+          // Publicación del 25-nov (Codex): «se fue» sólo si no hubo otra entrega desde la lectura de esta pasada. Es el candado de
+          // R4-B y del seguimiento de la desconexión: una terminal que reconectó y volvió a recibir su cobro no se da por ida.
+          ...(causa === 'TERMINAL_GONE' ? { entregasLeidas: f.deliveryAttempts } : {}),
           ...(probeActiveAtLeido !== undefined ? { probeActiveAtLeido } : {}),
         })
       ) {

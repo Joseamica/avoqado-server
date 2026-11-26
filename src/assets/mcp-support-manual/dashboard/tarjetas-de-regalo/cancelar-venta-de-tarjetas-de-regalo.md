@@ -10,6 +10,7 @@ requiredPermissions:
 money: true
 sourceRepo: avoqado-web-dashboard
 sourceRef: 501e37072a13f5ed8f22e3d650f2598d3d8820b6
+browserTested: 2026-11-25
 keywords:
   - cancelar tarjeta de regalo
   - devolver tarjeta de regalo
@@ -28,9 +29,10 @@ Cancelar la venta pide permiso para administrar tarjetas de regalo (de fábrica,
 
 1. En *Clientes* › *Tarjetas de regalo*, abre la tarjeta. En *Acciones del gerente*, toca *Cancelar la venta*.
 2. Lee el aviso (cuántas tarjetas y cuánto) y toca *Bloquear y empezar*: sale «Tarjetas bloqueadas. Ahora devuelve el dinero desde la venta.».
-3. Toca *Ir a la venta*. Devuelve completo cada cobro de la venta, por donde se pagó: en la terminal si fue con tarjeta, o desde el pago de esa venta.
-4. Al quedar devueltos todos sus cobros, las tarjetas se cancelan solas. Mientras tanto se quedan bloqueadas («Cancelación en curso»).
-5. Si comprobaste que la devolución NO se hizo, en la tarjeta toca *Ya no cancelar*, marca la casilla y toca *Ya no cancelar*: sale «Listo: las tarjetas se pueden usar otra vez.».
+3. Toca *Ir a la venta* para ver sus cobros. Devuelve completo cada uno por donde se pagó; si fue con tarjeta, en la terminal.
+4. Si fue en efectivo u otro método, en *Ventas* › *Transacciones* abre ese pago, toca ⋯ › *Emitir reembolso*, márcalo todo, elige el *Motivo del reembolso* y toca *Reembolsar*.
+5. Al quedar devueltos todos sus cobros, las tarjetas se cancelan solas. Mientras tanto se quedan bloqueadas («Cancelación en curso»).
+6. Si comprobaste que la devolución NO se hizo, en la tarjeta toca *Ya no cancelar*, marca la casilla y toca *Ya no cancelar*: sale «Listo: las tarjetas se pueden usar otra vez.».
 
 ## Problemas frecuentes
 
