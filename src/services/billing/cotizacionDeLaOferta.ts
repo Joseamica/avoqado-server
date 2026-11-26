@@ -212,7 +212,13 @@ export async function aceptacionSinUsar(
     SUSCRIPCION_DEL_PLAN_VIVO.has(sub.status)
   if (yaTieneElPlan) return null
   if (!customerId) return aceptacion
-  const suscripciones = await stripe.subscriptions.list({ customer: customerId, status: 'all', limit: 100 }, opcionesDeStripe)
+  const params = { customer: customerId, status: 'all' as const, limit: 100 }
+  // 🔴 stripe-node toma `{}` (las opciones del cliente de siempre que pasa la compra) como un argumento de más y lanza «Unknown arguments»
+  // (Codex b2-mac r1 #1, 26-nov): sin opciones, la llamada va sin tercer argumento.
+  const suscripciones =
+    Object.keys(opcionesDeStripe).length > 0
+      ? await stripe.subscriptions.list(params, opcionesDeStripe)
+      : await stripe.subscriptions.list(params)
   const usada = suscripciones.data.some(s => s.metadata?.planAcceptanceId === aceptacion.id && !SUSCRIPCION_SIN_USO.has(s.status))
   if (usada) return null
   if (suscripciones.has_more) {

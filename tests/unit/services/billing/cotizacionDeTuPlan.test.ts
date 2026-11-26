@@ -477,6 +477,16 @@ describe('cotizacionDeTuPlan', () => {
     await expect(aceptacionSinUsar('v1', enGratis(), null, 'cus_1', ahora)).resolves.toBeNull()
   })
 
+  it('🔴 Codex b2-mac r1 #1: la compra pasa {} (el cliente de siempre) → la lista sale SIN tercer argumento (stripe-node lanza «Unknown arguments» con {})', async () => {
+    prismaMock.planAcceptance.findFirst.mockResolvedValue(ACEPTACION)
+    mockSubList.mockResolvedValue({ object: 'list', has_more: false, data: [] })
+
+    await expect(aceptacionSinUsar('v1', enGratis(), null, 'cus_1', ahora, {})).resolves.toEqual(ACEPTACION)
+
+    expect(mockSubList).toHaveBeenCalledTimes(1)
+    expect(mockSubList.mock.calls[0]).toEqual([{ customer: 'cus_1', status: 'all', limit: 100 }])
+  })
+
   it('Gratis (sin plan): opciones de compra sin vista previa; prueba regalada de Pro a 10 días: diferida al fin; Premium fuera de venta: vendible false', async () => {
     conVigente(2, v2({ PREMIUM: { onSale: false } }))
 

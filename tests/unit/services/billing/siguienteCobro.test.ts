@@ -23,6 +23,8 @@ const pruebaSinMetodo = (o: Record<string, unknown> = {}) => ({
   cancel_at: null,
   pause_collection: null,
   trial_settings: { end_behavior: { missing_payment_method: 'cancel' } },
+  metadata: { sinTarjeta: 'true' },
+  discounts: [],
   items: { data: [{ price: { id: 'price_v8' }, quantity: 1 }] },
   ...o,
 })
@@ -66,10 +68,22 @@ describe('montoDelSiguienteCobro', () => {
     ['con fecha de cancelación', { cancel_at: 1 }],
     ['con la cobranza en pausa', { pause_collection: { behavior: 'void' } }],
     ['que al terminar crea el recibo (no se cancela)', { trial_settings: { end_behavior: { missing_payment_method: 'create_invoice' } } }],
+    // Codex b2-mac r1 #3: una prueba clásica que soporte configuró para cancelarse sin tarjeta no es la prueba sin tarjeta de B2.
+    ['sin la marca de la prueba sin tarjeta del alta', { metadata: {} }],
   ])('sin recibo próximo y una suscripción %s → null (no se inventa un cobro)', async (_que, cambio) => {
     const f = stripeFalso(pruebaSinMetodo(cambio))
     await expect(montoDelSiguienteCobro(f.stripe, 'sub_1')).resolves.toBeNull()
     expect(f.createPreview).toHaveBeenCalledTimes(1)
+  })
+
+  it('🔴 Codex b2-mac r1 #2: los descuentos propios de la suscripción (p. ej. la oferta de retención) van en la vista previa', async () => {
+    const f = stripeFalso(pruebaSinMetodo({ discounts: ['di_retencion', { id: 'di_objeto' }] }))
+    await montoDelSiguienteCobro(f.stripe, 'sub_1')
+    expect(f.createPreview).toHaveBeenLastCalledWith({
+      customer: 'cus_1',
+      subscription_details: { items: [{ price: 'price_v8', quantity: 1 }] },
+      discounts: [{ discount: 'di_retencion' }, { discount: 'di_objeto' }],
+    })
   })
 
   it('otro error de la vista previa → null, sin leer la suscripción', async () => {

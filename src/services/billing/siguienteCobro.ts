@@ -38,11 +38,11 @@ export async function montoDelSiguienteCobro(
 }
 
 /**
- * Lo que se cobrará en cuanto la prueba sin método tenga tarjeta: la vista previa de una suscripción NUEVA del mismo cliente (su saldo
- * y sus cupones) con los mismos renglones. Sólo para la prueba viva que terminaría cancelada por no tener método; si ya no se cobrará
- * (cancelada, con cancelación programada o con la cobranza en pausa), `null`: no se inventa un cobro.
- * ponytail: no copia descuentos propios de la suscripción; la prueba sin tarjeta del alta no lleva ninguno (B2). Si un día los lleva,
- * pasarlos como `discounts: [{ discount }]`.
+ * Lo que se cobrará en cuanto la prueba sin tarjeta del alta (B2, `metadata.sinTarjeta`) tenga tarjeta: la vista previa de una
+ * suscripción NUEVA del mismo cliente (su saldo y sus cupones) con los mismos renglones y los descuentos propios de la suscripción (p. ej.
+ * la oferta de retención). Sólo para esa prueba viva que terminaría cancelada por no tener método; si ya no se cobrará (cancelada, con
+ * cancelación programada o con la cobranza en pausa) o no es la prueba sin tarjeta del alta, `null`: no se inventa un cobro.
+ * ponytail: sin tasas de impuesto propias (los planes llevan el IVA dentro del precio); si un día las llevan, `default_tax_rates`.
  */
 async function montoDeLaPruebaSinMetodo(stripe: Stripe, subscriptionId: string, opciones?: Stripe.RequestOptions): Promise<number | null> {
   try {
@@ -50,11 +50,22 @@ async function montoDeLaPruebaSinMetodo(stripe: Stripe, subscriptionId: string, 
       ? await stripe.subscriptions.retrieve(subscriptionId, opciones)
       : await stripe.subscriptions.retrieve(subscriptionId)
     const seCancelaSinMetodo = sub.trial_settings?.end_behavior?.missing_payment_method === 'cancel'
-    if (sub.status !== 'trialing' || !seCancelaSinMetodo || sub.cancel_at_period_end || sub.cancel_at || pausaDe(sub)) return null
+    const esLaPruebaSinTarjeta = sub.metadata?.sinTarjeta === 'true'
+    if (
+      sub.status !== 'trialing' ||
+      !seCancelaSinMetodo ||
+      !esLaPruebaSinTarjeta ||
+      sub.cancel_at_period_end ||
+      sub.cancel_at ||
+      pausaDe(sub)
+    )
+      return null
     const customer = typeof sub.customer === 'string' ? sub.customer : sub.customer.id
+    const descuentos = (sub.discounts ?? []).map(d => ({ discount: typeof d === 'string' ? d : d.id }))
     const params = {
       customer,
       subscription_details: { items: sub.items.data.map(i => ({ price: i.price.id, quantity: i.quantity ?? 1 })) },
+      ...(descuentos.length > 0 ? { discounts: descuentos } : {}),
     }
     const preview = opciones ? await stripe.invoices.createPreview(params, opciones) : await stripe.invoices.createPreview(params)
     return typeof preview.amount_due === 'number' ? preview.amount_due : null
