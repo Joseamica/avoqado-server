@@ -156,8 +156,10 @@
       "gateKind": "FEATURE"
     },
     "android/lealtad/aplicar-premio-de-sellos": {
-      "sha256": "2f63e9ffb81c8838bbcc5971e13b505cf40197b789eb48038b3b00c47e5ba307",
-      "requiredPermissions": [],
+      "sha256": "eebbd52e1da9d54ed63d46bef203b815708d9fa1ed67b2396803565da8300493",
+      "requiredPermissions": [
+        "loyalty:read"
+      ],
       "featureCode": "LOYALTY_PROGRAM",
       "gateKind": "FEATURE"
     },
@@ -1453,8 +1455,10 @@
       "gateKind": "FEATURE"
     },
     "windows/lealtad/aplicar-premio-de-sellos": {
-      "sha256": "166073c8fe9a348d568182ccb464c5b755f4c231a966738eebd9ec648d8e9b5a",
-      "requiredPermissions": [],
+      "sha256": "eb5b2d14e5828c2b138120e0b95a277682550ea9b85f4dcb0504519a35d9c634",
+      "requiredPermissions": [
+        "loyalty:read"
+      ],
       "featureCode": "LOYALTY_PROGRAM",
       "gateKind": "FEATURE"
     },
