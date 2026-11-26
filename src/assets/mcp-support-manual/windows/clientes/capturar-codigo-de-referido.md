@@ -4,7 +4,8 @@ description: En el carrito de Cobrar, escribe el código de referido de quien re
 product: windows
 category: clientes
 task: capturar-codigo-de-referido
-requiredPermissions: []
+requiredPermissions:
+  - referral:read
 featureCode: REFERRAL_PROGRAM
 gateKind: FEATURE
 money: true

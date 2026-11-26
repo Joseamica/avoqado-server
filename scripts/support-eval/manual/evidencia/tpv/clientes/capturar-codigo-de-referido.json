@@ -53,7 +53,28 @@
       "cita": "Text(\"Quitar\")"
     }
   ],
-  "permisos": [],
+  "permisos": [
+    {
+      "permiso": "referral:read",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/referrals/data/api/ReferralsApiService.kt",
+      "linea": 54
+    },
+    {
+      "permiso": "referral:read",
+      "archivo": "app/src/main/java/com/jaac/avoqado_tpv/features/referrals/data/api/ReferralsApiService.kt",
+      "linea": 71
+    },
+    {
+      "permiso": "referral:read",
+      "archivo": "avoqado-server/src/routes/tpv.routes.ts",
+      "linea": 8549
+    },
+    {
+      "permiso": "referral:read",
+      "archivo": "avoqado-server/src/routes/tpv.routes.ts",
+      "linea": 8559
+    }
+  ],
   "plan": [
     {
       "featureCode": "REFERRAL_PROGRAM",
