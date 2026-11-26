@@ -2198,7 +2198,8 @@ export async function activatePlan(
       montoAlTerminarCents: conComprobante && !recuperada ? conComprobante.precioCents : montoDelPlanCents,
     }
     void Promise.resolve(avisoSinTarjeta)
-      .then(aviso => enviarBienvenidaSinTarjeta({ ...bienvenida, tarjeta: aviso?.tarjetaQueCobrara }))
+      // Codex b2-code #6: también si habrá cobro (una cancelación programada: el correo no anuncia ni la tarjeta ni el monto).
+      .then(aviso => enviarBienvenidaSinTarjeta({ ...bienvenida, tarjeta: aviso?.tarjetaQueCobrara, noHabraCobro: aviso?.noHabraCobro }))
       .catch(error =>
         logger.warn('activate-plan: no se pudo enviar la bienvenida de la prueba sin tarjeta', {
           organizationId,
@@ -2611,6 +2612,8 @@ async function enviarBienvenidaSinTarjeta(args: {
   montoAlTerminarCents?: number
   /** `undefined` = no se pudo leer en Stripe: el correo no dice ninguna tarjeta. */
   tarjeta?: TarjetaVisible | null
+  /** Codex b2-code #6: al terminar Stripe no cobrará (cancelación programada). `undefined` = no se leyó: el correo de hoy. */
+  noHabraCobro?: boolean
 }): Promise<void> {
   const target = await resolvePlanNotificationTarget(args.venueId)
   if (!target.email) return
@@ -2625,6 +2628,7 @@ async function enviarBienvenidaSinTarjeta(args: {
     empezo: true,
     ...(args.montoAlTerminarCents !== undefined ? { montoAlTerminarCents: args.montoAlTerminarCents } : {}),
     ...(args.tarjeta !== undefined ? { tarjeta: args.tarjeta } : {}),
+    ...(args.noHabraCobro !== undefined ? { noHabraCobro: args.noHabraCobro } : {}),
   })
 }
 

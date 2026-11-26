@@ -241,3 +241,60 @@ describe('sendPlanFreeTrialEndingEmail — la prueba sin tarjeta (B2)', () => {
     expect(enviado().text).toContain('al terminar se cobrarán $926.84 en tu tarjeta ••••1234;')
   })
 })
+
+/**
+ * Codex b2-code #6: la bienvenida de una prueba sin tarjeta que ya tiene la cancelación programada (`noHabraCobro`): al terminar no
+ * se cobra nada, como un `ENDS_FREE`. No menciona la tarjeta ni el monto (aunque lleguen) ni la nota del saldo.
+ */
+describe('sendPlanFreeTrialEndingEmail — prueba sin tarjeta con la cancelación programada (noHabraCobro)', () => {
+  const LIGA = 'https://dashboard.avoqado.io/venues/negocio/settings/billing/subscriptions'
+
+  it.each([
+    ['es', 'Al terminar no se te cobrará nada. Si quieres quedarte en Pro, puedes hacerlo desde «Tu plan».', /se cobrar|Stripe/],
+    [
+      'en',
+      "When it ends, you won't be charged anything. If you want to stay on Pro, you can do it from «Your plan».",
+      /we'll charge|Stripe/,
+    ],
+  ] as const)('%s: dice que no habrá cobro, sin tarjeta, sin monto y sin la nota del saldo', async (locale, sinCobro, prometeCobro) => {
+    await emailService.sendPlanFreeTrialEndingEmail('duena@example.com', {
+      locale,
+      venueName: 'Negocio de prueba',
+      endDate: FIN,
+      timeZone: 'America/Mexico_City',
+      billingUrl: LIGA,
+      empezo: true,
+      montoAlTerminarCents: 92684,
+      tarjeta: { brand: 'visa', last4: '4242' },
+      noHabraCobro: true,
+      idempotencyKey: 'plan-trial-no-card-start:sub_1',
+    })
+    const { subject, html, text } = enviado()
+
+    expect(subject).not.toMatch(EMOJI_RE)
+    for (const cuerpo of [html, text]) {
+      expect(cuerpo).toContain(sinCobro)
+      expect(cuerpo).not.toContain('4242')
+      expect(cuerpo).not.toMatch(/\$\d/)
+      expect(cuerpo).not.toMatch(prometeCobro)
+    }
+    expect(html.split('https://avoqado.io/isotipo.svg').length - 1).toBeGreaterThanOrEqual(2)
+    expect(html).toMatch(/background-color:\s*#000000/)
+    expect(text.length).toBeGreaterThan(0)
+  })
+
+  it('con noHabraCobro false, el texto de hoy (con la tarjeta, el monto y la nota)', async () => {
+    await emailService.sendPlanFreeTrialEndingEmail('duena@example.com', {
+      locale: 'es',
+      venueName: 'Negocio de prueba',
+      endDate: FIN,
+      empezo: true,
+      montoAlTerminarCents: 92684,
+      tarjeta: { brand: 'visa', last4: '4242' },
+      noHabraCobro: false,
+    })
+    const { text } = enviado()
+    expect(text).toContain('al terminar se cobrarán $926.84 en tu tarjeta Visa ••••4242')
+    expect(text).toContain('Si tu cuenta tiene saldo a favor o pendiente en Stripe, se aplica en tu recibo')
+  })
+})

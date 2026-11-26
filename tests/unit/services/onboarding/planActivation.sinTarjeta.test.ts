@@ -485,6 +485,19 @@ describe('B2 Task 6: el alta sin tarjeta abre su prueba en Stripe', () => {
     await caso503()
   })
 
+  it('🔴 Codex b2-code #6: la prueba sin tarjeta ya tiene la cancelación programada y el cliente una tarjeta guardada → la bienvenida recibe noHabraCobro true (no anuncia un cobro)', async () => {
+    mockCustomerRetrieve.mockResolvedValue({ id: 'cus_1', object: 'customer', invoice_settings: { default_payment_method: 'pm_premium' } })
+    mockSubRetrieve.mockResolvedValue(prueba({ cancel_at_period_end: true }))
+
+    const r = await pedir({ quoteToken: comprobante() })
+    await sinPendientes()
+
+    expect(r).toMatchObject({ status: 'ACTIVE', sinTarjeta: true, noHabraCobro: true })
+    const bienvenida = emailService.sendPlanFreeTrialEndingEmail as jest.Mock
+    expect(bienvenida).toHaveBeenCalledTimes(1)
+    expect(bienvenida.mock.calls[0][1]).toMatchObject({ empezo: true, noHabraCobro: true })
+  })
+
   it('el reintento después del 200 perdido (alreadyActive) dice la tarjeta y si habrá cobro, leídos de Stripe en ese momento', async () => {
     prismaMock.onboardingProgress.findUnique.mockResolvedValue({
       id: 'op-1',

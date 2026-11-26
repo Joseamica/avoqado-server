@@ -371,6 +371,11 @@ export interface PlanFreeTrialEndingEmailData {
    * plan»; si no, sigues en Gratis). Sin `montoAlTerminarCents`, `empezo` ni `tarjeta`, el correo de hoy, byte por byte.
    */
   tarjeta?: { brand: string | null; last4: string | null } | null
+  /**
+   * Codex b2-code #6: la prueba sin tarjeta ya tiene la cancelación programada (`noHabraCobro`): al terminar no se cobra nada, como un
+   * `ENDS_FREE`. Con `true`, el correo lo dice y no menciona la tarjeta, el monto ni la nota del saldo. Sin él, como hoy.
+   */
+  noHabraCobro?: boolean
 }
 
 export interface PlanWinbackEmailData {
@@ -5618,22 +5623,29 @@ ${en ? 'Avoqado Team' : 'Equipo de Avoqado'}`
       : en
         ? `Your Avoqado ${planName} trial ends on <strong>${fecha}</strong>.`
         : `Tu prueba de Avoqado ${planName} termina el <strong>${fecha}</strong>.`
-    const cobro = en
-      ? tarjeta
-        ? `If you do nothing, when it ends we'll charge ${monto ?? 'your plan'} to your ${marca}; you can remove it or cancel in «Your plan».`
-        : tarjeta === null
-          ? `To keep ${planName}, add your card in «Your plan»; otherwise you stay on Free.${monto ? ` With your card, we'll charge ${monto} when it ends.` : ''}`
-          : `In «Your plan» you can see which card will be charged when it ends, or cancel.`
-      : tarjeta
-        ? `Si no haces nada, al terminar ${monto ? `se cobrarán ${monto}` : 'se cobrará tu plan'} en tu tarjeta ${marca}; puedes quitarla o cancelar en «Tu plan».`
-        : tarjeta === null
-          ? `Para seguir con ${planName}, pon tu tarjeta en «Tu plan»; si no, sigues en Gratis.${monto ? ` Con tu tarjeta, al terminar se cobrarán ${monto}.` : ''}`
-          : `En «Tu plan» ves qué tarjeta se cobrará al terminar, o puedes cancelar.`
-    const nota = monto
+    // Codex b2-code #6: con la cancelación programada no habrá cobro (como un `ENDS_FREE`): ni tarjeta, ni monto, ni nota del saldo.
+    const sinCobro = data.noHabraCobro === true
+    const cobro = sinCobro
       ? en
-        ? 'If your account has a credit or pending balance in Stripe, it is applied to your receipt.'
-        : 'Si tu cuenta tiene saldo a favor o pendiente en Stripe, se aplica en tu recibo.'
-      : null
+        ? `When it ends, you won't be charged anything. If you want to stay on ${planName}, you can do it from «Your plan».`
+        : `Al terminar no se te cobrará nada. Si quieres quedarte en ${planName}, puedes hacerlo desde «Tu plan».`
+      : en
+        ? tarjeta
+          ? `If you do nothing, when it ends we'll charge ${monto ?? 'your plan'} to your ${marca}; you can remove it or cancel in «Your plan».`
+          : tarjeta === null
+            ? `To keep ${planName}, add your card in «Your plan»; otherwise you stay on Free.${monto ? ` With your card, we'll charge ${monto} when it ends.` : ''}`
+            : `In «Your plan» you can see which card will be charged when it ends, or cancel.`
+        : tarjeta
+          ? `Si no haces nada, al terminar ${monto ? `se cobrarán ${monto}` : 'se cobrará tu plan'} en tu tarjeta ${marca}; puedes quitarla o cancelar en «Tu plan».`
+          : tarjeta === null
+            ? `Para seguir con ${planName}, pon tu tarjeta en «Tu plan»; si no, sigues en Gratis.${monto ? ` Con tu tarjeta, al terminar se cobrarán ${monto}.` : ''}`
+            : `En «Tu plan» ves qué tarjeta se cobrará al terminar, o puedes cancelar.`
+    const nota =
+      monto && !sinCobro
+        ? en
+          ? 'If your account has a credit or pending balance in Stripe, it is applied to your receipt.'
+          : 'Si tu cuenta tiene saldo a favor o pendiente en Stripe, se aplica en tu recibo.'
+        : null
     const dudas = en ? `Questions? Write to ${correo}.` : `¿Dudas? Escríbenos a ${correo}.`
     const parrafos = [inicio, cobro, ...(nota ? [nota] : []), dudas]
     const ctaLabel = en ? 'See my plan' : 'Ver mi plan'
