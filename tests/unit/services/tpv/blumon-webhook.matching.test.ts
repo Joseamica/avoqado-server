@@ -371,16 +371,16 @@ describe('Task 5 — reversals never run sale logic and get their own event id',
   // REVERSO was observed in production; it carries the same (operationNumber,
   // reference) as its sale, so without the namespace it collides with it.
   it('REVERSO gets the reversal namespace, distinct from its own sale', () => {
-    const sale = { operationNumber: 21372460, reference: '20260716084615', operationType: 'VENTA' } as any
+    const sale = { operationNumber: 100001, reference: '20990101000000', operationType: 'VENTA' } as any
     const reverso = buildBlumonEventId({ ...sale, operationType: 'REVERSO' })
 
-    expect(reverso).toBe('blumon-tpv-reversal-reverso-21372460-20260716084615')
+    expect(reverso).toBe('blumon-tpv-reversal-reverso-100001-20990101000000')
     expect(reverso).not.toBe(buildBlumonEventId(sale))
   })
 
   it.each([['VENTA'], [undefined], ['OTRO']])('operationType %s keeps the historical sale id shape', opType => {
-    expect(buildBlumonEventId({ operationNumber: 21372460, reference: '20260716084615', operationType: opType } as any)).toBe(
-      'blumon-tpv-21372460-20260716084615',
+    expect(buildBlumonEventId({ operationNumber: 100001, reference: '20990101000000', operationType: opType } as any)).toBe(
+      'blumon-tpv-100001-20990101000000',
     )
   })
 
@@ -395,12 +395,16 @@ describe('Task 5 — reversals never run sale logic and get their own event id',
 
   it.each(['DEVOLUCION', 'CANCELACION', 'REVERSO'])('%s → REVERSAL_RECEIVED, no sale search, no orphan alert', async opType => {
     const reversal = { ...ventaPayload, operationType: opType } as any
+    // The real Payment write goes through $executeRaw (parcharProcessorData);
+    // it is not reset in beforeEach, so clear its history here.
+    ;(prisma.$executeRaw as jest.Mock).mockClear()
 
     const result = await reconcileBlumonEvent('evt_t5', reversal, { scopeVenueIds: ['venue_1'] })
 
     expect(result.action).toBe('REVERSAL_RECEIVED')
     expect(mockedFindMany).not.toHaveBeenCalled()
     expect(mockedPaymentUpdate).not.toHaveBeenCalled()
+    expect(prisma.$executeRaw).not.toHaveBeenCalled()
     expect(mockedEventLogUpdate).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({ status: 'PROCESSED', errorReason: 'REVERSAL_UNMATCHED' }),
