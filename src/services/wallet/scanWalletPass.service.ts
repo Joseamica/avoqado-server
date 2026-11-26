@@ -1,5 +1,7 @@
 import { StampRewardStatus, StampRewardType } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
+import { conPlazo } from '../../utils/conPlazo'
+import { leerPrograma, topeDelDiaAlcanzado } from '../shared/loyaltyOnLateCustomer'
 import { getStampCardStatus } from './stampLedger.service'
 
 /**
@@ -35,6 +37,24 @@ export interface ScanWalletPassResult {
    * que confirma el servidor al crear la venta (`stampReward.discountAmount`).
    */
   rewardsToClaim?: { id: string; rewardLabel: string; rewardType: StampRewardType; rewardValue: number | null }[]
+  /**
+   * D50 (hz:b37dd7ea:D50, aditivo): si una venta de AHORA le suma sello, con la MISMA regla que `grantStamp` (plan con lealtad,
+   * interruptor de sellos y tope del día del negocio). Es un pronóstico, no una reserva: dos ventas a la vez las ordena `grantStamp`.
+   * Una app vieja lo ignora y sigue con su «esta compra le suma otro». `UNCHECKED` = no se pudo comprobar a tiempo: la app no
+   * promete ni niega el sello (sólo enseña el avance).
+   */
+  stampThisSale?: { willStamp: boolean; reason?: 'DAILY_LIMIT_REACHED' | 'STAMPS_DISABLED' | 'UNCHECKED' }
+}
+
+/** El pronóstico no puede atrasar al cajero: si no contesta en este plazo, el escaneo sale con `UNCHECKED` (Codex D50 r1 #1). */
+const PLAZO_DEL_PRONOSTICO_MS = 1000
+const SIN_COMPROBAR = { willStamp: false, reason: 'UNCHECKED' } as const
+
+async function pronosticoDelSello(venueId: string, customerId: string): Promise<NonNullable<ScanWalletPassResult['stampThisSale']>> {
+  const programa = await leerPrograma(venueId)
+  if (!programa.stampsEnabled) return { willStamp: false, reason: 'STAMPS_DISABLED' }
+  if (await topeDelDiaAlcanzado(venueId, customerId, programa, new Date())) return { willStamp: false, reason: 'DAILY_LIMIT_REACHED' }
+  return { willStamp: true }
 }
 
 export async function scanWalletPass(venueId: string, qrToken: string): Promise<ScanWalletPassResult> {
@@ -46,7 +66,7 @@ export async function scanWalletPass(venueId: string, qrToken: string): Promise<
   // distingue entre ellos ni en la respuesta ni en el mensaje.
   if (!pass) return { found: false }
 
-  const [customer, estado, premios] = await Promise.all([
+  const [customer, estado, premios, stampThisSale] = await Promise.all([
     prisma.customer.findFirst({
       where: { id: pass.customerId, venueId },
       // 🔴 Sólo el nombre. Ver la nota de privacidad arriba.
@@ -58,6 +78,8 @@ export async function scanWalletPass(venueId: string, qrToken: string): Promise<
       select: { id: true, rewardLabel: true, rewardType: true, rewardValue: true },
       orderBy: { createdAt: 'asc' },
     }),
+    // Si el pronóstico falla o tarda, el escaneo sale igual, con `UNCHECKED` (la app ni promete ni niega): nunca lo tumba ni lo atrasa.
+    conPlazo(pronosticoDelSello(venueId, pass.customerId), PLAZO_DEL_PRONOSTICO_MS).catch(() => SIN_COMPROBAR),
   ])
 
   if (!customer) return { found: false }
@@ -80,5 +102,6 @@ export async function scanWalletPass(venueId: string, qrToken: string): Promise<
       rewardType: p.rewardType,
       rewardValue: p.rewardValue == null ? null : Number(p.rewardValue),
     })),
+    stampThisSale,
   }
 }
