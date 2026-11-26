@@ -139,7 +139,7 @@ describe('D39 · canje en una cuenta de «Pagar después»', () => {
     const { orderId, customerId, version } = await cuentaDePagarDespues(500, 20)
     await expect(
       redeemPointsToOrder(venueId, orderId, customerId, 200, staffId, { monto: 20, puntos: 200, deLaCabecera: true, version }),
-    ).rejects.toMatchObject({ statusCode: 400, code: 'LOYALTY_REDEEM_WOULD_ZERO_PAY_LATER' })
+    ).rejects.toMatchObject({ statusCode: 400, code: 'LOYALTY_REDEEM_WOULD_ZERO' })
     expect(await puntosDe(customerId)).toBe(500)
     expect(await canjesDe(orderId)).toBe(0)
     expect(Number((await prisma.order.findUniqueOrThrow({ where: { id: orderId } })).total)).toBe(20)

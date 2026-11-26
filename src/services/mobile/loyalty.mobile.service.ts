@@ -106,8 +106,8 @@ export type OfertaEsperada = {
 
 /** D39: una cuenta de «Pagar después» no se deja en $0.00 con puntos: no tendría con qué cerrarse en el POS. */
 export const CANJE_DEJARIA_EN_CERO =
-  'Con esos puntos la cuenta quedaría en $0.00, y una cuenta de «Pagar después» en $0.00 no se puede cerrar. Canjea menos puntos.'
-export const CANJE_DEJARIA_EN_CERO_CODE = 'LOYALTY_REDEEM_WOULD_ZERO_PAY_LATER'
+  'Con esos puntos la cuenta quedaría en $0.00, y una cuenta sin mesa en $0.00 no se puede cerrar. Canjea menos puntos.'
+export const CANJE_DEJARIA_EN_CERO_CODE = 'LOYALTY_REDEEM_WOULD_ZERO'
 
 /** D39 (Codex r1 #4): un canje no baja la cuenta mientras la terminal tiene un cobro con el importe de antes. */
 export const CANJE_CON_COBRO_EN_LA_TERMINAL =
@@ -361,7 +361,7 @@ export async function redeemPointsToOrderInTransaction(
       status: true,
       customerId: true,
       version: true,
-      payLater: true,
+      tableId: true,
     },
   })
   if (!order) throw new NotFoundError('Orden no encontrada')
@@ -469,10 +469,11 @@ export async function redeemPointsToOrderInTransaction(
   })
 
   const totals = await recalculateOrderTotals(orderId, 0, Number(order.paidAmount || 0), tx)
-  // D39 (Codex r1 #5, r2 #6, r3 #5 y r4 #4): una cuenta de «Pagar después» que el canje deja en $0.00 no tiene con qué cerrarse en el POS
-  // (Pedidos sólo cobra con saldo). Se decide con el total YA recalculado (un cobro por servicio en % baja con la base; uno fijo, no), y se
-  // deshace todo con la transacción. Las demás cuentas (Mesas, el MCP sobre una mesa) siguen como siempre.
-  if (order.payLater === true && totals.total <= 0) {
+  // D39 (Codex r1 #5, r2 #6, r3 #5, r4 #4 y r5 #3): una cuenta SIN MESA (la de «Pagar después» o la de mostrador de «Usar puntos») que el
+  // canje deja en $0.00 no tiene con qué cerrarse en el POS (Pedidos sólo cobra con saldo). Se decide con el total YA recalculado (un cobro
+  // por servicio en % baja con la base; uno fijo, no), y se deshace todo con la transacción. Una cuenta con mesa (también un fiado que se
+  // movió a una mesa y conserva `payLater`) sigue como siempre: Mesas la cierra en $0.
+  if (order.tableId == null && totals.total <= 0) {
     throw new BadRequestError(CANJE_DEJARIA_EN_CERO, CANJE_DEJARIA_EN_CERO_CODE)
   }
   return { pointsToBurn, discountAmount, newBalance, transaction, row, totals }
