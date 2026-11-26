@@ -1,8 +1,8 @@
 {
   "version": 1,
-  "approvedBy": "Jose Antonio Amieva",
-  "approvedAt": "2026-11-26T02:29:20.376Z",
-  "approvedHash": "876b66e01dc7899fb6ab4e0c58500dc06a62db4013f2a825d18494628090d40b",
+  "approvedBy": null,
+  "approvedAt": null,
+  "approvedHash": null,
   "retired": {},
   "guides": {
     "android/ayuda/ver-version-de-la-app": {
@@ -956,7 +956,7 @@
       "gateKind": "FEATURE"
     },
     "dashboard/ventas/ligar-cliente-a-un-pago": {
-      "sha256": "5ec1af2f692269f6543da70974f35eda48143c76f22ccd34338f49a87bd0be43",
+      "sha256": "1fd073070521c3c4c392db07ee80551a0c5c04b727a9a5e4cae3576de3932e49",
       "requiredPermissions": [
         "payments:read",
         "customers:read",
