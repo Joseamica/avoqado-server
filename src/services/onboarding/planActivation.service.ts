@@ -2358,9 +2358,19 @@ export async function cerrarAltaSinNavegador(
   // rechaza (`completeV2Onboarding` la exige); queda el camino de hoy: el cliente vuelve con otra tarjeta y la recuperación
   // del navegador entrega lo ya pagado sin cobrar otra vez. Una persona lo ve por el 🚨. B2: salvo una prueba SIN tarjeta (su
   // metadata), que nunca la tuvo y no la necesita.
+  // 🔴 Codex b2-code #4: y, con versión del editor, salvo lo que Stripe YA cobró (`esCobrada`, arriba): una vez cobrado la tarjeta
+  // ya no importa, y negarse dejaba el pago sin alta en el aviso, el barrido y «Confirmar mi pago». Cierra con
+  // `paymentMethodId: null` en el plan guardado (el cierre lo hace la entrega; sin la marca de la organización, el barrido lo
+  // repara). Sin versión del editor, lo de hoy.
   const sinTarjeta = conVersion && sub.metadata?.sinTarjeta === 'true'
   const paymentMethodId = idDe(sub.default_payment_method)
-  if (!paymentMethodId && !sinTarjeta) {
+  if (!paymentMethodId && !sinTarjeta && conVersion) {
+    logger.warn('altas-a-medio-pago: el cobro está hecho y la suscripción ya no trae tarjeta — se cierra sin tarjeta guardada', {
+      organizationId,
+      subscriptionId: sub.id,
+    })
+  }
+  if (!paymentMethodId && !sinTarjeta && !conVersion) {
     logger.error('🚨 altas-a-medio-pago: pagado pero la suscripción ya no trae tarjeta — no se cierra sin el navegador', {
       organizationId,
       subscriptionId: sub.id,

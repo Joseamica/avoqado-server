@@ -71,7 +71,12 @@ jest.mock('@/services/onboarding/terminarAltaCobrada', () => ({
   terminarAltaCobradaSinRomper: jest.fn().mockResolvedValue(undefined),
 }))
 
-import { activatePlan, cerrarAltaSinNavegador, type ActivatePlanInput } from '@/services/onboarding/planActivation.service'
+import {
+  activatePlan,
+  cerrarAltaSinNavegador,
+  retomarPagoDelAlta,
+  type ActivatePlanInput,
+} from '@/services/onboarding/planActivation.service'
 import { prismaMock } from '@tests/__helpers__/setup'
 import { comprobanteDePrueba, definicionDePrueba, idsDeLaVersion, punteroA } from '@tests/__helpers__/planOfferFixtures'
 import type { CotizacionFirmable } from '@/services/billing/comprobanteDeCotizacion'
@@ -617,6 +622,34 @@ describe('B2 Task 5: un intento anterior que pudo cobrar se recupera con su susc
       where: { organizationId: ORG, planActivationStatus: 'IN_PROGRESS', planActivationAttempt: 2 },
       data: { planActivationStatus: 'IN_PROGRESS', planActivationLeaseUntil: null },
     })
+  })
+
+  it('🔴 Codex b2-code #4: el cobro de la v2 está hecho pero la suscripción con tarjeta ya no trae su default_payment_method → el barrido (y el aviso de Stripe) la cierran igual: ACTIVE, entrega, y el plan guardado con paymentMethodId null', async () => {
+    for (const metadata of [cobrada().metadata, sin(cobrada().metadata, 'primerCobroEsperadoCents')]) {
+      jest.clearAllMocks()
+      prismaMock.$transaction.mockImplementation(async (cb: unknown) => (cb as (tx: unknown) => unknown)(prismaMock))
+      alta()
+      mockSubRetrieve.mockResolvedValue(cobrada({ default_payment_method: null, metadata }))
+
+      await expect(cerrarAltaSinNavegador(ORG)).resolves.toBe('CERRADA')
+
+      expect(mockEntregar).toHaveBeenCalledWith(expect.objectContaining({ subscriptionId: 'sub_3ds' }))
+      expect(conEstado('ACTIVE')).toHaveLength(1)
+      expect(planDelCierre()).toMatchObject({ tier: 'PRO', interval: 'annual', payNow: true, paymentMethodId: null, sinTarjeta: false })
+      expect(mockSubCreate).not.toHaveBeenCalled()
+      expect(mockPmRetrieve).not.toHaveBeenCalled()
+      expect(logger.error).not.toHaveBeenCalledWith(expect.stringContaining('ya no trae tarjeta'), expect.anything())
+    }
+  })
+
+  it('🔴 Codex b2-code #4: «Confirmar mi pago» (retomar-pago) con ese cobro hecho sin tarjeta en la suscripción → CERRADA, no NADA', async () => {
+    mockSubRetrieve.mockResolvedValue(cobrada({ default_payment_method: null }))
+
+    await expect(retomarPagoDelAlta(ORG)).resolves.toEqual({ estado: 'CERRADA' })
+
+    expect(conEstado('ACTIVE')).toHaveLength(1)
+    expect(planDelCierre()).toMatchObject({ paymentMethodId: null })
+    expect(mockSubCreate).not.toHaveBeenCalled()
   })
 
   it('una suscripción de la v2 sin tarjeta (metadata sinTarjeta) en prueba: el barrido la cierra con paymentMethodId null y sinTarjeta true, sin la confirmación de pago', async () => {
