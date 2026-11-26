@@ -307,21 +307,21 @@ export async function getCustomerPortal(venueId: string, customerId: string, aut
         valor: new Prisma.Decimal(customer.loyaltyPoints).mul(config.redemptionRate).toDecimalPlaces(2).toNumber(),
       }
     : null
-  const premio =
-    config?.active && config.stampsEnabled
-      ? await seccion('premio', venueId, () =>
-          prisma.stampReward.findFirst({
-            where: {
-              venueId,
-              customerId: customer.id,
-              status: StampRewardStatus.PENDING,
-              OR: [{ expiresAt: null }, { expiresAt: { gt: ahora } }],
-            },
-            orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
-            select: { id: true, rewardLabel: true },
-          }),
-        )
-      : null
+  // hz:be99f328:D42: el premio de sellos sólo depende de la tarjeta de sellos, no del interruptor de PUNTOS.
+  const premio = config?.stampsEnabled
+    ? await seccion('premio', venueId, () =>
+        prisma.stampReward.findFirst({
+          where: {
+            venueId,
+            customerId: customer.id,
+            status: StampRewardStatus.PENDING,
+            OR: [{ expiresAt: null }, { expiresAt: { gt: ahora } }],
+          },
+          orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+          select: { id: true, rewardLabel: true },
+        }),
+      )
+    : null
   const descuentos = await seccion('descuentos', venueId, () => listarMisDescuentos(venueId, customer.id, {}))
   const zona = (await seccion('zona del negocio', venueId, () => zonaDelNegocio(venueId))) ?? DEFAULT_TIMEZONE
   const saldoAFavor = await seccion('saldo a favor', venueId, () => miSaldoAFavor(venueId, customer.id, zona, ahora))

@@ -152,7 +152,7 @@
       "gateKind": "FEATURE"
     },
     "android/lealtad/aplicar-premio-de-sellos": {
-      "sha256": "30dc07a0bfdd485149db70631c086b5af587865962229d477b2be6d9a904afa2",
+      "sha256": "2f63e9ffb81c8838bbcc5971e13b505cf40197b789eb48038b3b00c47e5ba307",
       "requiredPermissions": [],
       "featureCode": "LOYALTY_PROGRAM",
       "gateKind": "FEATURE"
@@ -395,7 +395,7 @@
       "gateKind": "FEATURE"
     },
     "dashboard/clientes/configurar-puntos-de-lealtad": {
-      "sha256": "c426966f061e72e5839b4fc6c3590834b294307df074633fd322bc516271c4b5",
+      "sha256": "a029dfdcec1a646046575b598c9f0c66a961e6da81d1a87596f62cf11351a9e1",
       "requiredPermissions": [
         "loyalty:read",
         "loyalty:update"
@@ -404,7 +404,7 @@
       "gateKind": "FEATURE"
     },
     "dashboard/clientes/configurar-tarjeta-de-sellos": {
-      "sha256": "8794c107aa602771671cb3beae20910eef569b4470bd56b5dadd059e09a8fb0c",
+      "sha256": "31163ed7cc87a1cc093724df7cfaba7cdc75c587d7c13c4077ce84c8e215bbda",
       "requiredPermissions": [
         "loyalty:read",
         "loyalty:update"
@@ -1421,7 +1421,7 @@
       "gateKind": "FEATURE"
     },
     "windows/lealtad/aplicar-premio-de-sellos": {
-      "sha256": "672d19b76cd6fc91e0103fc6e4efd5e5e7cdf0c8b4d787dff2e2d3d631ee476f",
+      "sha256": "166073c8fe9a348d568182ccb464c5b755f4c231a966738eebd9ec648d8e9b5a",
       "requiredPermissions": [],
       "featureCode": "LOYALTY_PROGRAM",
       "gateKind": "FEATURE"

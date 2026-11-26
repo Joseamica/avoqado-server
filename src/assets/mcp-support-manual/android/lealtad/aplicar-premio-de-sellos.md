@@ -37,7 +37,6 @@ Es en *Cobrar*, con la venta en el carrito. El cliente enseña la tarjeta digita
 
 - Si el aviso no trae premio, sólo dice su avance («… de … sellos · esta compra le suma otro»): toca *Listo*. Ese aviso no revisa el tope de sellos por día: si el cliente ya llegó, al cobrar no suma.
 - Si el renglón dice «No aplica a esta venta», el premio no corresponde a lo que lleva el carrito.
-- Si al cobrar la compra no suma su sello, revisa en el panel que el *Programa de Lealtad* esté *Activo*: el aviso del escaneo dice «esta compra le suma otro» aunque esté inactivo.
 - La primera vez que se usa un lector nuevo puede perderse un carácter y salir «Producto no encontrado» con el código casi completo: cierra el aviso y vuelve a escanear.
 - Si dice «Esta venta ya se está cobrando por partes: su premio no se puede cambiar.», el premio ya no se cambia en esa venta.
 - Si al cobrar sale «Revisa el premio», el premio no quedó como lo anunció el carrito: revisa el total antes de entregar.

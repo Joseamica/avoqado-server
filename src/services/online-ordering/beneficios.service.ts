@@ -338,7 +338,8 @@ export async function aplicarBeneficiosEnTx(
   if (eleccion.premioId) {
     const premioId = eleccion.premioId
     const r = await canjear(tx, 'PREMIO', simulacion, async () => {
-      if (!config?.active || !config.stampsEnabled) throw new BadRequestError('La tarjeta de sellos no está activa en este negocio.')
+      // hz:be99f328:D42: sólo la tarjeta de sellos; el interruptor de PUNTOS (`active`) no la apaga.
+      if (!config?.stampsEnabled) throw new BadRequestError('La tarjeta de sellos no está activa en este negocio.')
       return canjearPremioEnTx(tx, venueId, orderId, premioId)
     })
     if (r === DESCARTADO) descartados.push('PREMIO')
@@ -447,14 +448,14 @@ async function indiceEnElCarrito(tx: TxConReintento, orderId: string, renglonId:
 export async function ofertaDeBeneficios(venueId: string, customerId: string): Promise<OfertaDeBeneficios> {
   const ahora = new Date()
   const config = await prisma.loyaltyConfig.findUnique({ where: { venueId } })
-  const premio =
-    config?.active && config.stampsEnabled
-      ? await prisma.stampReward.findFirst({
-          where: { venueId, customerId, status: StampRewardStatus.PENDING, OR: [{ expiresAt: null }, { expiresAt: { gt: ahora } }] },
-          orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
-          select: { id: true, rewardLabel: true },
-        })
-      : null
+  // hz:be99f328:D42: el premio de sellos sólo depende de la tarjeta de sellos, no del interruptor de PUNTOS.
+  const premio = config?.stampsEnabled
+    ? await prisma.stampReward.findFirst({
+        where: { venueId, customerId, status: StampRewardStatus.PENDING, OR: [{ expiresAt: null }, { expiresAt: { gt: ahora } }] },
+        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+        select: { id: true, rewardLabel: true },
+      })
+    : null
 
   let puntos: OfertaDeBeneficios['puntos'] = null
   if (config?.active) {

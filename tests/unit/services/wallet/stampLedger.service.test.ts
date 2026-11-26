@@ -61,6 +61,25 @@ describe('grantStamp', () => {
     expect(prismaMock.stampEvent.create).not.toHaveBeenCalled()
   })
 
+  // hz:be99f328:D42 (founder, «A», 25-nov): el interruptor de PUNTOS (`active`) no apaga los sellos; sólo `stampsEnabled`.
+  it('D42: con los puntos apagados (active=false) y los sellos prendidos, SÍ sella', async () => {
+    mockConfig({ active: false })
+
+    const r = await grantStamp('v1', 'c1', 'o1')
+
+    expect(r.granted).toBe(true)
+    expect(prismaMock.stampEvent.create).toHaveBeenCalled()
+  })
+
+  it('D42: sin configuración de lealtad no sella (PROGRAM_INACTIVE)', async () => {
+    prismaMock.loyaltyConfig.findUnique.mockResolvedValue(null)
+
+    const r = await grantStamp('v1', 'c1', 'o1')
+
+    expect(r).toEqual({ granted: false, reason: 'PROGRAM_INACTIVE' })
+    expect(prismaMock.stampEvent.create).not.toHaveBeenCalled()
+  })
+
   it('el primer sello abre la cartilla y la congela con la regla vigente', async () => {
     mockConfig({ stampsRequired: 7 })
 

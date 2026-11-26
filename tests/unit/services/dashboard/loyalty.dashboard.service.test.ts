@@ -746,6 +746,82 @@ describe('Loyalty Dashboard Service', () => {
         expect(prismaMock.loyaltyTransaction.create).not.toHaveBeenCalled()
       })
     })
+
+    // hz:be99f328:D42 (founder, «A», 25-nov): los sellos tienen su propio interruptor (`stampsEnabled`); el de PUNTOS (`active`) ya
+    // no los apaga. Antes `earnPoints` salía con `!active` ANTES de pedir el sello, y un negocio que sólo prendió la tarjeta de sellos
+    // (la config nace con `active: false`) nunca sellaba, mientras el aviso del escaneo le prometía «esta compra le suma otro».
+    describe('D42: los sellos no dependen del interruptor de puntos', () => {
+      const soloSellos = () => createMockLoyaltyConfig({ active: false, stampsEnabled: true })
+      // Sin colas «Once» de la tarjeta de regalo sobrantes de otra prueba.
+      beforeEach(() => prismaMock.orderItem.findFirst.mockReset())
+
+      it('puntos apagados + sellos prendidos ⇒ pide el sello y NO escribe puntos', async () => {
+        prismaMock.loyaltyConfig.findUnique.mockResolvedValue(soloSellos() as any)
+        ;(stampLedger.grantStamp as jest.Mock).mockResolvedValue({ granted: true, stampsEarned: 1, stampsRequired: 6 })
+
+        const r = await earnPoints('venue-123', 'customer-123', 100, 'order-123', 'staff-123')
+
+        expect(stampLedger.grantStamp).toHaveBeenCalledWith(
+          'venue-123',
+          'customer-123',
+          'order-123',
+          expect.objectContaining({ staffVenueId: 'staff-123', amount: 100 }),
+        )
+        expect(r).toEqual({ pointsEarned: 0, newBalance: 0, otorgado: { sello: true, puntos: false } })
+        expect(prismaMock.loyaltyTransaction.create).not.toHaveBeenCalled()
+        expect(prismaMock.customer.update).not.toHaveBeenCalled()
+        expect(prismaMock.$transaction).not.toHaveBeenCalled()
+        // Leer la config nunca la crea ni la prende.
+        expect(prismaMock.loyaltyConfig.create).not.toHaveBeenCalled()
+      })
+
+      it('puntos Y sellos apagados ⇒ ni sello ni puntos (como siempre)', async () => {
+        prismaMock.loyaltyConfig.findUnique.mockResolvedValue(createMockLoyaltyConfig({ active: false, stampsEnabled: false }) as any)
+
+        await expect(earnPoints('venue-123', 'customer-123', 100, 'order-123')).resolves.toEqual({ pointsEarned: 0, newBalance: 0 })
+        expect(stampLedger.grantStamp).not.toHaveBeenCalled()
+        expect(prismaMock.$transaction).not.toHaveBeenCalled()
+      })
+
+      it('sin el plan de lealtad ⇒ ni sello ni puntos, aunque los sellos estén prendidos', async () => {
+        ;(venueHasFeatureAccess as jest.Mock).mockResolvedValue(false)
+        prismaMock.loyaltyConfig.findUnique.mockResolvedValue(soloSellos() as any)
+
+        await expect(earnPoints('venue-123', 'customer-123', 100, 'order-123')).resolves.toEqual({ pointsEarned: 0, newBalance: 0 })
+        expect(stampLedger.grantStamp).not.toHaveBeenCalled()
+      })
+
+      it('🔴 comprar una tarjeta de regalo sigue sin sellar con los puntos apagados', async () => {
+        prismaMock.loyaltyConfig.findUnique.mockResolvedValue(soloSellos() as any)
+        prismaMock.orderItem.findFirst.mockResolvedValueOnce({ id: 'oi-gc' } as any).mockResolvedValueOnce(null)
+
+        await expect(earnPoints('venue-123', 'customer-123', 500, 'order-gc')).resolves.toEqual({ pointsEarned: 0, newBalance: 0 })
+        expect(stampLedger.grantStamp).not.toHaveBeenCalled()
+      })
+
+      it('la venta nueva de un cambio (`skipStamp`) sigue sin sello con los puntos apagados', async () => {
+        prismaMock.loyaltyConfig.findUnique.mockResolvedValue(soloSellos() as any)
+
+        await expect(earnPoints('venue-123', 'customer-123', 100, 'order-123', undefined, { skipStamp: true })).resolves.toEqual({
+          pointsEarned: 0,
+          newBalance: 0,
+        })
+        expect(stampLedger.grantStamp).not.toHaveBeenCalled()
+        expect(prismaMock.loyaltyTransaction.create).not.toHaveBeenCalled()
+      })
+
+      it('regresión: con los puntos prendidos se sigue pidiendo el sello y escribiendo los puntos', async () => {
+        prismaMock.loyaltyConfig.findUnique.mockResolvedValue(createMockLoyaltyConfig({ active: true, stampsEnabled: true }) as any)
+        ;(stampLedger.grantStamp as jest.Mock).mockResolvedValue({ granted: true })
+        prismaMock.loyaltyTransaction.create.mockResolvedValue(createMockTransaction({ points: 100 }) as any)
+        prismaMock.customer.update.mockResolvedValue({ loyaltyPoints: 600 } as any)
+
+        const r = await earnPoints('venue-123', 'customer-123', 100, 'order-123')
+
+        expect(stampLedger.grantStamp).toHaveBeenCalled()
+        expect(r).toMatchObject({ pointsEarned: 100, otorgado: { sello: true, puntos: true } })
+      })
+    })
   })
 
   // 🔴 DINERO. `redeemPoints` quemaba los puntos y sólo DEVOLVÍA el monto del

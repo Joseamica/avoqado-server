@@ -503,13 +503,13 @@ export async function otorgarLealtadRespetandoReembolsos(
   return { complete: true, errors: errores, reembolsada: false, ...conOtro }
 }
 
-/** Los tres candados que ya exigen `earnPoints` + `grantStamp`: plan, programa activo y sellos prendidos. */
+/** Los candados que ya exigen `earnPoints` + `grantStamp`: plan y sellos prendidos (D42: el interruptor de PUNTOS no apaga los sellos). */
 async function leerPrograma(venueId: string): Promise<Programa> {
   const [config, conPlan] = await Promise.all([
-    prisma.loyaltyConfig.findUnique({ where: { venueId }, select: { active: true, stampsEnabled: true, maxStampsPerDay: true } }),
+    prisma.loyaltyConfig.findUnique({ where: { venueId }, select: { stampsEnabled: true, maxStampsPerDay: true } }),
     venueHasFeatureAccess(venueId, 'LOYALTY_PROGRAM'),
   ])
-  return { stampsEnabled: Boolean(conPlan && config?.active && config?.stampsEnabled), maxStampsPerDay: config?.maxStampsPerDay ?? 0 }
+  return { stampsEnabled: Boolean(conPlan && config?.stampsEnabled), maxStampsPerDay: config?.maxStampsPerDay ?? 0 }
 }
 
 /** La hora de la VENTA, la misma que usa `grantStamp` para contar el día. */

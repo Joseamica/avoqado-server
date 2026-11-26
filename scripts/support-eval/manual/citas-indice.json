@@ -7124,7 +7124,7 @@
     "avoqado-web-dashboard:avoqado-server/prisma/migrations/20261125190100_lealtad_vencimiento_apagado_en_configs_existentes/migration.sql": [
       {
         "pagina": "dashboard/clientes/configurar-puntos-de-lealtad",
-        "sourceRef": "0dd71d0aff8c6b7c8baa30efe87db3dfe49a1354"
+        "sourceRef": "5902b8c1f1583e3c9c9445ff0f1a78b6bd245517"
       }
     ],
     "avoqado-web-dashboard:avoqado-server/src/controllers/dashboard/financialConnection.controller.ts": [
@@ -7206,11 +7206,11 @@
       },
       {
         "pagina": "dashboard/clientes/configurar-puntos-de-lealtad",
-        "sourceRef": "0dd71d0aff8c6b7c8baa30efe87db3dfe49a1354"
+        "sourceRef": "5902b8c1f1583e3c9c9445ff0f1a78b6bd245517"
       },
       {
         "pagina": "dashboard/clientes/configurar-tarjeta-de-sellos",
-        "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
+        "sourceRef": "5902b8c1f1583e3c9c9445ff0f1a78b6bd245517"
       },
       {
         "pagina": "dashboard/clientes/crear-o-editar-grupo-de-clientes",
@@ -7496,11 +7496,11 @@
     "avoqado-web-dashboard:avoqado-server/src/services/dashboard/loyalty.dashboard.service.ts": [
       {
         "pagina": "dashboard/clientes/configurar-puntos-de-lealtad",
-        "sourceRef": "0dd71d0aff8c6b7c8baa30efe87db3dfe49a1354"
+        "sourceRef": "5902b8c1f1583e3c9c9445ff0f1a78b6bd245517"
       },
       {
         "pagina": "dashboard/clientes/configurar-tarjeta-de-sellos",
-        "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
+        "sourceRef": "5902b8c1f1583e3c9c9445ff0f1a78b6bd245517"
       }
     ],
     "avoqado-web-dashboard:avoqado-server/src/services/dashboard/manualPayment.service.ts": [
@@ -7662,7 +7662,7 @@
     "avoqado-web-dashboard:avoqado-server/src/services/loyalty/vencimientoDePuntos.ts": [
       {
         "pagina": "dashboard/clientes/configurar-puntos-de-lealtad",
-        "sourceRef": "0dd71d0aff8c6b7c8baa30efe87db3dfe49a1354"
+        "sourceRef": "5902b8c1f1583e3c9c9445ff0f1a78b6bd245517"
       }
     ],
     "avoqado-web-dashboard:avoqado-server/src/services/online-ordering/card/confirm.service.ts": [
@@ -7874,11 +7874,11 @@
       },
       {
         "pagina": "dashboard/clientes/configurar-puntos-de-lealtad",
-        "sourceRef": "0dd71d0aff8c6b7c8baa30efe87db3dfe49a1354"
+        "sourceRef": "5902b8c1f1583e3c9c9445ff0f1a78b6bd245517"
       },
       {
         "pagina": "dashboard/clientes/configurar-tarjeta-de-sellos",
-        "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
+        "sourceRef": "5902b8c1f1583e3c9c9445ff0f1a78b6bd245517"
       },
       {
         "pagina": "dashboard/clientes/crear-o-editar-grupo-de-clientes",
@@ -8318,11 +8318,11 @@
     "avoqado-web-dashboard:src/locales/es/loyalty.json": [
       {
         "pagina": "dashboard/clientes/configurar-puntos-de-lealtad",
-        "sourceRef": "0dd71d0aff8c6b7c8baa30efe87db3dfe49a1354"
+        "sourceRef": "5902b8c1f1583e3c9c9445ff0f1a78b6bd245517"
       },
       {
         "pagina": "dashboard/clientes/configurar-tarjeta-de-sellos",
-        "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
+        "sourceRef": "5902b8c1f1583e3c9c9445ff0f1a78b6bd245517"
       }
     ],
     "avoqado-web-dashboard:src/locales/es/menu.json": [
@@ -8494,11 +8494,11 @@
       },
       {
         "pagina": "dashboard/clientes/configurar-puntos-de-lealtad",
-        "sourceRef": "0dd71d0aff8c6b7c8baa30efe87db3dfe49a1354"
+        "sourceRef": "5902b8c1f1583e3c9c9445ff0f1a78b6bd245517"
       },
       {
         "pagina": "dashboard/clientes/configurar-tarjeta-de-sellos",
-        "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
+        "sourceRef": "5902b8c1f1583e3c9c9445ff0f1a78b6bd245517"
       },
       {
         "pagina": "dashboard/clientes/crear-o-editar-grupo-de-clientes",
@@ -8940,13 +8940,13 @@
     "avoqado-web-dashboard:src/pages/Loyalty/LoyaltySettings.tsx": [
       {
         "pagina": "dashboard/clientes/configurar-puntos-de-lealtad",
-        "sourceRef": "0dd71d0aff8c6b7c8baa30efe87db3dfe49a1354"
+        "sourceRef": "5902b8c1f1583e3c9c9445ff0f1a78b6bd245517"
       }
     ],
     "avoqado-web-dashboard:src/pages/Loyalty/WalletCardDesigner.tsx": [
       {
         "pagina": "dashboard/clientes/configurar-tarjeta-de-sellos",
-        "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
+        "sourceRef": "5902b8c1f1583e3c9c9445ff0f1a78b6bd245517"
       }
     ],
     "avoqado-web-dashboard:src/pages/Menu/Categories/Categories.tsx": [
@@ -9454,11 +9454,11 @@
       },
       {
         "pagina": "dashboard/clientes/configurar-puntos-de-lealtad",
-        "sourceRef": "0dd71d0aff8c6b7c8baa30efe87db3dfe49a1354"
+        "sourceRef": "5902b8c1f1583e3c9c9445ff0f1a78b6bd245517"
       },
       {
         "pagina": "dashboard/clientes/configurar-tarjeta-de-sellos",
-        "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
+        "sourceRef": "5902b8c1f1583e3c9c9445ff0f1a78b6bd245517"
       },
       {
         "pagina": "dashboard/clientes/crear-o-editar-grupo-de-clientes",

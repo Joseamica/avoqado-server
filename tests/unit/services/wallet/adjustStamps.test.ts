@@ -326,10 +326,21 @@ describe('adjustStamps', () => {
     expect(prismaMock.stampEvent.create).not.toHaveBeenCalled()
   })
 
+  // hz:be99f328:D42 (founder, «A», 25-nov): antes también rechazaba con `active: false` (el interruptor de PUNTOS), copiado de
+  // `grantStamp`. Cambia a propósito: los sellos sólo los apaga `stampsEnabled`.
+  it('D42: con los puntos apagados (active=false) y los sellos prendidos, el ajuste a mano SÍ procede', async () => {
+    prismaMock.loyaltyConfig.findUnique.mockResolvedValue({ ...CONFIG, active: false } as any)
+
+    const r = await adjustStamps('v1', 'c1', pedir())
+
+    expect(r).toEqual({ stampCardId: 'sc1', from: 2, to: 7, delta: 5, completed: false, stampsRequired: 10 })
+    expect(prismaMock.stampEvent.create).toHaveBeenCalledWith({ data: expect.objectContaining({ type: 'ADJUST', quantity: 5 }) })
+  })
+
   it.each<[string, unknown]>([
     ['sin config', null],
-    ['programa inactivo', { ...CONFIG, active: false }],
     ['sellos apagados', { ...CONFIG, stampsEnabled: false }],
+    ['sellos y puntos apagados', { ...CONFIG, active: false, stampsEnabled: false }],
   ])('programa apagado (%s) ⇒ STAMPS_DISABLED, sin escrituras', async (_n, config) => {
     prismaMock.loyaltyConfig.findUnique.mockResolvedValue(config as any)
 

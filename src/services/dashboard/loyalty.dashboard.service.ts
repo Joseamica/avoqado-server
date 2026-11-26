@@ -341,12 +341,15 @@ export async function earnPoints(
     redemptionRate: storedConfig.redemptionRate.toNumber(),
   }
 
-  if (!config.active) {
+  // hz:be99f328:D42 (founder, «A», 25-nov): `active` es el interruptor de los PUNTOS; la tarjeta de sellos tiene el suyo
+  // (`stampsEnabled`). Sólo se sale aquí si los dos están apagados. Con los puntos apagados y los sellos prendidos se sigue para
+  // sellar, y los puntos dan 0 más abajo (`calcularPuntosDeLaVenta` mira `active`), sin escribir nada.
+  if (!config.active && !config.stampsEnabled) {
     return { pointsEarned: 0, newBalance: 0 }
   }
 
   // R1 (tarjetas de regalo): comprar una tarjeta no da puntos ni sello. Cubre a quien llama directo (pago manual, ligas). Va después de
-  // las salidas baratas: sólo los negocios con lealtad activa pagan esta lectura.
+  // las salidas baratas: sólo los negocios con lealtad prendida (puntos o sellos) pagan esta lectura.
   if (await leerSiEsCuentaDeTarjetas(prisma, orderId)) return { pointsEarned: 0, newBalance: 0 }
 
   // ── SELLOS (Plan B) ────────────────────────────────────────────────────────
