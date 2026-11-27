@@ -138,9 +138,8 @@ describe('el escritor (escribirNombreDelPlan)', () => {
     expect(prismaMock.planOfferPointer.update).not.toHaveBeenCalled()
   })
 
-  it('🔴 con origen SYNC y sin nombre propio en la vigente (la v1, o una versión del editor que no cambió el nombre) hace el products.update de B0, tal cual (sin opciones), y nada más hacia Stripe', async () => {
-    const soloPrecio = definicionDePrueba({ ids: idsDeLaVersion('v2'), netos: { 'PRO:monthly': 79900 } })
-    for (const puntero of [punteroA('cv1', 1, versionUno()), punteroA('cv2', 2, soloPrecio)]) {
+  it('🔴 con origen SYNC y sin nombre propio en la vigente (la v1 o sin versiones) hace el products.update de B0, tal cual (sin opciones), y nada más hacia Stripe', async () => {
+    for (const puntero of [punteroA('cv1', 1, versionUno()), null]) {
       usarTx(crearTx(puntero))
       mockUpdate.mockReset().mockResolvedValue({ id: 'prod_pro', name: 'Plan Pro' })
 
@@ -154,9 +153,9 @@ describe('el escritor (escribirNombreDelPlan)', () => {
       expect(mockRetrieve).not.toHaveBeenCalled()
       // 🔴 Sin nombre propio nadie escribe la observación (C3).
       expect(tx.planOfferPointer.update).not.toHaveBeenCalled()
-      // Lo único extra son lecturas de la base: decidir y la revisión posterior (candado y vigente, dos veces).
+      // Lo único extra son lecturas de la base: decidir (candado, vigente y su número) y la revisión posterior (candado y vigente).
       expect(tx.$executeRaw).toHaveBeenCalledTimes(2)
-      expect(tx.planOfferPointer.findUnique).toHaveBeenCalledTimes(2)
+      expect(tx.planOfferPointer.findUnique).toHaveBeenCalledTimes(3)
     }
     // Una descripción vacía viaja como en B0: `undefined`.
     usarTx(crearTx(punteroA('cv1', 1, versionUno())))
@@ -314,6 +313,41 @@ describe('el escritor (escribirNombreDelPlan)', () => {
       where: { id: 'vigente' },
       data: { nombresEnStripe: { PRO: { esperado: PRO_PLUS, enStripe: PRO_PLUS, estado: 'RENOMBRADO' } } },
     })
+  })
+
+  it('🔴 B4 T5: SYNC con una v2 que NO cambió el nombre (stripeProductName null) escribe el nombre del catálogo DENTRO de la transacción con el candado, con tope de 10 s, y no hace el update sin candado del paso 3', async () => {
+    const soloPrecio = definicionDePrueba({ ids: idsDeLaVersion('v2'), netos: { 'PRO:monthly': 79900 } })
+    usarTx(crearTx(punteroA('cv2', 2, soloPrecio)))
+    const orden: string[] = []
+    tx.$executeRaw.mockImplementation(async () => {
+      orden.push('candado')
+      return 0
+    })
+    mockUpdate.mockReset().mockImplementation(async () => {
+      orden.push('stripe')
+      return { id: 'prod_sync', name: 'Plan Pro' }
+    })
+    prismaMock.$transaction.mockClear()
+
+    await expect(
+      escribirNombreDelPlan('PRO', 'SYNC', { nombre: 'Plan Pro', descripcion: 'Todo Pro', productId: 'prod_sync' }),
+    ).resolves.toBe('SIN_VERSION')
+    expect(mockUpdate.mock.calls).toStrictEqual([['prod_sync', { name: 'Plan Pro', description: 'Todo Pro' }, { timeout: 10_000 }]])
+    expect(orden).toEqual(['candado', 'stripe'])
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(1)
+    expect(tx.planOfferPointer.update).not.toHaveBeenCalled()
+  })
+
+  it('B4 T5: con esa v2, si Stripe rechaza el update bajo el candado el error sube tal cual y no se reintenta sin candado', async () => {
+    const soloPrecio = definicionDePrueba({ ids: idsDeLaVersion('v2'), netos: { 'PRO:monthly': 79900 } })
+    usarTx(crearTx(punteroA('cv2', 2, soloPrecio)))
+    const rechazo = Object.assign(new Error('Invalid request'), { type: 'StripeInvalidRequestError', statusCode: 400 })
+    mockUpdate.mockReset().mockRejectedValue(rechazo)
+
+    await expect(escribirNombreDelPlan('PRO', 'SYNC', { nombre: 'Plan Pro', descripcion: null, productId: 'prod_sync' })).rejects.toBe(
+      rechazo,
+    )
+    expect(mockUpdate).toHaveBeenCalledTimes(1)
   })
 
   it('🔴 SYNC: si Stripe rechaza el products.update, el error sube tal cual (como hoy, la sincronización salta el precio de ese plan)', async () => {

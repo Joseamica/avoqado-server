@@ -30,7 +30,7 @@ import logger from '../../config/logger'
 import AppError from '../../errors/AppError'
 import { retry, shouldRetryDbConnectionError, shouldRetryStripeError } from '../../utils/retry'
 import { stripe } from '../stripe.service'
-import { ofertaVigente, type OfertaVigente, type PlanPagado } from './planOffer'
+import { numeroDeLaVigente, ofertaVigente, type OfertaVigente, type PlanPagado } from './planOffer'
 
 /**
  * Cómo quedó el nombre de un plan:
@@ -246,16 +246,24 @@ async function escribirEnLaSincronizacion(
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${CANDADO_DEL_NOMBRE}))`
       const propio = nombrePropio(await ofertaVigente(tx), tier)
       marca.propio = propio
-      if (!propio) return null
+      // Con cualquier versión del editor (≥ 2) el nombre se escribe SIEMPRE bajo el candado, aunque esa versión conservó el del
+      // catálogo (`stripeProductName: null`): sin candado, ese update podría deshacer un renombre en carrera. Con la v1 o sin
+      // versiones, `return null`: el paso 3 de B0 tal cual.
+      const delCatalogo = !propio
+      if (delCatalogo) {
+        const numero = await numeroDeLaVigente(tx)
+        if (numero === null || numero < 2) return null
+      }
+      const nombreAEscribir = propio ?? nombre
 
-      // Paso 2: bajo el candado, el nombre de la vigente con la descripción del catálogo.
+      // Paso 2: bajo el candado, el nombre de la vigente (o el del catálogo) con la descripción del catálogo.
       let actualizado: { name?: string | null } | undefined
       try {
         actualizado = await retry(
           () =>
             stripe.products.update(
               productId,
-              { name: propio, description: descripcion || undefined },
+              { name: nombreAEscribir, description: descripcion || undefined },
               STRIPE_NOMBRE_PROPIO_EN_LA_SINCRONIZACION,
             ),
           { retries: 3, shouldRetry: shouldRetryStripeError, context: 'stripe.updateProduct' },
@@ -263,6 +271,11 @@ async function escribirEnLaSincronizacion(
       } catch (error) {
         marca.rechazoDeStripe = error
         throw error
+      }
+      if (!propio) {
+        // El nombre del catálogo quedó escrito bajo el candado: no hay nombre propio que anotar ni revisar después.
+        marca.escritoEnStripe = 'SIN_VERSION'
+        return 'SIN_VERSION'
       }
       marca.escritoEnStripe = 'RENOMBRADO'
       await anotarObservacion(tx, tier, propio, 'RENOMBRADO', actualizado?.name ?? null)
