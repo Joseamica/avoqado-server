@@ -1487,4 +1487,61 @@ describe('reservation availability controller boundaries', () => {
     expect(payload).not.toHaveProperty('appointmentWindowSemantics')
     expect(payload).not.toHaveProperty('staffSelection')
   })
+
+  it('public venue info publica la política de cancelación con lista blanca (y null si los ajustes vienen parciales)', async () => {
+    jest.spyOn(basePlanService, 'venueHasFeatureAccess').mockResolvedValue(false)
+    jest.spyOn(ecommerceCapability, 'canVenueChargeOnline').mockResolvedValue(false)
+    prismaMock.venue.findFirst.mockResolvedValue({
+      id: 'venue-1',
+      name: 'Venue',
+      slug: 'venue',
+      logo: null,
+      type: 'SERVICES',
+      timezone: 'UTC',
+    } as any)
+    prismaMock.venue.findUnique.mockResolvedValue({
+      id: 'venue-1',
+      name: 'Venue',
+      slug: 'venue',
+      logo: null,
+      logoFull: null,
+      heroImageUrl: null,
+      primaryColor: null,
+      reservationBranding: null,
+      type: 'SERVICES',
+      address: null,
+      phone: null,
+      whatsappContactMode: 'DISABLED',
+      products: [],
+    } as any)
+
+    jest.spyOn(settingsService, 'getReservationSettings').mockResolvedValue({
+      ...settings,
+      cancellation: {
+        allowCustomerCancel: true,
+        minHoursBeforeStart: 12,
+        forfeitDeposit: true,
+        noShowFeePercent: 50,
+        creditRefundMode: 'TIME_BASED',
+        creditFreeRefundHoursBefore: 24,
+        creditLateRefundPercent: 0,
+        creditNoShowRefund: false,
+        allowCustomerReschedule: true,
+      },
+    })
+    const res = responseMock()
+    await publicController.getVenueInfo({ params: { venueSlug: 'venue' } } as any, res, jest.fn())
+    expect(res.json.mock.calls[0][0].cancellationPolicy).toEqual({
+      allowCustomerCancel: true,
+      minHoursBeforeStart: 12,
+      creditRefundMode: 'TIME_BASED',
+      creditFreeRefundHoursBefore: 24,
+      creditLateRefundPercent: 0,
+    })
+
+    jest.spyOn(settingsService, 'getReservationSettings').mockResolvedValue(settings)
+    const res2 = responseMock()
+    await publicController.getVenueInfo({ params: { venueSlug: 'venue' } } as any, res2, jest.fn())
+    expect(res2.json.mock.calls[0][0].cancellationPolicy).toBeNull()
+  })
 })
