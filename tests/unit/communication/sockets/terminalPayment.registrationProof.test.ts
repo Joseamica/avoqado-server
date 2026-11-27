@@ -5,6 +5,7 @@ import { terminalPaymentService } from '@/services/terminal-payment.service'
 jest.mock('@/services/terminal-payment.service', () => ({
   terminalPaymentService: {
     replayPendingForTerminal: jest.fn().mockResolvedValue(undefined),
+    avisarCierresQueNoVio: jest.fn().mockResolvedValue(0),
     probeUnresolvedForTerminal: jest.fn().mockResolvedValue(0),
     alConectarseLaTerminal: jest.fn(),
     handleProbeResultFromSocket: jest.fn().mockResolvedValue(true),
@@ -123,6 +124,19 @@ describe('F3 · al conectar, la sonda corre ANTES que la reentrega', () => {
     await vaciarPromesas()
     expect(reentrega).toHaveBeenCalledWith('terminal-f3', 'venue-proof', 'f3-socket')
     expect(sonda.mock.invocationCallOrder[0]).toBeLessThan(reentrega.mock.invocationCallOrder[0])
+  })
+
+  it('Cobro simple · paso 2 (caso D): después de la reentrega le avisa los cobros que se cerraron sin ella; si truena, no rompe nada', async () => {
+    const avisos = terminalPaymentService.avisarCierresQueNoVio as jest.Mock
+    connect('terminal-d', 'terminal-d', 'd-socket', capacidades)
+    await vaciarPromesas()
+    expect(avisos).toHaveBeenCalledWith('terminal-d', 'venue-proof', 'd-socket')
+    expect(reentrega.mock.invocationCallOrder[0]).toBeLessThan(avisos.mock.invocationCallOrder[0])
+
+    avisos.mockRejectedValueOnce(new Error('P2024: pool agotado'))
+    connect('terminal-d2', 'terminal-d2', 'd2-socket', capacidades)
+    await vaciarPromesas()
+    expect(reentrega).toHaveBeenCalledWith('terminal-d2', 'venue-proof', 'd2-socket')
   })
 
   it('una sonda que truena no impide la reentrega (cada una con su catch)', async () => {

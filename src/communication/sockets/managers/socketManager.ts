@@ -250,6 +250,13 @@ export class SocketManager implements ISocketManager {
               error: error instanceof Error ? error.message : String(error),
             }),
           )
+          // Cobro simple · paso 2 (caso D): los cobros que el SERVIDOR cerró «no cobrado» mientras la terminal no estaba.
+          await terminalPaymentService.avisarCierresQueNoVio(terminalId, venueId, socket.id).catch(error =>
+            logger.warn('⚠️ [Socket] avisarCierresQueNoVio failed on connect', {
+              terminalId,
+              error: error instanceof Error ? error.message : String(error),
+            }),
+          )
         })()
       }
     })

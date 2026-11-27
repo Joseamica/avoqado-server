@@ -493,6 +493,12 @@ export const SOLTAR_RANURA_TRAS_CIERRE_MS = 10_000
 const TOPE_DEL_BARRIDO_TRAS_CIERRE = 200
 
 // A live request still awaiting its result.
+/** Cobro simple · paso 2 (caso D): el aviso a la terminal de que el SERVIDOR cerró «no cobrado» un cobro suyo. */
+const MOTIVO_COBRO_CERRADO_SIN_RESPUESTA = 'Este cobro ya se cerró: no se cobró'
+/** Hasta cuánto atrás se le avisan a una terminal que vuelve los cierres que no oyó, y cuántos como mucho. */
+const VENTANA_AVISO_DE_CIERRE_MS = 15 * 60_000
+const TOPE_AVISOS_DE_CIERRE = 5
+
 const IN_FLIGHT: TerminalPaymentRequestStatus[] = [
   TerminalPaymentRequestStatus.PENDING,
   TerminalPaymentRequestStatus.SENT,
@@ -8734,7 +8740,52 @@ class TerminalPaymentService {
     await this.resolverEsperaDelPos(requestId, venueId).catch(err =>
       logger.warn('⚠️ [TerminalPayment] Could not answer the POS after the no-response close', { requestId, error: String(err) }),
     )
+    // Cobro simple · paso 2 (caso D, 25-nov): la terminal también se entera. Las filas de antes de S1 (barrido) no: son viejas.
+    if (!historico) await this.avisarCierreALaTerminal(row.terminalId, venueId, requestId)
     return 'NO_COBRADO'
+  }
+
+  /**
+   * Cobro simple · paso 2 (caso D, 25-nov): la terminal se entera de que el SERVIDOR cerró «no cobrado» un cobro que le entregó. Antes
+   * nadie se lo decía: si estaba sin conexión al cerrarse, al volver seguía enseñando ese cobro y rechazaba el siguiente del POS («la
+   * terminal tiene otro cobro en curso») hasta que alguien la tocara. Es el MISMO aviso que S1 manda al entrar a «sin respuesta»
+   * (`terminal:payment_cancel`, sólo a la TPV que lo contesta, 2.10.0+): la terminal lo aplica sólo si ese cobro sigue en su pantalla
+   * y su lector no está en uso, y su respuesta sobre una fila ya cerrada no cambia nada (`handleCancelDispositionFromSocket`). Nunca lanza.
+   */
+  private async avisarCierreALaTerminal(terminalId: string, venueId: string, requestId: string): Promise<void> {
+    const entry = terminalRegistry.getTerminal(terminalId)
+    if (!entry?.socketId || entry.venueId !== venueId || (entry.terminalPaymentCancelDispositionVersion ?? 0) < 1) return
+    await this.emitCancelToTerminal(entry.socketId, entry.terminalId, requestId, MOTIVO_COBRO_CERRADO_SIN_RESPUESTA).catch(() => false)
+  }
+
+  /**
+   * Cobro simple · paso 2 (caso D): al reconectar, la terminal recibe el aviso de los cierres «no cobrado» que no pudo oír: los de
+   * S1 (no los del barrido de filas viejas), de los últimos [VENTANA_AVISO_DE_CIERRE_MS], que ella acusó (los tiene en su bandeja).
+   * Con tope. Repetir uno que ya oyó no hace nada. Sólo a la TPV que contesta el cancel, por el socket con el que acaba de volver.
+   */
+  async avisarCierresQueNoVio(terminalId: string, venueId: string | undefined, socketId: string, ahora: Date = new Date()): Promise<number> {
+    if (!venueId) return 0
+    const entry = terminalRegistry.getTerminal(terminalId)
+    if (!entry || entry.socketId !== socketId || entry.venueId !== venueId || (entry.terminalPaymentCancelDispositionVersion ?? 0) < 1) return 0
+    const filas = await prisma.terminalPaymentRequest.findMany({
+      where: {
+        terminalId: normalizeTerminalId(terminalId),
+        venueId,
+        status: TerminalPaymentRequestStatus.FAILED,
+        failureCode: 'NO_EVIDENCE_AFTER_WINDOW',
+        acknowledgedAt: { not: null },
+        noResponseAt: { not: null },
+        updatedAt: { gt: new Date(ahora.getTime() - VENTANA_AVISO_DE_CIERRE_MS) },
+      },
+      select: { requestId: true },
+      orderBy: [{ updatedAt: 'desc' }, { id: 'desc' }],
+      take: TOPE_AVISOS_DE_CIERRE,
+    })
+    for (const fila of filas) {
+      await this.emitCancelToTerminal(socketId, entry.terminalId, fila.requestId, MOTIVO_COBRO_CERRADO_SIN_RESPUESTA).catch(() => false)
+    }
+    if (filas.length) logger.info('🔓 [TerminalPayment] La terminal volvió: se le avisan los cobros que se cerraron sin ella', { terminalId, avisos: filas.length })
+    return filas.length
   }
 
   /** «Aprobado, por registrar»: no se cierra. A los 5 min sin `Payment`, 🚨 y asiento, UNA vez por fila. */

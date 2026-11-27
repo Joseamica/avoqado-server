@@ -779,3 +779,82 @@ describe('Codex S1 r2', () => {
     expect(await fila(s.requestId)).toMatchObject({ status: 'UNKNOWN', resultJson: expect.objectContaining({ noChargeCause: 'TERMINAL_GONE' }) })
   })
 })
+
+describe('Cobro simple · paso 2 (caso D, 25-nov) · la terminal se entera de que su cobro se cerró «no cobrado»', () => {
+  const avisos = () =>
+    cancelEmit.mock.calls.filter(([evento]) => evento === 'terminal:payment_cancel').map(([, p]) => (p as { requestId: string }).requestId)
+  const cerradaPorS1 = (over: Record<string, unknown> = {}) =>
+    f.solicitud({
+      status: 'FAILED',
+      failureCode: 'NO_EVIDENCE_AFTER_WINDOW',
+      acknowledgedAt: hace(30_000),
+      noResponseAt: hace(20_000),
+      ...over,
+    })
+
+  it('al cerrar «no cobrado» con la terminal en línea, le avisa ESE cobro; repetir el cierre no avisa otra vez', async () => {
+    const s = await f.solicitud({ acknowledgedAt: new Date() })
+    await svc.handlePaymentResultFromSocket({ requestId: s.requestId, status: 'timeout', errorMessage: 'G505' }, tpv())
+    cancelEmit.mockClear()
+    expect(await terminalPaymentService.cerrarSinRespuesta(s.requestId, f.venueId, enDiezS())).toBe('NO_COBRADO')
+    expect(avisos()).toEqual([s.requestId])
+    expect(cancelEmit.mock.calls[0][1]).toMatchObject({ reason: 'Este cobro ya se cerró: no se cobró' })
+    expect(await terminalPaymentService.cerrarSinRespuesta(s.requestId, f.venueId, enDiezS())).toBe('NO_APLICA')
+    expect(avisos()).toEqual([s.requestId])
+  })
+
+  it('…la respuesta de la terminal a ese aviso no cambia la fila cerrada', async () => {
+    const s = await f.solicitud({ acknowledgedAt: new Date() })
+    await svc.handlePaymentResultFromSocket({ requestId: s.requestId, status: 'timeout', errorMessage: 'G505' }, tpv())
+    expect(await terminalPaymentService.cerrarSinRespuesta(s.requestId, f.venueId, enDiezS())).toBe('NO_COBRADO')
+    const antes = await fila(s.requestId)
+    expect(await svc.handleCancelDispositionFromSocket({ requestId: s.requestId, disposition: 'ACCEPTED' }, tpv())).toBe(true)
+    await svc.handlePaymentResultFromSocket({ requestId: s.requestId, status: 'cancelled', errorMessage: 'Cancelado' }, tpv())
+    expect(await fila(s.requestId)).toMatchObject({ status: antes.status, failureCode: antes.failureCode, cancelDisposition: antes.cancelDisposition })
+  })
+
+  it('sin conexión al cerrar no se avisa; al volver se le avisan los cierres de S1 que no oyó (suyos, recientes y que acusó)', async () => {
+    const s = await f.solicitud({ acknowledgedAt: hace(30_000) })
+    await svc.handlePaymentResultFromSocket({ requestId: s.requestId, status: 'timeout', errorMessage: 'G505' }, tpv())
+    conectada = false
+    cancelEmit.mockClear()
+    expect(await terminalPaymentService.cerrarSinRespuesta(s.requestId, f.venueId, enDiezS())).toBe('NO_COBRADO')
+    expect(avisos()).toEqual([])
+    // Las que NO se avisan: nunca acusada (no está en su bandeja), cerrada hace más de 15 min, un rechazo que ella misma dio y una
+    // fila de antes de S1 que cerró el barrido.
+    await cerradaPorS1({ acknowledgedAt: null })
+    await cerradaPorS1({ acknowledgedAt: hace(40 * 60_000), noResponseAt: hace(40 * 60_000), updatedAt: hace(30 * 60_000) })
+    await cerradaPorS1({ failureCode: 'TPV_CONFIRMED_NO_CHARGE' })
+    await cerradaPorS1({ noResponseAt: null })
+    conectada = true
+    expect(await terminalPaymentService.avisarCierresQueNoVio(f.serial, f.venueId, SOCKET)).toBe(1)
+    expect(avisos()).toEqual([s.requestId])
+  })
+
+  it('con tope: a lo más 5 avisos al volver, los más recientes primero', async () => {
+    const filas = []
+    for (let i = 0; i < 7; i++) filas.push(await cerradaPorS1({ updatedAt: hace((7 - i) * 1_000) }))
+    expect(await terminalPaymentService.avisarCierresQueNoVio(f.serial, f.venueId, SOCKET)).toBe(5)
+    expect(avisos()).toEqual(filas.slice(2).reverse().map(r => r.requestId))
+  })
+
+  it('una TPV que no contesta el cancel (anterior a la 2.10.0), otro socket u otro negocio no reciben avisos', async () => {
+    const s = await cerradaPorS1()
+    expect(await terminalPaymentService.avisarCierresQueNoVio(f.serial, f.venueId, 'otro-socket')).toBe(0)
+    expect(await terminalPaymentService.avisarCierresQueNoVio(f.serial, 'otro-negocio', SOCKET)).toBe(0)
+    ;(terminalRegistry.getTerminal as jest.Mock).mockImplementation((terminalId: string) => ({
+      terminalId,
+      venueId: f.venueId,
+      socketId: SOCKET,
+      terminalPaymentAckVersion: 1,
+      terminalPaymentCancelDispositionVersion: 0,
+    }))
+    expect(await terminalPaymentService.avisarCierresQueNoVio(f.serial, f.venueId, SOCKET)).toBe(0)
+    const enVivo = await f.solicitud({ acknowledgedAt: new Date() })
+    await svc.handlePaymentResultFromSocket({ requestId: enVivo.requestId, status: 'timeout', errorMessage: 'G505' }, tpv())
+    cancelEmit.mockClear()
+    expect(await terminalPaymentService.cerrarSinRespuesta(enVivo.requestId, f.venueId, enDiezS())).toBe('NO_COBRADO')
+    expect(avisos()).toEqual([])
+    expect(s.requestId).toBeTruthy()
+  })
+})
