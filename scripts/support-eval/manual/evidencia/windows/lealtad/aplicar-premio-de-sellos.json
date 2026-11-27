@@ -1,61 +1,61 @@
 {
   "pagina": "windows/lealtad/aplicar-premio-de-sellos",
   "sourceRepo": "avoqado-android",
-  "sourceRef": "78e5372f37ed7791d86fc1fe621d4a073e5a09ff",
+  "sourceRef": "1c3999b1bf9de45ea788cbcf57a3ab6f75847a47",
   "version": "2.25.58-escritorio",
   "pasos": [
     {
       "paso": 1,
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
-      "linea": 1622,
+      "linea": 1624,
       "cita": "is ScannedBarcodeResult.CustomerCardFound -> if (cartViewModel.selectedCustomer.value?.id == clienteAlEscanear) {"
     },
     {
       "paso": 1,
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
-      "linea": 1633,
+      "linea": 1635,
       "cita": "cartViewModel.setSelectedCustomer(c.id, nombre)"
     },
     {
       "paso": 2,
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
-      "linea": 1751,
+      "linea": 1755,
       "cita": "val avance = \"${tarjeta.stampsEarned} de ${tarjeta.stampsRequired} sellos\""
     },
     {
       "paso": 2,
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
-      "linea": 1755,
-      "cita": "\"🎁 Tiene un premio por cobrar: ${premio.rewardLabel}\\n\\n$avance · esta compra le suma otro\""
+      "linea": 1767,
+      "cita": "\"🎁 Tiene un premio por cobrar: ${premio.rewardLabel}\\n\\n$avance$estaCompra\""
     },
     {
       "paso": 2,
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
-      "linea": 1776,
+      "linea": 1788,
       "cita": "text = \"Aplicar ${premio.rewardLabel}\","
     },
     {
       "paso": 3,
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/cart/CartPanelView.kt",
-      "linea": 1108,
+      "linea": 1107,
       "cita": "text = \"Premio: $etiqueta\","
     },
     {
       "paso": 3,
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/cart/CartPanelView.kt",
-      "linea": 412,
+      "linea": 411,
       "cita": "else -> \"Se calcula al cobrar\""
     },
     {
       "paso": 4,
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
-      "linea": 1772,
+      "linea": 1784,
       "cita": "// servidor lo aplica al crearla — por eso el total que se cobra ya"
     },
     {
       "paso": 5,
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/cart/CartPanelView.kt",
-      "linea": 1118,
+      "linea": 1117,
       "cita": "contentDescription = \"Quitar premio\","
     }
   ],
@@ -66,18 +66,33 @@
       "afirmacion": "Sin red al cobrar con el beneficio aplicado: no se cobra",
       "archivo": "app/src/main/java/com/avoqado/pos/payment/data/model/PaymentModels.kt",
       "linea": 428
+    },
+    {
+      "afirmacion": "Sin red, escanear la tarjeta del cliente dice «Sin conexión» y manda a elegirlo desde el carrito; no ofrece crear producto",
+      "archivo": "app/src/main/java/com/avoqado/pos/loyalty/data/WalletScanRepository.kt",
+      "linea": 92
     }
   ],
   "rutas": [
     {
       "ruta": "No aplica a esta venta",
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/cart/CartPanelView.kt",
-      "linea": 410
+      "linea": 409
     },
     {
       "ruta": "Revisa el premio",
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
-      "linea": 2455
+      "linea": 2481
+    },
+    {
+      "ruta": "Tarjeta no encontrada",
+      "archivo": "app/src/main/java/com/avoqado/pos/loyalty/data/WalletScanRepository.kt",
+      "linea": 95
+    },
+    {
+      "ruta": "No se pudo leer la tarjeta",
+      "archivo": "app/src/main/java/com/avoqado/pos/loyalty/data/WalletScanRepository.kt",
+      "linea": 98
     }
   ],
   "aparato": {
@@ -97,7 +112,7 @@
       "WalletPass emitido con el servicio para un cliente nuevo de la semilla (D)",
       "StampReward REDEEMED en una orden de $17.00 (−$3.00) en efectivo"
     ],
-    "nota": "25-nov (D36): El lector se emuló con SendKeys (ráfaga de teclas + ENTER). En WINDOWS no se perdió el primer carácter (un carácter de más dio «Producto no encontrado»), así que esa línea de Problemas no se agregó aquí. Con el código exacto: «un cliente nuevo de la semilla (D)», «🎁 Tiene un premio por cobrar: 15% de descuento» y «0 de 2 sellos · esta compra le suma otro» → «Aplicar 15% de descuento» → «Premio: 15% de descuento» −$3.00 con su X → Cobrar $17.00 en efectivo. La X (Quitar premio) no se tocó aquí (sí en ANDROID). Mismo requisito del Programa de Lealtad activo."
+    "nota": "25-nov (D36): El lector se emuló con SendKeys (ráfaga de teclas + ENTER). En WINDOWS no se perdió el primer carácter (un carácter de más dio «Producto no encontrado»), así que esa línea de Problemas no se agregó aquí. Con el código exacto: «un cliente nuevo de la semilla (D)», «🎁 Tiene un premio por cobrar: 15% de descuento» y «0 de 2 sellos · esta compra le suma otro» → «Aplicar 15% de descuento» → «Premio: 15% de descuento» −$3.00 con su X → Cobrar $17.00 en efectivo. La X (Quitar premio) no se tocó aquí (sí en ANDROID). Mismo requisito del Programa de Lealtad activo. 26-nov (D53, hz:b37dd7ea:D53): los avisos «Tarjeta no encontrada», «Sin conexión» y «No se pudo leer la tarjeta» vienen del mismo código que ANDROID; se probaron en el D3 (ANDROID), NO en WINDOWS."
   },
   "codex": {
     "lote": 4,

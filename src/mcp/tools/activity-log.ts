@@ -5,6 +5,7 @@ import prisma from '@/utils/prismaClient'
 import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
 import { text } from '../respond'
+import { DIA } from '../dia'
 import { hasPermission } from '@/services/access/access.service'
 
 export function registerActivityLogTools(server: McpServer, scope: McpScope) {
@@ -20,8 +21,8 @@ export function registerActivityLogTools(server: McpServer, scope: McpScope) {
         .describe(
           'Filter by exact action code, e.g. PAYMENT_COMPLETED, PAYMENT_WITHOUT_SHIFT, SIM_CUSTODY_ASSIGNED_TO_PROMOTER or PERMISSION_OVERRIDE_USED (manager-PIN approvals; the approver is in data.authorizedByStaffVenueId)',
         ),
-      startDate: z.string().optional().describe('ISO date lower bound (inclusive), venue-local'),
-      endDate: z.string().optional().describe('ISO date upper bound (inclusive), venue-local'),
+      startDate: DIA.optional().describe('Day YYYY-MM-DD lower bound (inclusive), venue-local; no time'),
+      endDate: DIA.optional().describe('Day YYYY-MM-DD upper bound (inclusive), venue-local; no time'),
       limit: z.number().int().min(1).max(100).default(25).describe('Max rows'),
     },
     async ({ venueId, action, startDate, endDate, limit }) => {

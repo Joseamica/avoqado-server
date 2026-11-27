@@ -11,7 +11,7 @@ roles:
   - OWNER
   - ADMIN
   - MANAGER
-lastVerified: 2026-05-20
+lastVerified: 2026-11-26
 sourceRepo: avoqado-web-dashboard
 popular: true
 keywords:
@@ -31,7 +31,7 @@ Los grupos sirven para segmentar, pero no deben usarse como sustituto de permiso
 
 ## Pasos
 
-1. Abre **Clientes > Todos**.
+1. Abre **Clientes > Todos los Clientes**.
 2. Busca por nombre, correo, teléfono o dato disponible.
 3. Abre el cliente para revisar información, historial y saldos si aplica.
 4. Usa **Grupos** para organizar segmentos.

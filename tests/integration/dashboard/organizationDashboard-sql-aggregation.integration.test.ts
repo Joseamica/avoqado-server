@@ -759,6 +759,31 @@ describe('getStaffAttendance — efectivo por checada agregado en Postgres', () 
     }
   })
 
+  it('marca la checada que el sistema cerró como «Salida olvidada», con su nota, para que el gerente la corrija (hz:0433f0cb:D3)', async () => {
+    const e2 = await prisma.timeEntry.findFirstOrThrow({ where: { staffId: ana, clockInTime: E2_IN } })
+    const tardia =
+      'Salida del celular de las 22:40 del 11-mar (America/Mexico_City): llegó después del día del turno y no se usó. Revisa la hora real.'
+    const deLaTpv = 'Salida de la PAX a las 22:45 11/03: llegó después del cierre de salida olvidada y no se usó. Revisa la hora real.'
+    // Una nota libre de la persona no sale, ni con esas palabras ni imitando la del sistema con algo más al final (Codex D3 r2
+    // #3 y r3); las dos salidas tardías del sistema, sí.
+    const libre = 'El camión que no se usó llegó tarde'
+    const imitada = `${tardia} y esto es privado`
+    const notas = `${libre}\n${imitada}\nSalida olvidada: no marcó salida y no tiene horario ese día; quedó en 0 horas hasta que el gerente la corrija.\n${tardia}\n${deLaTpv}`
+    await prisma.timeEntry.update({ where: { id: e2.id }, data: { salidaOlvidada: true, autoClockOut: true, notes: notas } })
+    try {
+      const { staff } = await svc.getStaffAttendance(orgId, DIA)
+      const a = (staff as Array<any>).find(r => r.id === ana)!
+      expect(a.venueTimezone).toBeTruthy() // la hora que teclea el gerente es la de la sucursal de la checada (Codex D3 r1 #1)
+      const [olvidada, normal] = a.allTimeEntries // la más reciente primero
+      // Sólo la línea de la salida tardía, nunca las notas completas (las ve quien sólo puede leer la bitácora; Codex D3 r1 #3).
+      expect(olvidada).toMatchObject({ id: e2.id, salidaOlvidada: true, notaSalidaOlvidada: `${tardia}\n${deLaTpv}` })
+      expect(olvidada.notes).toBeUndefined()
+      expect(normal).toMatchObject({ salidaOlvidada: false, notaSalidaOlvidada: null })
+    } finally {
+      await prisma.timeEntry.update({ where: { id: e2.id }, data: { salidaOlvidada: false, autoClockOut: false, notes: null } })
+    }
+  })
+
   it('el filtro de estado deja sólo a quien sigue dentro', async () => {
     const { staff } = await svc.getStaffAttendance(orgId, DIA, undefined, 'ACTIVE')
     expect((staff as Array<any>).map(r => r.id).sort()).toEqual([beto, carla].sort())

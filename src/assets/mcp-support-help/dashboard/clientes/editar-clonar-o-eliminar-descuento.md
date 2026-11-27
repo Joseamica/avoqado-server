@@ -11,7 +11,7 @@ roles:
   - OWNER
   - ADMIN
   - MANAGER
-lastVerified: 2026-11-25
+lastVerified: 2026-11-26
 sourceRepo: avoqado-web-dashboard
 sourceRef: 501e37072a13f5ed8f22e3d650f2598d3d8820b6
 relatedArticles:
@@ -35,7 +35,7 @@ Un cambio al descuento cambia lo que se cobra desde ese momento en todo lo que l
 
 ## Pasos
 
-1. Abre **Promociones > Descuentos**.
+1. Abre **Clientes > Promociones > Descuentos**.
 2. Para cambiarlo, toca **⋯** en su renglón y luego **Editar**: se abre la página del descuento. Arriba toca **Editar**.
 3. En **Editar Descuento** avanza con **Siguiente** por los cuatro pasos: **Información Básica**, **Alcance y Objetivos**, **Reglas y Tiempo** y **Opciones Avanzadas**. Cambia lo que necesites.
 4. En el último paso toca **Guardar**. Sale «Descuento actualizado exitosamente».

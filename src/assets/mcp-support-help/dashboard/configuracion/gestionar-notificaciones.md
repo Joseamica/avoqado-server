@@ -11,7 +11,7 @@ roles:
   - OWNER
   - ADMIN
   - MANAGER
-lastVerified: 2026-05-21
+lastVerified: 2026-11-26
 sourceRepo: avoqado-web-dashboard
 relatedArticles:
   - editar-perfil
@@ -35,7 +35,7 @@ También confirma que el usuario tenga correo correcto en su perfil. Si el canal
 
 1. Abre **Notificaciones** para revisar avisos recientes del Dashboard.
 2. Identifica si el aviso aplica a tu usuario, al local o a una acción pendiente.
-3. Si necesitas ajustar qué recibes, abre **Configuración > Notificaciones > Preferencias**.
+3. Si necesitas ajustar qué recibes, abre **Configuración > Notificaciones**.
 4. Activa o desactiva categorías según la responsabilidad del usuario.
 5. Guarda los cambios y vuelve a revisar después de la siguiente operación relevante.
 6. Si administras al equipo, combina esta configuración con permisos y roles para que cada persona vea solo lo necesario.

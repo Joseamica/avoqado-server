@@ -47,6 +47,7 @@ import { SQL_COBRO_ORIGINAL_DE_LA_DEVOLUCION, SQL_VENDEDOR_DEL_MOVIMIENTO } from
 import { computeTerminalMigration, migrationCommandWhere } from '../dashboard/terminals.superadmin.service'
 import { enmascararCorreo, enviarEnlaceDeRestablecimiento } from '../dashboard/enlaceDeRestablecimiento'
 import { sinLlaveReservada } from '@/lib/llaveReservadaSdkPropio'
+import { notaDeSalidaNoUsada } from '../shared/salidaOlvidada'
 
 // Types for organization dashboard
 export interface OrgCategoryBreakdown {
@@ -2322,6 +2323,9 @@ class OrganizationDashboardService {
             depositPhotoUrl: true,
             status: true,
             validationStatus: true,
+            // La bitácora de marca blanca marca y deja corregir la «Salida olvidada» (hz:0433f0cb:D3), con su nota.
+            salidaOlvidada: true,
+            notes: true,
           },
         })
 
@@ -2461,6 +2465,10 @@ class OrganizationDashboardService {
           validationStatus: te.validationStatus,
           cashSales: teCashSales,
           isLate,
+          salidaOlvidada: te.salidaOlvidada,
+          // Sólo la hora real de una salida tardía del celular, no las notas completas: esta bitácora la lee también quien no
+          // maneja la asistencia (Codex D3 r1 #3).
+          notaSalidaOlvidada: te.salidaOlvidada ? notaDeSalidaNoUsada(te.notes) : null,
         }
       })
 
@@ -2488,6 +2496,8 @@ class OrganizationDashboardService {
         avatar: sv.staff.photoUrl,
         venueId: sv.venueId,
         venueName: sv.venue.name,
+        // La zona de la sucursal de la checada: la hora que teclea el gerente al corregir es la de ella (Codex D3 r1 #1).
+        venueTimezone: venueTz,
         status,
         // Most recent entry info for table display
         checkInTime: mostRecentEntry?.clockInTime?.toISOString() || null,

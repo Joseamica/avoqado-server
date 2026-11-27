@@ -12,7 +12,7 @@ roles:
   - OWNER
   - ADMIN
   - MANAGER
-lastVerified: 2026-11-25
+lastVerified: 2026-11-26
 sourceRepo: avoqado-web-dashboard
 sourceRef: 501e37072a13f5ed8f22e3d650f2598d3d8820b6
 relatedArticles:
@@ -46,5 +46,5 @@ Eliminar un grupo no elimina a sus clientes: sólo los saca de ese grupo.
 
 - **Me equivoqué de cliente:** desde el panel no se recupera. Pide que lo revise una persona del equipo de Avoqado.
 - **Tengo dos fichas del mismo cliente:** hoy no hay un botón para juntarlas. Decide cuál conservas y elimina la otra.
-- **El grupo tenía clientes:** siguen en tu lista, ya sin ese grupo. Si un descuento era sólo para ese grupo, revísalo en **Promociones > Descuentos**.
+- **El grupo tenía clientes:** siguen en tu lista, ya sin ese grupo. Si un descuento era sólo para ese grupo, revísalo en **Clientes > Promociones > Descuentos**.
 - **No sale Eliminar:** te falta el permiso. Pídeselo a quien administra el negocio.
