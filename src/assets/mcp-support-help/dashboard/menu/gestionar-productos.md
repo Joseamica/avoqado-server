@@ -12,7 +12,7 @@ roles:
   - OWNER
   - ADMIN
   - MANAGER
-lastVerified: 2026-05-20
+lastVerified: 2026-11-26
 sourceRepo: avoqado-web-dashboard
 popular: true
 relatedArticles:
@@ -36,7 +36,7 @@ Antes de editar precios o categorías, confirma que estás en la sucursal correc
 
 ## Pasos
 
-1. Abre **Menú > Productos**.
+1. Abre **Menú** (o **Catálogo**, según tu giro) **> Productos**.
 2. Busca el producto por nombre o revisa la categoría correspondiente.
 3. Abre el producto y valida nombre, descripción, precio, categoría, disponibilidad y configuración relacionada.
 4. Si vas a crear uno nuevo, primero confirma que la categoría y el menú ya existan.

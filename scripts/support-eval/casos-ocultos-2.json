@@ -29,7 +29,7 @@
           "texto": "tpv-reports:pay-later-aging"
         },
         {
-          "texto": "Configuración > Permisos y roles"
+          "texto": "Configuración > Roles y permisos"
         }
       ],
       "noDebeDecir": ["necesitas el plan Premium", "tpv-reports:read", "reinstala"]
@@ -86,7 +86,7 @@
       "guias": ["dashboard/menu/configurar-menu-avanzado", "dashboard/menu/gestionar-productos"],
       "debeDecir": [
         {
-          "texto": "Menú > Grupos de modificadores"
+          "texto": "Grupos Modificadores"
         },
         {
           "texto": "Asocia el grupo a los productos"

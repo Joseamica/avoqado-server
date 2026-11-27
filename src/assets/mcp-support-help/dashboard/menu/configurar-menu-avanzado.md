@@ -12,7 +12,7 @@ roles:
   - OWNER
   - ADMIN
   - MANAGER
-lastVerified: 2026-05-21
+lastVerified: 2026-11-26
 sourceRepo: avoqado-web-dashboard
 relatedArticles:
   - gestionar-productos
@@ -38,12 +38,12 @@ Antes de editar, identifica qué producto o menú será afectado. Un modificador
 
 ## Pasos
 
-1. Abre **Menú > Grupos de modificadores**.
+1. Abre **Menú** (o **Catálogo**, según tu giro) **> Grupos Modificadores**.
 2. Crea o edita el grupo, nombre, opciones, reglas de selección y precios adicionales.
 3. Asocia el grupo a los productos que realmente lo necesitan.
 4. Entra a **Menú > Servicios** para revisar conceptos que no sean productos tradicionales.
 5. Valida nombre, precio, disponibilidad y dónde se mostrará cada servicio.
-6. Abre **Menú > Paquetes de crédito** si el local vende créditos o consumo anticipado.
+6. Abre **Menú > Paquetes de Créditos** si el local vende créditos o consumo anticipado.
 7. Prueba el flujo de venta después de guardar cambios relevantes.
 
 ## Un extra que es un platillo del menú
