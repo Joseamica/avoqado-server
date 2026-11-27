@@ -393,7 +393,7 @@
       "gateKind": "FEATURE"
     },
     "dashboard/clientes/configurar-lealtad": {
-      "sha256": "512c9c372ca74a97f79919037f51a7c9a9491fae47c5897b7c5f1a1c127d542d",
+      "sha256": "8729493176a06cf2d85477f7ae7918d07cf4c7144e249c9b97d4cc045a90f943",
       "requiredPermissions": [
         "loyalty:update"
       ],
@@ -443,7 +443,7 @@
       "gateKind": "FEATURE"
     },
     "dashboard/clientes/editar-clonar-o-eliminar-descuento": {
-      "sha256": "853937e386248d9d7b583b0bc9271f013a9e13f508eab1336701b5cf8a0c2b2d",
+      "sha256": "d3401e64d0f2f262b226495b59345378f9b832b7f90c7d3ccc14ba101903160e",
       "requiredPermissions": [
         "discounts:read"
       ],
@@ -451,13 +451,13 @@
       "gateKind": "FEATURE"
     },
     "dashboard/clientes/eliminar-cliente-o-grupo": {
-      "sha256": "1b67d1835f070ed8975418e46abe81dbfe3f8900d82c123b4d9014abd9e3465c",
+      "sha256": "659b1139129f57ed49b884cea07474633c2d18d928bde1f4492642a9b9a0ef32",
       "requiredPermissions": [
         "customers:read"
       ]
     },
     "dashboard/clientes/generar-o-eliminar-cupones": {
-      "sha256": "65a8d8049486d22388c2774f53504500b102f94577f2bb68f54c39c1160ebf7e",
+      "sha256": "1adc8e7475f7712d5a3545e8a94f93fc23f4f7dd2e830e33917b42df06e7e5c8",
       "requiredPermissions": [
         "coupons:read"
       ],
@@ -465,7 +465,7 @@
       "gateKind": "FEATURE"
     },
     "dashboard/clientes/gestionar-clientes": {
-      "sha256": "09c0eb743c793cc82735f6911f7998866d560b485334e7a61880ad737fb06333",
+      "sha256": "e3ca1af1208483820946531ef9e75018d4ba9e6c1ed4c66fe03c239bd9889e33",
       "requiredPermissions": [
         "customers:read"
       ]
@@ -499,7 +499,7 @@
       ]
     },
     "dashboard/clientes/sugerencias-al-cobrar": {
-      "sha256": "34213c3759bf84065a01c5286060310e0931915a6ec07f49ec1334d2df4fa9ca",
+      "sha256": "7b334c4364f4b84bb1ca92901ae5d608db092737ab37981234f22049c9295fd6",
       "requiredPermissions": [
         "upsells:read"
       ],
@@ -515,19 +515,19 @@
       "gateKind": "FEATURE"
     },
     "dashboard/configuracion/asignar-permisos-roles": {
-      "sha256": "54c232bef8f47bbc4181776a8db99fb97a418b1a9b9fda7dc4dfae3191c408ef",
+      "sha256": "7abbdbef9d73466dcc8a624cfac2ca2525c27a4c7c0f2db381aa841c61eb42bc",
       "requiredPermissions": [
         "settings:manage"
       ]
     },
     "dashboard/configuracion/comprar-addons-suscripciones": {
-      "sha256": "536cf4cd869beb14c8a2b3591530c091b07c656ea409d9d310c75b4494c3e2fe",
+      "sha256": "ad9b651a2dcf5872770d57c8f75fd994e294d01a95cb2bf20a0b82a496fdb26d",
       "requiredPermissions": [
         "billing:read"
       ]
     },
     "dashboard/configuracion/conectar-avoqado-con-claude-o-chatgpt": {
-      "sha256": "c9c05027b7012881f052feabc29350c0cf44657c601fc5d8ed0683063d3108a7",
+      "sha256": "b3227e52b793fd8c4e153f49096790ba5fd6e2090f8c301c4766dac7c573630b",
       "requiredPermissions": []
     },
     "dashboard/configuracion/configurar-datos-local": {
@@ -537,7 +537,7 @@
       ]
     },
     "dashboard/configuracion/configurar-imagenes-contacto": {
-      "sha256": "df97272e0becfe125845ec30b86c6c6af653de7dc3f86d8a508532cd66a02512",
+      "sha256": "cde63eb33fffdf3593b4253d8e582d000c9b9c9432c31cf288e7192a6ff974e7",
       "requiredPermissions": [
         "venues:update"
       ]
@@ -549,11 +549,11 @@
       ]
     },
     "dashboard/configuracion/gestionar-notificaciones": {
-      "sha256": "b944668c9d0a3437f26fd78c175311057625d96a9cf023fb8a21e5f82eaad137",
+      "sha256": "cf270e2f12ae14f1ad02c34bc006a08fbab0e7f5268bcbe0a89f0455c76fd29d",
       "requiredPermissions": []
     },
     "dashboard/configuracion/revisar-billing-detallado": {
-      "sha256": "056ea7e009a9f47b0f36523d65a40fa425abf012e37378d6a3f6a61bfbddf83b",
+      "sha256": "aa5c156c3eba4e33aac3a086f3d45a9e8de9d35ee3fcaccd9660b3626e694aaf",
       "requiredPermissions": [
         "billing:read"
       ]
@@ -633,7 +633,7 @@
       "requiredPermissions": []
     },
     "dashboard/inicio/editar-perfil": {
-      "sha256": "ccb25c7085530606bb398a6f5ed18de45a69372a46bc765e053090397df3f205",
+      "sha256": "034ce97f446c43c1205c845d43aac1ba92ca1dee43956ca565edae5e193ef1e0",
       "requiredPermissions": []
     },
     "dashboard/inicio/entender-inicio-dashboard": {
@@ -683,7 +683,7 @@
       "gateKind": "FEATURE"
     },
     "dashboard/inventario/gestionar-inventario-avanzado": {
-      "sha256": "a0ca272380d60bb9901852d94519b81f125b4d18c874c8128445965d74e0e126",
+      "sha256": "17323692ab5100430c4b99207e3fe2dd3c072c320890cb08020b16945d982426",
       "requiredPermissions": [
         "inventory:update"
       ],
@@ -739,7 +739,7 @@
       ]
     },
     "dashboard/menu/configurar-menu-avanzado": {
-      "sha256": "8e3459f3bc3b8610705caa447b20defca39490c775a53af94b240803f0a13dec",
+      "sha256": "0b3da72f5359934c70f377eb1e8bf810602966cdd8f74571bae6d1ecaf026efd",
       "requiredPermissions": [
         "menu:update"
       ]
@@ -778,7 +778,7 @@
       ]
     },
     "dashboard/menu/gestionar-productos": {
-      "sha256": "cb34d9459d260801215ae25cc26969c988d697904161d4c83f2bb613c92b05f5",
+      "sha256": "b537fc299e0456440369796feba2f302283dc5a523a39910cfd6c9ed132497b4",
       "requiredPermissions": [
         "menu:create"
       ]
@@ -926,7 +926,7 @@
       "gateKind": "FEATURE"
     },
     "dashboard/reservaciones/configurar-reservaciones-avanzadas": {
-      "sha256": "088a8afb1d386a86ebc6e59e2c95dcaafa6ddcef69ac5d9b5826efbc2f920fae",
+      "sha256": "bb8bd3acb54f620e73233f07552e18372b3b9bc79db2952a47573682a5c36d01",
       "requiredPermissions": [
         "reservations:update"
       ],
@@ -988,7 +988,7 @@
       ]
     },
     "dashboard/terminales/gestionar-terminales": {
-      "sha256": "cb878c468e71b6367796e02cd880adcf5bc8843d660c570490ff6cc24db7f1be",
+      "sha256": "198ca87b22d3f20c1434b84ab2495c5fb8d2ffa38371d42c61adadd6c5608c0c",
       "requiredPermissions": [
         "tpv:read"
       ]
@@ -1050,7 +1050,7 @@
       "gateKind": "FEATURE"
     },
     "dashboard/ventas/productos-en-delivery": {
-      "sha256": "4f25c15828cfc1278c2c7616b48bbee9df29a576f2f0dee81f21e0a432b38017",
+      "sha256": "344eefbc0e9ee32a25c82576a3740d5a8a995c6601f95319f13bf1e9e93dba0b",
       "requiredPermissions": [],
       "featureCode": "DELIVERY_CHANNELS",
       "gateKind": "FEATURE"

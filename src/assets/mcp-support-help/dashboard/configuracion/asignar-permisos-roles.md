@@ -10,7 +10,7 @@ dashboardRoutes:
 roles:
   - OWNER
   - ADMIN
-lastVerified: 2026-05-21
+lastVerified: 2026-11-26
 sourceRepo: avoqado-web-dashboard
 popular: true
 relatedArticles:
@@ -33,7 +33,7 @@ Los cambios afectan al local activo. Si una persona trabaja en varias sucursales
 
 ## Pasos
 
-1. Abre **Configuración > Permisos y roles**.
+1. Abre **Configuración > Roles y permisos**.
 2. Revisa el rol que quieres modificar.
 3. Identifica el módulo o permiso específico que necesitas activar o desactivar.
 4. Guarda cambios y pide al usuario cerrar y volver a iniciar sesión si no ve el cambio.

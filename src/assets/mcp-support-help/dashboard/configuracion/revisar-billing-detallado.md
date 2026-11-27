@@ -10,7 +10,7 @@ dashboardRoutes:
 roles:
   - OWNER
   - ADMIN
-lastVerified: 2026-05-21
+lastVerified: 2026-11-26
 sourceRepo: avoqado-web-dashboard
 relatedArticles:
   - comprar-addons-suscripciones
@@ -32,7 +32,7 @@ Este módulo suele requerir rol OWNER o ADMIN y permisos de billing. Si el equip
 
 ## Pasos
 
-1. Abre **Configuración > Plan** y entra a la pestaña **Facturas**.
+1. Abre **Configuración > Plan y facturación** y entra a la pestaña **Facturas**.
 2. Usa la búsqueda por concepto y los filtros de estado y fecha para encontrar el cargo que buscas.
 3. Descarga la factura, o reintenta un pago fallido, sólo cuando confirmes que el cargo corresponde al local correcto.
 4. Entra a la pestaña **Métodos de pago** para revisar las tarjetas guardadas.

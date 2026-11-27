@@ -14,7 +14,7 @@ roles:
   - OWNER
   - ADMIN
   - MANAGER
-lastVerified: 2026-05-21
+lastVerified: 2026-11-26
 sourceRepo: avoqado-web-dashboard
 relatedArticles:
   - gestionar-inventario
@@ -36,7 +36,7 @@ Ten en cuenta que algunas pantallas son operativas y otras son de auditoría. Co
 
 ## Pasos
 
-1. Abre **Inventario > Órdenes de compra** para revisar pedidos a proveedores.
+1. Abre **Inventario > Pedidos** para revisar pedidos a proveedores.
 2. Verifica proveedor, ingredientes, cantidades, costo, estado y fecha esperada.
 3. Usa **Conteos de inventario** para auditar recuentos físicos y diferencias.
 4. Revisa **Transferencias** cuando existan movimientos entre ubicaciones o áreas.

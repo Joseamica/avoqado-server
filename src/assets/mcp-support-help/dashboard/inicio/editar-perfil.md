@@ -14,7 +14,7 @@ roles:
   - WAITER
   - HOST
   - VIEWER
-lastVerified: 2026-05-21
+lastVerified: 2026-11-26
 sourceRepo: avoqado-web-dashboard
 relatedArticles:
   - iniciar-sesion
@@ -31,15 +31,15 @@ keywords:
 
 Mi perfil corresponde a tu usuario, no al local. Cambios como nombre, idioma o preferencias personales afectan tu experiencia dentro del Dashboard, pero no cambian datos públicos del venue ni permisos de otros miembros del equipo.
 
-Si quieres cambiar acceso, rol o sucursales asignadas, eso se hace desde **RH > Personas** o **Configuración > Permisos y roles**, no desde tu perfil.
+Si quieres cambiar acceso, rol o sucursales asignadas, eso se hace desde **RH > Personas** o **Configuración > Roles y permisos**, no desde tu perfil.
 
 ## Pasos
 
 1. Abre el Dashboard con tu usuario.
-2. Entra a **Mi perfil**.
+2. Entra a **Configuración > Perfil**.
 3. Revisa nombre, correo y datos personales disponibles.
 4. Ajusta preferencias de idioma o visualización si están disponibles.
-5. Abre **Notificaciones > Preferencias** si necesitas cambiar avisos o canales.
+5. Abre **Configuración > Notificaciones** si necesitas cambiar avisos o canales.
 6. Guarda cambios y recarga si el ajuste no se refleja de inmediato.
 
 ## Problemas frecuentes
@@ -48,7 +48,7 @@ Si no puedes cambiar el correo, puede estar bloqueado por seguridad o por el pro
 
 ## Diferencia entre perfil y venue
 
-Tu perfil identifica a la persona que usa el Dashboard. El venue representa el local o sucursal. Editar perfil no cambia nombre comercial, dirección, imágenes, documentos fiscales, integraciones ni facturación del local. Para esos cambios usa **Configuración > Editar Local**.
+Tu perfil identifica a la persona que usa el Dashboard. El venue representa el local o sucursal. Editar perfil no cambia nombre comercial, dirección, imágenes, documentos fiscales, integraciones ni facturación del local. Para esos cambios usa **Configuración > Información del local**.
 
 Mantener esta diferencia clara reduce errores: una persona puede tener el mismo perfil en varias sucursales, pero cada sucursal conserva configuración, permisos y datos propios.
 

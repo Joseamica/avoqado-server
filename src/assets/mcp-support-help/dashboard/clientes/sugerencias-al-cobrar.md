@@ -10,7 +10,7 @@ roles:
   - OWNER
   - ADMIN
   - MANAGER
-lastVerified: 2026-11-25
+lastVerified: 2026-11-26
 sourceRepo: avoqado-web-dashboard
 sourceRef: 501e37072a13f5ed8f22e3d650f2598d3d8820b6
 relatedArticles:
@@ -36,7 +36,7 @@ Cuando el cajero da **Cobrar**, al cliente le aparecen hasta 3 productos en su p
 
 ## Pasos
 
-1. Abre **Promociones > Sugerencias al cobrar**.
+1. Abre **Clientes > Promociones > Sugerencias al cobrar**.
 2. En **¿Dónde aparece?**, prende **En el mostrador**. Las otras dos opciones dicen **Próximamente**.
 3. En **Esperan tu decisión**, revisa lo que te proponemos (sale de lo que tus tickets muestran que se vende junto) y toca **Activar** en la que quieras, o la **X** para descartarla.
 4. Para crear una tuya, en **Activas** toca **Nueva**. Elige el **Momento** (**Siempre, en cualquier cuenta** o **Sólo si ya llevan cierto producto**, con su **Producto que dispara**), el **Producto a sugerir** y, si quieres, el **Gancho (opcional)**.

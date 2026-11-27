@@ -10,7 +10,7 @@ roles:
   - OWNER
   - ADMIN
   - MANAGER
-lastVerified: 2026-11-25
+lastVerified: 2026-11-26
 sourceRepo: avoqado-web-dashboard
 sourceRef: 501e37072a13f5ed8f22e3d650f2598d3d8820b6
 relatedArticles:
@@ -30,11 +30,11 @@ keywords:
 
 Los cupones vienen con las promociones del plan **Pro**. **Generar en Masa** pide el permiso de crear cupones; **Eliminar**, el de eliminarlos. De fábrica, los dos los tienen el gerente, el administrador y el dueño.
 
-Cada cupón va ligado a un descuento que ya existe (el **Descuento Padre**): el cupón es el código y el descuento dice cuánto se rebaja. Si todavía no tienes el descuento, créalo primero en **Promociones > Descuentos**. Para crear un solo cupón usa **Crear Cupón**.
+Cada cupón va ligado a un descuento que ya existe (el **Descuento Padre**): el cupón es el código y el descuento dice cuánto se rebaja. Si todavía no tienes el descuento, créalo primero en **Clientes > Promociones > Descuentos**. Para crear un solo cupón usa **Crear Cupón**.
 
 ## Pasos
 
-1. Abre **Promociones > Códigos de Cupón** y toca **Generar en Masa**.
+1. Abre **Clientes > Promociones > Códigos de Cupón** y toca **Generar en Masa**.
 2. Elige el **Descuento Padre**. Si quieres, escribe un **Prefijo del Código** (por ejemplo, PROMO).
 3. Escribe el **Número de Códigos** (de 1 a 1000) y la **Longitud del Código** (de 4 a 20). Si quieres, pon los **Usos Máximos por Código**, los **Usos Máximos por Cliente** y las fechas **Válido Desde** y **Válido Hasta**.
 4. Toca **Generar Códigos**. Sale «Se generaron exitosamente … códigos de cupón».

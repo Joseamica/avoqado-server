@@ -60,7 +60,7 @@
       "guias": ["dashboard/menu/configurar-menu-avanzado"],
       "debeDecir": [
         {
-          "texto": "Grupos de modificadores"
+          "texto": "Grupos Modificadores"
         }
       ],
       "noDebeDecir": ["Menú > Extras", "crea un producto nuevo llamado queso extra"]
