@@ -299,7 +299,11 @@ describe('D679 · el canje de una reserva con créditos (caracterización, base 
         customerId: ana,
         expectedProductIds: [masaje],
       })
-      expect(r).toEqual({ creditsUsed: 2, redeemed: true })
+      expect(r).toEqual({
+        creditsUsed: 2,
+        redeemed: true,
+        balances: [expect.objectContaining({ balanceId, remaining: 3, unlimited: false })],
+      })
       expect(await saldo(balanceId)).toBe(3)
       const [t] = await canjes(balanceId)
       expect(t).toEqual(expect.objectContaining({ quantity: -2, reason: 'Reserva de 2 creditos', reservationId: cita.id }))

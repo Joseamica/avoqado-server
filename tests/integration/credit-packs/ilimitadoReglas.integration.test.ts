@@ -608,7 +608,9 @@ describe('D679 · reglas del Ilimitado (integración, base real)', () => {
     it('Ilimitado sobre una cita que ya llegó (CHECKED_IN): se canjea', async () => {
       const { balanceId } = await comprar({ productId: masaje })
       const c = await cita(151, { status: 'CHECKED_IN' })
-      await expect(canjearConCompensacion(c.id, c.confirmationCode, balanceId)).resolves.toEqual({ creditsUsed: 1, redeemed: true })
+      await expect(canjearConCompensacion(c.id, c.confirmationCode, balanceId)).resolves.toEqual(
+        expect.objectContaining({ creditsUsed: 1, redeemed: true, balances: [expect.objectContaining({ balanceId })] }),
+      )
       expect(await saldo(balanceId)).toBe(99998)
     })
 
@@ -616,7 +618,9 @@ describe('D679 · reglas del Ilimitado (integración, base real)', () => {
     it.each(['CHECKED_IN', 'CANCELLED'] as const)('paquete normal sobre una cita %s: cobra como en develop', async status => {
       const { balanceId } = await comprar({ productId: masaje, unlimited: false })
       const c = await cita(152, { status })
-      await expect(canjearConCompensacion(c.id, c.confirmationCode, balanceId)).resolves.toEqual({ creditsUsed: 1, redeemed: true })
+      await expect(canjearConCompensacion(c.id, c.confirmationCode, balanceId)).resolves.toEqual(
+        expect.objectContaining({ creditsUsed: 1, redeemed: true, balances: [expect.objectContaining({ balanceId })] }),
+      )
       expect(await saldo(balanceId)).toBe(4)
     })
   })
