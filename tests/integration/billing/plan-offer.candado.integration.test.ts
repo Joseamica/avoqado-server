@@ -127,7 +127,7 @@ jest.mock('@/services/launchCampaigns/hybridPrices', () => ({
 // Los requisitos de código para prender el interruptor: listos (el renglón del interruptor lo pone la prueba).
 jest.mock('@/services/billing/planesEditablesListos', () => ({
   SERVIDOR_LISTO_PARA_PLANES_EDITABLES: true,
-  cuponDeIntroduccionRetirado: () => true,
+  cuponDeIntroduccionExcluidoConVersion: () => true,
 }))
 
 import prisma from '@/utils/prismaClient'

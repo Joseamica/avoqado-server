@@ -1142,6 +1142,28 @@ describe('camino ESTÁNDAR (sin campaña)', () => {
     expect(prismaMock.planOfferPointer.findUnique.mock.invocationCallOrder[1]).toBeLessThan(mockSubCreate.mock.invocationCallOrder[0])
   })
 
+  it('🔴 B4 (guarda del supuesto del cupón): con la v2 vigente, PRO mensual pagando hoy crea la suscripción SIN INTRO_PRO_3M y con el precio de la versión', async () => {
+    prismaMock.planOfferPointer.findUnique.mockResolvedValue(punteroA('cv2', 2, VERSION_DOS()) as never)
+    mockPriceRetrieve.mockResolvedValue({ id: 'price_v2_pro_m', active: true, unit_amount: 115884 })
+
+    await activatePlan({
+      ...BASE,
+      offer: { kind: 'STANDARD', expectedFirstChargeCents: 115884 },
+      quoteToken: comprobanteDePrueba({
+        alcance: 'org:org-1',
+        interval: 'monthly',
+        firstChargeCents: 115884,
+        precioCents: 115884,
+        trialEndsAt: null,
+      }),
+    })
+
+    expect(mockSubCreate).toHaveBeenCalledTimes(1)
+    expect(mockSubCreate.mock.calls[0][0].items).toEqual([{ price: 'price_v2_pro_m' }])
+    // Con versión del editor los `discounts` van explícitos y vacíos (`''`): sin INTRO_PRO_3M.
+    expect(mockSubCreate.mock.calls[0][0].discounts).toBe('')
+  })
+
   it('🔴 si otra versión quedó vigente entre el PASO 4 y el cobro → 409 OFFER_CHANGED reason VERSION (B2: el comprobante es de la v2) y no se cobra', async () => {
     // PASO 4 con la v2; la segunda lectura del puntero (la relectura, dentro de la regla común) ya ve la v3.
     prismaMock.planOfferPointer.findUnique
