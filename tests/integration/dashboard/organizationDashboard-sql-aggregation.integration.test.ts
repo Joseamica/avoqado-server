@@ -761,11 +761,14 @@ describe('getStaffAttendance — efectivo por checada agregado en Postgres', () 
 
   it('marca la checada que el sistema cerró como «Salida olvidada», con su nota, para que el gerente la corrija (hz:0433f0cb:D3)', async () => {
     const e2 = await prisma.timeEntry.findFirstOrThrow({ where: { staffId: ana, clockInTime: E2_IN } })
-    const tardia = 'Salida del celular de las 22:40: llegó después del día del turno y no se usó. Revisa la hora real.'
-    const deLaTpv = 'Salida de la TPV a las 22:45: llegó después del cierre de salida olvidada y no se usó. Revisa la hora real.'
-    // Una nota libre de la persona con esas palabras no sale (Codex D3 r2 #3); las dos salidas tardías del sistema, sí.
+    const tardia =
+      'Salida del celular de las 22:40 del 11-mar (America/Mexico_City): llegó después del día del turno y no se usó. Revisa la hora real.'
+    const deLaTpv = 'Salida de la PAX a las 22:45 11/03: llegó después del cierre de salida olvidada y no se usó. Revisa la hora real.'
+    // Una nota libre de la persona no sale, ni con esas palabras ni imitando la del sistema con algo más al final (Codex D3 r2
+    // #3 y r3); las dos salidas tardías del sistema, sí.
     const libre = 'El camión que no se usó llegó tarde'
-    const notas = `${libre}\nSalida olvidada: no marcó salida y no tiene horario ese día; quedó en 0 horas hasta que el gerente la corrija.\n${tardia}\n${deLaTpv}`
+    const imitada = `${tardia} y esto es privado`
+    const notas = `${libre}\n${imitada}\nSalida olvidada: no marcó salida y no tiene horario ese día; quedó en 0 horas hasta que el gerente la corrija.\n${tardia}\n${deLaTpv}`
     await prisma.timeEntry.update({ where: { id: e2.id }, data: { salidaOlvidada: true, autoClockOut: true, notes: notas } })
     try {
       const { staff } = await svc.getStaffAttendance(orgId, DIA)
