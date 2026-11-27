@@ -444,8 +444,9 @@ describe('terminal nueva (con captureSeq)', () => {
     const result = await proof([VINC], { capture: capture(1), linkingNumber: '5512345678', portedNumber: '5587654321' })
 
     expect(result).toMatchObject({ linkingDuplicate: true, portedDuplicate: false })
-    expect(isNumberDuplicate).toHaveBeenCalledWith(ORG, '5512345678', { verificationId: VER, iccid: ICCID })
-    expect(isNumberDuplicate).toHaveBeenCalledWith(ORG, '5587654321', { verificationId: VER, iccid: ICCID })
+    expect(isNumberDuplicate).toHaveBeenCalledWith(ORG, '5512345678', { verificationId: VER, iccid: ICCID }, 'linking')
+    // El portado se pregunta como portado: isNumberDuplicate contesta que no (puede repetirse, back-office, 26-nov).
+    expect(isNumberDuplicate).toHaveBeenCalledWith(ORG, '5587654321', { verificationId: VER, iccid: ICCID }, 'ported')
   })
 })
 

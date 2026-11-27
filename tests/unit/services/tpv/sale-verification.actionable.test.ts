@@ -257,7 +257,7 @@ describe('GET tpv/verification/pending', () => {
     ;(findDuplicatesForSales as jest.Mock).mockResolvedValue(
       new Map([
         ['sv-001', { linking: { total: 1, matches: [] } }],
-        ['sv-002', { ported: { total: 2, matches: [] } }],
+        ['sv-002', {}], // su portado se repite en otra venta: ya no es alerta (back-office, 26-nov)
       ]),
     )
 
@@ -268,7 +268,7 @@ describe('GET tpv/verification/pending', () => {
       { key: 'sv-001', verificationId: 'sv-001', iccid: 'ICC-A', linkingNumber: '5512345678', portedNumber: null },
       { key: 'sv-002', verificationId: 'sv-002', iccid: 'ICC-sv-002', linkingNumber: '5533333333', portedNumber: '5544444444' },
     ])
-    expect(data.map(d => d.alerts)).toEqual([['LINKING_DUPLICATE'], ['PORTED_DUPLICATE']])
+    expect(data.map(d => d.alerts)).toEqual([['LINKING_DUPLICATE'], []])
     // Al promotor no se le dice con qué venta choca.
     expect(JSON.stringify(data)).not.toContain('matches')
   })
@@ -340,7 +340,7 @@ describe('GET tpv/verification/:id', () => {
     ;(prisma.saleVerification.findFirst as jest.Mock).mockResolvedValue(
       row('sv-001', { status: 'FAILED', reviewNotes: 'Revisa', portedNumber: '5598765432', portedNumberSource: 'BACKOFFICE' }),
     )
-    ;(findDuplicatesForSales as jest.Mock).mockResolvedValue(new Map([['sv-001', { ported: { total: 1, matches: [] } }]]))
+    ;(findDuplicatesForSales as jest.Mock).mockResolvedValue(new Map([['sv-001', { linking: { total: 1, matches: [] } }]]))
 
     const detail = await getVerificationForCorrection(ORG, PROMOTER, 'sv-001')
 
@@ -354,7 +354,7 @@ describe('GET tpv/verification/:id', () => {
       reviewNotes: 'Revisa',
       portedNumber: '5598765432',
       portedNumberLocked: true,
-      alerts: ['PORTED_DUPLICATE'],
+      alerts: ['LINKING_DUPLICATE'],
     })
   })
 
@@ -417,13 +417,18 @@ describe('GET tpv/verification/number-check', () => {
       where: { id: 'sv-own', staffId: PROMOTER, venue: { organizationId: ORG } },
       select: { serialNumbers: true },
     })
-    expect(isNumberDuplicate).toHaveBeenCalledWith(ORG, '5512345678', { verificationId: 'sv-own', iccid: 'ICC-OWN' })
+    expect(isNumberDuplicate).toHaveBeenCalledWith(ORG, '5512345678', { verificationId: 'sv-own', iccid: 'ICC-OWN' }, 'linking')
   })
 
   it('repetido en la organización ⇒ duplicate true, sin decir con qué venta', async () => {
     ;(isNumberDuplicate as jest.Mock).mockResolvedValue(true)
-    await expect(check({ kind: 'ported', number: '551234567' })).resolves.toEqual({ duplicate: true })
-    expect(isNumberDuplicate).toHaveBeenCalledWith(ORG, '551234567', { verificationId: undefined, iccid: undefined })
+    await expect(check({ kind: 'linking', number: '551234567' })).resolves.toEqual({ duplicate: true })
+    expect(isNumberDuplicate).toHaveBeenCalledWith(ORG, '551234567', { verificationId: undefined, iccid: undefined }, 'linking')
+  })
+
+  it('un portado se pregunta como portado (isNumberDuplicate contesta que no: puede repetirse, back-office, 26-nov)', async () => {
+    await check({ kind: 'ported', number: '551234567' })
+    expect(isNumberDuplicate).toHaveBeenCalledWith(ORG, '551234567', { verificationId: undefined, iccid: undefined }, 'ported')
   })
 
   it('número inválido ⇒ 400 INVALID_LINKING_NUMBER', async () => {

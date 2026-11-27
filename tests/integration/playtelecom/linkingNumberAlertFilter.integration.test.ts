@@ -93,7 +93,7 @@ beforeAll(async () => {
   staffId = (await prisma.staff.create({ data: { email: `${tag}@example.test`, firstName: 'Ana', lastName: 'Promotora' } })).id
 
   await venta('s1', { linking: '5512345678', photos: ['f1'], iccid: 'ICC1' })
-  // Su portado choca con la vinculación de s1: un teléfono es una línea, sin importar el campo.
+  // Su portado hace repetida la vinculación de s1; s2 no sale: su portado puede repetirse (back-office, 26-nov).
   await venta('s2', { isPortabilidad: true, linking: '5587654321', ported: '5512345678', photos: ['f1', 'f2'], iccid: 'ICC2' })
   // 9 dígitos de la terminal, cobrada justo en el extremo final del rango: sale con y sin filtro.
   await venta('s3', { linking: '551234567', photos: ['f1'], paidAt: range.to })
@@ -136,6 +136,9 @@ beforeAll(async () => {
   await venta('dentro', { linking: '5588888880', photos: ['f1'] })
   // B0 (A11b): el ICCID trae un tabulador al final y «f» minúscula; `trim()` lo quita, `btrim` no. Es su propio histórico.
   await venta('t1', { linking: '5577777770', photos: ['f1'], iccid: '8952140012345678902f\t' })
+  // El back-office (26-nov): el mismo cliente porta su número en dos ventas. Ninguna sale repetida.
+  await venta('pA', { isPortabilidad: true, linking: '5561000001', ported: '5562000000', photos: ['f1', 'f2'], iccid: 'ICC-PA' })
+  await venta('pB', { isPortabilidad: true, linking: '5561000002', ported: '5562000000', photos: ['f1', 'f2'], iccid: 'ICC-PB' })
 
   await prisma.historicalLinkingNumber.createMany({
     data: [
@@ -165,7 +168,7 @@ afterAll(async () => {
 
 const CODES: Record<NumberAlertFilter, (c: NumberAlertCode[]) => boolean> = {
   any: c => c.length > 0,
-  duplicate: c => c.includes('LINKING_DUPLICATE') || c.includes('PORTED_DUPLICATE'),
+  duplicate: c => c.includes('LINKING_DUPLICATE'),
   missing: c => c.includes('LINKING_MISSING') || c.includes('PORTED_MISSING'),
   not10: c => c.includes('NOT_10_DIGITS'),
 }
@@ -203,7 +206,6 @@ async function alertasDeLaFila(org = ORG) {
       ...s,
       isExternalSale: s.payment.order.type === 'MANUAL_ENTRY',
       linkingDuplicate: !!dups.get(s.id)?.linking,
-      portedDuplicate: !!dups.get(s.id)?.ported,
     }),
   }))
 }
@@ -212,10 +214,10 @@ const nombres = (lista: string[]) => lista.map(id => Object.keys(ids).find(n => 
 
 describe('filtro de alertas del número = alertas de la fila', () => {
   it.each<[NumberAlertFilter, string[]]>([
-    ['duplicate', ['a', 'b', 'dentro', 's1', 's2', 's7', 's9']],
+    ['duplicate', ['a', 'b', 'dentro', 's1', 's7', 's9']],
     ['not10', ['s3', 's3c', 's3d']],
     ['missing', ['p2', 'p3', 's4', 's5']],
-    ['any', ['a', 'b', 'dentro', 'p2', 'p3', 's1', 's2', 's3', 's3c', 's3d', 's4', 's5', 's7', 's9']],
+    ['any', ['a', 'b', 'dentro', 'p2', 'p3', 's1', 's3', 's3c', 's3d', 's4', 's5', 's7', 's9']],
   ])('%s: el SQL y la fila dan las mismas ventas', async (kind, esperadas) => {
     const filas = await alertasDeLaFila()
 
@@ -249,6 +251,26 @@ describe('B0: el filtro sólo recorre las ventas del rango', () => {
     for (const kind of ['duplicate', 'any'] as const) {
       expect(await findVerificationIdsWithNumberAlert(ORG, kind, range)).not.toContain(ids.t1)
     }
+  })
+})
+
+describe('el número portado puede repetirse (back-office, 26-nov)', () => {
+  it('dos ventas con el mismo portado no salen repetidas, ni en la fila ni en el filtro', async () => {
+    const filas = await alertasDeLaFila()
+    expect(filas.find(f => f.id === ids.pA)?.codes).toEqual([])
+    expect(filas.find(f => f.id === ids.pB)?.codes).toEqual([])
+    for (const kind of ['duplicate', 'any'] as const) {
+      const delSql = await findVerificationIdsWithNumberAlert(ORG, kind, range)
+      expect(delSql).not.toContain(ids.pA)
+      expect(delSql).not.toContain(ids.pB)
+    }
+  })
+
+  it('la vinculación sí choca con el portado de otra venta (s1 contra s2)', async () => {
+    const res = await findDuplicatesForSales(ORG, [
+      { key: 's1', verificationId: ids.s1, iccid: 'ICC1', linkingNumber: '5512345678', portedNumber: null },
+    ])
+    expect(res.get('s1')?.linking?.matches).toContainEqual(expect.objectContaining({ kind: 'SALE', verificationId: ids.s2 }))
   })
 })
 
@@ -293,7 +315,8 @@ describe('findDuplicatesForSales contra Postgres', () => {
 
 describe('portabilidad → línea nueva (A11b punto 4)', () => {
   it('se borra el portado: la fila queda sin alertas y la otra venta con ese número ya no sale repetida', async () => {
-    expect(nombres(await findVerificationIdsWithNumberAlert(PORT_ORG, 'duplicate', range))).toEqual(['q1', 'q2'])
+    // q2 sale porque su vinculación es el portado de q1; q1 no, porque su portado puede repetirse (back-office, 26-nov).
+    expect(nombres(await findVerificationIdsWithNumberAlert(PORT_ORG, 'duplicate', range))).toEqual(['q2'])
     expect(nombres(await findVerificationIdsWithNumberAlert(PORT_ORG, 'not10', range))).toEqual(['q1'])
 
     await editOrgSaleVerification(PORT_ORG, {

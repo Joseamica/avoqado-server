@@ -4,9 +4,12 @@ import { BadRequestError } from '../../errors/AppError'
 import { utcTs } from '../../utils/sqlDates'
 import { PATRON_SQL_TRIM_COMO_JS } from '../../utils/terminalSerial'
 
-// «Repetido» (spec §5.2): otro número igual en la MISMA organización, en otra venta (cualquier estado, vinculación o
-// portado) o en el histórico con un ICCID distinto. findDuplicatesForSales y findVerificationIdsWithNumberAlert dan la
-// misma respuesta sí/no para cada venta guardada: las dos cuentan llaves 'sv:'||id y 'h:'||iccid por número.
+// «Repetido» (spec §5.2): la VINCULACIÓN de una venta igual a otro número de la MISMA organización, en otra venta
+// (cualquier estado, vinculación o portado) o en el histórico con un ICCID distinto. findDuplicatesForSales y
+// findVerificationIdsWithNumberAlert dan la misma respuesta sí/no para cada venta guardada: las dos cuentan llaves
+// 'sv:'||id y 'h:'||iccid por número.
+// El número PORTADO puede repetirse (pedido del back-office, 26-nov: el mismo cliente puede portar su número en
+// dos ventas): nunca se marca repetido ni se busca; sólo cuenta cuando otra venta lo trae como vinculación.
 
 export type NumberMatch =
   | { kind: 'SALE'; verificationId: string; status: SaleVerificationStatus; date: Date; staffName: string; venueName: string }
@@ -45,19 +48,15 @@ type MatchRow = {
 const SHOWN = 3
 const ALERT_IDS_CAP = 20000
 
-/** Por `sale.key`: `linking`/`ported` sólo vienen cuando ese número está repetido. Dos consultas para toda la página. */
-export async function findDuplicatesForSales(
-  orgId: string,
-  input: SaleNumbers[],
-): Promise<Map<string, { linking?: NumberMatchSummary; ported?: NumberMatchSummary }>> {
+/** Por `sale.key`: `linking` sólo viene cuando la vinculación está repetida. Dos consultas para toda la página. */
+export async function findDuplicatesForSales(orgId: string, input: SaleNumbers[]): Promise<Map<string, { linking?: NumberMatchSummary }>> {
   // El histórico guarda el ICCID con trim + mayúsculas (`normalizeIccid`); la captura de la venta no: «…901f» es «…901F».
   const sales = input.map(s => ({ ...s, iccid: s.iccid?.trim().toUpperCase() || null }))
-  const out = new Map<string, { linking?: NumberMatchSummary; ported?: NumberMatchSummary }>()
+  const out = new Map<string, { linking?: NumberMatchSummary }>()
   for (const s of sales) out.set(s.key, {})
-  const numbersOf = (s: SaleNumbers) => [s.linkingNumber, s.portedNumber].filter((n): n is string => !!n)
-  const nums = Array.from(new Set(sales.flatMap(numbersOf)))
+  const nums = Array.from(new Set(sales.flatMap(s => (s.linkingNumber ? [s.linkingNumber] : []))))
   if (nums.length === 0) return out
-  const ownPairs = sales.flatMap(s => (s.iccid ? numbersOf(s).map(number => ({ iccid: s.iccid as string, number })) : []))
+  const ownPairs = sales.flatMap(s => (s.iccid && s.linkingNumber ? [{ iccid: s.iccid, number: s.linkingNumber }] : []))
 
   const [rows, own] = await Promise.all([
     // Una fila por (número, llave): UNION junta la misma venta si tiene el número en los dos campos. Las 5 más
@@ -140,22 +139,23 @@ export async function findDuplicatesForSales(
   }
 
   for (const s of sales) {
-    const entry: { linking?: NumberMatchSummary; ported?: NumberMatchSummary } = {}
     const linking = summarize(s, s.linkingNumber)
-    const ported = summarize(s, s.portedNumber)
-    if (linking) entry.linking = linking
-    if (ported) entry.ported = ported
-    out.set(s.key, entry)
+    out.set(s.key, linking ? { linking } : {})
   }
   return out
 }
 
-/** ¿`number` ya está en otra venta de la organización (o en el histórico con otro ICCID)? `self` no cuenta. */
+/**
+ * ¿`number` ya está en otra venta de la organización (o en el histórico con otro ICCID)? `self` no cuenta. Un portado
+ * nunca es repetido (ver arriba).
+ */
 export async function isNumberDuplicate(
   orgId: string,
   number: string,
   self: { verificationId?: string; iccid?: string },
+  kind: 'linking' | 'ported',
 ): Promise<boolean> {
+  if (kind === 'ported') return false
   const key = 'self'
   const res = await findDuplicatesForSales(orgId, [
     { key, verificationId: self.verificationId ?? null, iccid: self.iccid ?? null, linkingNumber: number, portedNumber: null },
@@ -165,7 +165,7 @@ export async function isNumberDuplicate(
 
 // Las alertas del filtro deben salir iguales que en la fila (computeNumberAlerts + findDuplicatesForSales).
 // photos[1] y photos[2] de Postgres son photos[0] y photos[1] de JS.
-const DUPLICATE = Prisma.sql`("linkingNumber" IN (SELECT n FROM dup) OR "portedNumber" IN (SELECT n FROM dup))`
+const DUPLICATE = Prisma.sql`("linkingNumber" IN (SELECT n FROM dup))`
 const NOT_10 = Prisma.sql`((length("linkingNumber") = 9 AND coalesce("linkingNumberSource"::text, '') <> 'BACKOFFICE')
   OR (length("portedNumber") = 9 AND coalesce("portedNumberSource"::text, '') <> 'BACKOFFICE'))`
 const MISSING = Prisma.sql`(("linkingNumber" IS NULL AND (coalesce(photos[1], '') <> '' OR order_type = 'MANUAL_ENTRY'))
@@ -185,13 +185,13 @@ const SALE_ICCID = Prisma.sql`nullif(upper(regexp_replace(sv."serialNumbers"[1],
 // (text = text[]). Así Postgres lo calcula una vez y busca con `= ANY($n)` en el índice de cada número.
 const RANGE_NUMS = Prisma.sql`(SELECT a FROM range_nums)::text[]`
 
-// `dup` sólo para los números de las ventas del rango, buscados en TODA la organización por los índices de número (como
-// findDuplicatesForSales). Una fila del histórico no cuenta si una venta de la organización (del rango o no) tiene su
-// mismo ICCID con ese número: esa venta ya está en sv_nums, porque el número es uno del rango.
+// `dup` sólo para las vinculaciones de las ventas del rango (el portado puede repetirse), buscadas en TODA la organización
+// por los índices de número (como findDuplicatesForSales). Una fila del histórico no cuenta si una venta de la organización
+// (del rango o no) tiene su mismo ICCID con ese número: esa venta ya está en sv_nums, porque el número es uno del rango.
 const dupCtes = (orgId: string) => Prisma.sql`,
     range_nums AS (
       SELECT array_agg(DISTINCT n) AS a
-      FROM (SELECT "linkingNumber" AS n FROM in_range UNION ALL SELECT "portedNumber" FROM in_range) x
+      FROM (SELECT "linkingNumber" AS n FROM in_range) x
       WHERE n IS NOT NULL
     ),
     sv_nums AS (
