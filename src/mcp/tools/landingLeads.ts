@@ -4,6 +4,7 @@ import { fromZonedTime } from 'date-fns-tz'
 import prisma from '@/utils/prismaClient'
 import type { McpScope } from '../scope'
 import { text } from '../respond'
+import { DIA } from '../dia'
 
 /** Techo de filas que se leen para agregar. Un alta de landing es un evento raro
  *  (decenas por mes, no miles), asi que esto sobra — pero evita que un pico
@@ -35,8 +36,8 @@ export function registerLandingLeadTools(server: McpServer, scope: McpScope) {
       'aterrizaje, asi que un anuncio SIN parametros de URL cae en "(sin campana)". SOLO para SUPERADMIN de ' +
       'plataforma: son leads de Avoqado, no de un venue, e incluyen datos de contacto del prospecto.',
     {
-      startDate: z.string().optional().describe('Fecha ISO minima (inclusive), hora de Mexico'),
-      endDate: z.string().optional().describe('Fecha ISO maxima (inclusive), hora de Mexico'),
+      startDate: DIA.optional().describe('Dia minimo AAAA-MM-DD (inclusive), hora de Mexico; sin hora'),
+      endDate: DIA.optional().describe('Dia maximo AAAA-MM-DD (inclusive), hora de Mexico; sin hora'),
       source: z.string().optional().describe('Filtra por landing de origen, p. ej. landing_restaurantes / landing_retail'),
       limit: z.number().int().min(1).max(200).default(50).describe('Maximo de leads a listar (el resumen usa todos)'),
     },

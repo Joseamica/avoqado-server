@@ -7,6 +7,10 @@
  */
 import { registerLandingLeadTools } from '../../../src/mcp/tools/landingLeads'
 import type { McpScope } from '../../../src/mcp/scope'
+import { z } from 'zod'
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
+import { Client } from '@modelcontextprotocol/sdk/client/index.js'
+import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 
 const mockFindMany = jest.fn()
 jest.mock('@/utils/prismaClient', () => ({
@@ -17,6 +21,9 @@ jest.mock('@/utils/prismaClient', () => ({
 type Handler = (a: Record<string, unknown>, e: unknown) => Promise<{ content: Array<{ text: string }> }>
 const parse = (r: { content: Array<{ text: string }> }) => JSON.parse(r.content[0].text)
 
+// El SDK del MCP valida los argumentos con este esquema ANTES de llamar a la herramienta.
+let esquema: z.ZodRawShape = {}
+
 function registrar(isSuperAdmin: boolean): Handler {
   const handlers = new Map<string, Handler>()
   const scope = {
@@ -26,7 +33,15 @@ function registrar(isSuperAdmin: boolean): Handler {
     perVenueAccess: new Map(),
     isSuperAdmin,
   } as McpScope
-  registerLandingLeadTools({ tool: (...a: unknown[]) => handlers.set(a[0] as string, a[a.length - 1] as Handler) } as never, scope)
+  registerLandingLeadTools(
+    {
+      tool: (...a: unknown[]) => {
+        esquema = a[2] as z.ZodRawShape
+        handlers.set(a[0] as string, a[a.length - 1] as Handler)
+      },
+    } as never,
+    scope,
+  )
   return handlers.get('landing_leads')!
 }
 
@@ -95,6 +110,48 @@ describe('landing_leads', () => {
     expect(out.leads).toHaveLength(1)
     expect(out.total).toBe(3)
     expect(out.porCampana[0].leads).toBe(3)
+  })
+
+  // 26-nov (monitor de Render): el asistente mando `2026-11-20T00:00:00Z`; se le pegaba otra hora y Prisma tronaba con
+  // «Invalid Date». Ahora el esquema la rechaza con un mensaje que el asistente entiende y corrige.
+  it('🔴 una fecha con hora o un dia que no existe se rechazan en el esquema, nunca llegan a la base', () => {
+    registrar(true)
+    const args = z.object(esquema)
+    for (const malo of ['2026-11-20T00:00:00Z', '2026-11-20T00:00:00.000-06:00', '2026-02-30', '20-11-2026']) {
+      const inicio = args.safeParse({ startDate: malo })
+      const fin = args.safeParse({ endDate: malo })
+      expect(inicio.success).toBe(false)
+      expect(fin.success).toBe(false)
+    }
+    expect(JSON.stringify(args.safeParse({ startDate: '2026-11-20T00:00:00Z' }).error)).toContain('AAAA-MM-DD')
+    expect(args.safeParse({ startDate: '2026-11-20', endDate: '2026-11-26' }).success).toBe(true)
+    expect(args.safeParse({}).success).toBe(true)
+  })
+
+  it('🔴 la llamada exacta del 26-nov, por el SDK real del MCP: error que el asistente corrige, sin tocar la base', async () => {
+    const server = new McpServer({ name: 'landing-leads', version: '1' })
+    const scope = { staffId: 's', activeOrg: 'o', allowedVenueIds: [], perVenueAccess: new Map(), isSuperAdmin: true } as McpScope
+    registerLandingLeadTools(server, scope)
+    const client = new Client({ name: 'landing-leads-test', version: '1' })
+    const [a, b] = InMemoryTransport.createLinkedPair()
+    await Promise.all([server.connect(a), client.connect(b)])
+    try {
+      const mala = await client.callTool({
+        name: 'landing_leads',
+        arguments: { startDate: '2026-11-20T00:00:00Z', endDate: '2026-11-26T23:59:59Z' },
+      })
+      expect(mala.isError).toBe(true)
+      expect((mala.content as Array<{ text: string }>)[0].text).toContain('AAAA-MM-DD')
+      expect(mockFindMany).not.toHaveBeenCalled()
+
+      mockFindMany.mockResolvedValue([])
+      const buena = await client.callTool({ name: 'landing_leads', arguments: { startDate: '2026-11-20', endDate: '2026-11-26' } })
+      expect(buena.isError).toBeFalsy()
+      expect(JSON.parse((buena.content as Array<{ text: string }>)[0].text).total).toBe(0)
+    } finally {
+      await client.close()
+      await server.close()
+    }
   })
 
   // 2. REGRESION / no romper lo de al lado
