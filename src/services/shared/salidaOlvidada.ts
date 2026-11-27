@@ -283,7 +283,7 @@ export function limiteDeUnCierre(
   return guardado ?? limiteDelTurno(clockIn, timezone, cierre, null)
 }
 
-/** Checadas por consulta, y asientos que se leen por checada: una tiene una salida del celular y, a lo más, unos reintentos de la PAX. */
+/** Checadas por consulta, y asientos que se enseñan por checada: una tiene una salida del celular y, a lo más, unos reintentos de la PAX. */
 const CHECADAS_POR_CONSULTA = 200
 const ASIENTOS_POR_CHECADA = 10
 const QUIEN_MANDO: Record<string, string> = { PAX: 'de la PAX', POS: 'del POS' }
@@ -314,47 +314,44 @@ function lineaDeSalidaNoUsada(
 
 /**
  * Por checada «Salida olvidada», la hora real de las salidas tardías que no se usaron, una por línea y de la más temprana a la
- * más tarde. Sale de los asientos que escribe el SERVIDOR (`TIME_ENTRY_LATE_CLOCKOUT_NOT_USED`, en la misma transacción que la
- * nota), nunca de `notes`: una nota libre que copie el renglón del sistema no sale (hz:0433f0cb:D4), ni nada privado (Codex D3
- * r2 #3). Sólo asientos de la sucursal de la checada. Por lotes, con su tope por lote, para cualquier rango de fechas.
+ * más tarde. Sale de los asientos que escribe el SERVIDOR (`TIME_ENTRY_LATE_CLOCKOUT_NOT_USED`), nunca de `notes`: una nota
+ * libre que copie el renglón del sistema no sale (hz:0433f0cb:D4), ni nada privado (Codex D3 r2 #3). Sólo asientos de la
+ * sucursal de la checada. Por lotes de checadas y con tope por checada: una con muchos reenvíos no tapa a las demás, y lo que
+ * pasa del tope se dice en una línea (Codex D4 r2 #2).
  */
 export async function notasDeSalidasNoUsadas(
   entradas: Array<{ id: string; venueId: string; timezone: string | null | undefined }>,
-  db: Pick<typeof defaultPrisma, 'activityLog'> = defaultPrisma,
+  db: Pick<typeof defaultPrisma, '$queryRaw'> = defaultPrisma,
 ): Promise<Map<string, string>> {
   const porId = new Map(entradas.map(e => [e.id, e]))
   const ids = [...porId.keys()]
   const lineas = new Map<string, Array<{ cuando: number; linea: string }>>()
+  const total = new Map<string, number>()
   for (let i = 0; i < ids.length; i += CHECADAS_POR_CONSULTA) {
-    const lote = ids.slice(i, i + CHECADAS_POR_CONSULTA)
-    const tope = lote.length * ASIENTOS_POR_CHECADA
-    const asientos = await db.activityLog.findMany({
-      where: {
-        action: 'TIME_ENTRY_LATE_CLOCKOUT_NOT_USED',
-        entity: 'TimeEntry',
-        entityId: { in: lote },
-        venueId: { in: [...new Set(lote.map(id => porId.get(id)!.venueId))] },
-      },
-      select: { entityId: true, venueId: true, data: true },
-      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
-      take: tope,
-    })
-    // ponytail: el tope es del lote, no de cada checada; si una junta cientos de reintentos, puede dejar fuera a las demás.
-    if (asientos.length === tope) logger.warn('Salida olvidada: el lote de notas llegó a su tope', { checadas: lote.length, tope })
+    const pares = ids.slice(i, i + CHECADAS_POR_CONSULTA).map(id => Prisma.sql`(${id}, ${porId.get(id)!.venueId})`)
+    const asientos = await db.$queryRaw<Array<{ entityId: string; data: Prisma.JsonValue; total: number }>>`
+      SELECT "entityId", "data", "total" FROM (
+        SELECT "entityId", "data",
+               ROW_NUMBER() OVER (PARTITION BY "entityId" ORDER BY "createdAt", "id") AS n,
+               COUNT(*) OVER (PARTITION BY "entityId")::int AS total
+        FROM "ActivityLog"
+        WHERE "action" = 'TIME_ENTRY_LATE_CLOCKOUT_NOT_USED' AND "entity" = 'TimeEntry'
+          AND ("entityId", "venueId") IN (${Prisma.join(pares)})
+      ) a
+      WHERE n <= ${ASIENTOS_POR_CHECADA}`
     for (const a of asientos) {
-      const e = a.entityId ? porId.get(a.entityId) : undefined
-      const l = e && a.venueId === e.venueId ? lineaDeSalidaNoUsada(a.data, e.timezone) : null
-      if (e && l) lineas.set(e.id, [...(lineas.get(e.id) ?? []), l])
+      const e = porId.get(a.entityId)!
+      total.set(e.id, a.total)
+      const l = lineaDeSalidaNoUsada(a.data, e.timezone)
+      if (l) lineas.set(e.id, [...(lineas.get(e.id) ?? []), l])
     }
   }
   return new Map(
-    [...lineas].map(([id, ls]) => [
-      id,
-      ls
-        .sort((a, b) => a.cuando - b.cuando)
-        .map(l => l.linea)
-        .join('\n'),
-    ]),
+    [...lineas].map(([id, ls]) => {
+      const mas = total.get(id)! - ASIENTOS_POR_CHECADA
+      const cola = mas === 1 ? ['Y 1 salida tardía más que no se usó.'] : mas > 1 ? [`Y ${mas} salidas tardías más que no se usaron.`] : []
+      return [id, [...ls.sort((a, b) => a.cuando - b.cuando).map(l => l.linea), ...cola].join('\n')]
+    }),
   )
 }
 
@@ -736,40 +733,36 @@ export async function anotarSalidaQueNoSeUso(params: {
   if (!e) return null
   const hora = DateTime.fromJSDate(ahora, { zone: zonaDe(e.venue.timezone) }).toFormat('HH:mm dd/MM')
   const anotacion = `Salida de la ${params.origen} a las ${hora}: llegó después del cierre de salida olvidada y no se usó. Revisa la hora real.`
-  // La nota y su asiento van juntos (hz:0433f0cb:D4): la bitácora de marca blanca enseña la hora real con el asiento, no con
-  // la nota, así que no puede quedar una sin el otro.
-  const count = await defaultPrisma.$transaction(async tx => {
-    const { count } = await tx.timeEntry.updateMany({
-      where: { id: e.id, salidaOlvidada: true, notes: e.notes },
+  // Primero la nota con su evidencia y después el asiento con la hora real, que es lo que lee la bitácora de marca blanca
+  // (hz:0433f0cb:D4). Si el asiento fallara, la evidencia ya quedó: sólo falta esa línea y la marca «revisar» sigue (Codex D4
+  // r2 #1; founder «A»). La PAX y el POS no reenvían la misma salida, así que no se juntan en una transacción.
+  const { count } = await defaultPrisma.timeEntry.updateMany({
+    where: { id: e.id, salidaOlvidada: true, notes: e.notes },
+    data: {
+      notes: e.notes ? `${e.notes}\n${anotacion}` : anotacion,
+      ...(!e.checkOutPhotoUrl && params.checkOutPhotoUrl ? { checkOutPhotoUrl: params.checkOutPhotoUrl } : {}),
+      ...(!e.depositPhotoUrl && params.depositPhotoUrl ? { depositPhotoUrl: params.depositPhotoUrl } : {}),
+      ...(params.skipReason ? { checkoutSkipReason: params.skipReason } : {}),
+      ...(e.clockOutLatitude == null && params.latitude != null && params.longitude != null
+        ? { clockOutLatitude: params.latitude, clockOutLongitude: params.longitude, clockOutAccuracy: params.accuracy ?? null }
+        : {}),
+    },
+  })
+  if (count === 1) {
+    await logAction({
+      staffId: params.staffId,
+      venueId: params.venueId,
+      action: 'TIME_ENTRY_LATE_CLOCKOUT_NOT_USED',
+      entity: 'TimeEntry',
+      entityId: e.id,
       data: {
-        notes: e.notes ? `${e.notes}\n${anotacion}` : anotacion,
-        ...(!e.checkOutPhotoUrl && params.checkOutPhotoUrl ? { checkOutPhotoUrl: params.checkOutPhotoUrl } : {}),
-        ...(!e.depositPhotoUrl && params.depositPhotoUrl ? { depositPhotoUrl: params.depositPhotoUrl } : {}),
-        ...(params.skipReason ? { checkoutSkipReason: params.skipReason } : {}),
-        ...(e.clockOutLatitude == null && params.latitude != null && params.longitude != null
-          ? { clockOutLatitude: params.latitude, clockOutLongitude: params.longitude, clockOutAccuracy: params.accuracy ?? null }
-          : {}),
+        origen: params.origen,
+        salidaRecibida: ahora.toISOString(),
+        cierreAutomatico: e.clockOutTime?.toISOString() ?? null,
+        gps: params.latitude != null && params.longitude != null ? { latitude: params.latitude, longitude: params.longitude } : null,
       },
     })
-    if (count === 1) {
-      await tx.activityLog.create({
-        data: {
-          staffId: params.staffId,
-          venueId: params.venueId,
-          action: 'TIME_ENTRY_LATE_CLOCKOUT_NOT_USED',
-          entity: 'TimeEntry',
-          entityId: e.id,
-          data: {
-            origen: params.origen,
-            salidaRecibida: ahora.toISOString(),
-            cierreAutomatico: e.clockOutTime?.toISOString() ?? null,
-            gps: params.latitude != null && params.longitude != null ? { latitude: params.latitude, longitude: params.longitude } : null,
-          },
-        },
-      })
-    }
-    return count
-  })
+  }
   const dia = diaDeLaEntrada(e.clockInTime, e.venue.timezone)
   // Codex r2 #5: sólo se dice «quedaron anotadas» si de verdad se escribió (otro escritor pudo cambiarla entre leer y escribir).
   if (count !== 1) {

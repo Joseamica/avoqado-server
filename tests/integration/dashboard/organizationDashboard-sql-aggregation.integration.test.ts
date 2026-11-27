@@ -838,6 +838,55 @@ describe('getStaffAttendance — efectivo por checada agregado en Postgres', () 
     }
   })
 
+  it('una checada con muchas salidas tardías no deja sin nota a otra: tope por checada y aviso de las que faltan (Codex D4 r2 #2)', async () => {
+    const leer = async () => ((await svc.getStaffAttendance(orgId, DIA)).staff as Array<any>).find(r => r.id === ana)!
+    const ids: string[] = (await leer()).allTimeEntries.map((t: any) => t.id)
+    expect(ids).toHaveLength(2)
+    const antes = await prisma.timeEntry.findMany({ where: { id: { in: ids } }, select: { id: true, venueId: true, autoClockOut: true } })
+    const venueDe = new Map(antes.map(t => [t.id, t.venueId]))
+    await prisma.timeEntry.updateMany({ where: { id: { in: ids } }, data: { salidaOlvidada: true } })
+    const creados: string[] = []
+    const asiento = async (entityId: string, minuto: number, origen: string) => {
+      const cuando = new Date(Date.UTC(2025, 2, 12, 4, minuto))
+      const data = { origen, salidaRecibida: cuando.toISOString() }
+      creados.push(
+        (
+          await prisma.activityLog.create({
+            data: {
+              action: 'TIME_ENTRY_LATE_CLOCKOUT_NOT_USED',
+              entity: 'TimeEntry',
+              entityId,
+              venueId: venueDe.get(entityId)!,
+              staffId: ana,
+              createdAt: cuando,
+              data,
+            },
+          })
+        ).id,
+      )
+    }
+    try {
+      const [x, y] = ids
+      // x: 21 reenvíos de la PAX, todos antes que la única salida de y. Antes, el tope del lote (2 × 10) se llenaba con x.
+      for (let i = 0; i < 21; i++) await asiento(x, i, 'PAX')
+      await asiento(y, 30, 'POS')
+      const [tx, ty] = (await leer()).allTimeEntries
+      expect(ty).toMatchObject({
+        id: y,
+        notaSalidaOlvidada: 'Salida del POS a las 22:30 del 11-mar: llegó después del cierre y no se usó.',
+      })
+      const lineas = (tx.notaSalidaOlvidada as string).split('\n')
+      expect(lineas).toHaveLength(11)
+      expect(lineas[0]).toBe('Salida de la PAX a las 22:00 del 11-mar: llegó después del cierre y no se usó.')
+      expect(lineas[9]).toBe('Salida de la PAX a las 22:09 del 11-mar: llegó después del cierre y no se usó.')
+      expect(lineas[10]).toBe('Y 11 salidas tardías más que no se usaron.')
+    } finally {
+      await prisma.activityLog.deleteMany({ where: { id: { in: creados } } })
+      for (const t of antes)
+        await prisma.timeEntry.update({ where: { id: t.id }, data: { salidaOlvidada: false, autoClockOut: t.autoClockOut } })
+    }
+  })
+
   it('el filtro de estado deja sólo a quien sigue dentro', async () => {
     const { staff } = await svc.getStaffAttendance(orgId, DIA, undefined, 'ACTIVE')
     expect((staff as Array<any>).map(r => r.id).sort()).toEqual([beto, carla].sort())

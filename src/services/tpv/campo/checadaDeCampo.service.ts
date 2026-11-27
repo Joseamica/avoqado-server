@@ -265,7 +265,9 @@ export async function registrarSalidaDeCampo(q: Quien, v: SalidaDeCampoBody, aho
         })
         if (count === 0) continue
         // En la misma transacción que la nota (hz:0433f0cb:D4): la bitácora de marca blanca enseña la hora real con este
-        // asiento, no con la nota, y un reenvío de esta llave contesta «repetida» sin volver a escribirlo.
+        // asiento, no con la nota, y un reenvío de esta llave contesta «repetida» sin volver a escribirlo. Si falla, nada se
+        // pierde: el celular guarda la salida y sus fotos en su cola y la reintenta con la misma llave (Codex D4 r2 #1). La
+        // PAX y el POS no reintentan así: ahí va primero la nota y después el asiento (`anotarSalidaQueNoSeUso`).
         await tx.activityLog.create({
           data: {
             staffId: q.staffId,
