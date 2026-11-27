@@ -96,8 +96,11 @@ export async function registrarEntradaDeCampo(q: Quien, v: EntradaDeCampoBody, a
     // de la PAX): es el mismo turno. Se contesta como «ya tienes una entrada» con su id, para que el celular ofrezca «Usar esa
     // entrada» y su salida real (del mismo día) reemplace el cierre.
     if (encimada?.salidaOlvidada && encimada.venueId === q.venueId && hora >= encimada.clockInTime) {
-      const tz = (await tx.venue.findUnique({ where: { id: encimada.venueId }, select: { timezone: true } }))?.timezone
-      if (hora < limiteDeUnCierre(encimada.clockInTime, tz, encimada.clockOutTime!)) {
+      const suc = await tx.venue.findUnique({
+        where: { id: encimada.venueId },
+        select: { timezone: true, settings: { select: { salidaOlvidadaCorte: true } } },
+      })
+      if (hora < limiteDeUnCierre(encimada.clockInTime, suc?.timezone, encimada.clockOutTime!, suc?.settings?.salidaOlvidadaCorte)) {
         throw new ConflictError('Ya tienes una entrada de este turno. Usa esa entrada.', 'YA_TIENE_ENTRADA', {
           timeEntryId: encimada.id,
           venueId: encimada.venueId,
@@ -226,12 +229,19 @@ export async function registrarSalidaDeCampo(q: Quien, v: SalidaDeCampoBody, aho
       // automático (así nacían los turnos de 267 h). Se anota en la checada para el gerente, con su foto, y no se estira.
       // La salida tardía legítima del MISMO día (sin red) sí lo reemplaza, como hoy. El día del turno se mide como el
       // cierre (con la salida de su horario si lo alarga), y en la zona de la sucursal.
-      const zonaDelTurno = cierreAutomatico
-        ? ((await tx.venue.findUnique({ where: { id: q.venueId }, select: { timezone: true } }))?.timezone ?? 'America/Mexico_City')
+      const sucDelTurno = cierreAutomatico
+        ? await tx.venue.findUnique({
+            where: { id: q.venueId },
+            select: { timezone: true, settings: { select: { salidaOlvidadaCorte: true } } },
+          })
         : null
+      const zonaDelTurno = cierreAutomatico ? (sucDelTurno?.timezone ?? 'America/Mexico_City') : null
       // Fijo desde el cierre (Codex r2 #3): el base o una hora después de la salida con que se cerró; editar el cuadrante
       // después no convierte una salida tardía en un turno largo.
-      const limite = cierreAutomatico && zonaDelTurno ? limiteDeUnCierre(e.clockInTime, zonaDelTurno, cierreAutomatico) : null
+      const limite =
+        cierreAutomatico && zonaDelTurno
+          ? limiteDeUnCierre(e.clockInTime, zonaDelTurno, cierreAutomatico, sucDelTurno?.settings?.salidaOlvidadaCorte)
+          : null
       if (cierreAutomatico && limite && (hora > limite || corregidaPorElGerente)) {
         // Otra salida tardía ya quedó anotada en este turno: ésta no es la misma (la misma volvió arriba, por su llave).
         if (e.llaveSalida) throw new ConflictError('Esta entrada ya tiene salida.', 'YA_TIENE_SALIDA')

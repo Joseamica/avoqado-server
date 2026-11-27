@@ -276,7 +276,10 @@ export function registerStaffTools(server: McpServer, scope: McpScope) {
         })
       }
 
-      const venue = startDate || endDate ? await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } }) : null
+      const venue = await prisma.venue.findUnique({
+        where: { id: venueId },
+        select: { timezone: true, settings: { select: { salidaOlvidadaCorte: true } } },
+      })
       const timezone = venue?.timezone || 'America/Mexico_City'
       const from = startDate ? DateTime.fromISO(startDate, { zone: timezone }).startOf('day').toJSDate() : undefined
       const to = endDate ? DateTime.fromISO(endDate, { zone: timezone }).endOf('day').toJSDate() : undefined
@@ -305,6 +308,8 @@ export function registerStaffTools(server: McpServer, scope: McpScope) {
 
       return text({
         venueId,
+        // A qué hora se da por olvidada una salida en esta sucursal (la elige en Equipo → Asistencia; de fábrica, 04:00).
+        forgottenClockOutCutoff: venue?.settings?.salidaOlvidadaCorte ?? '04:00',
         count: rows.length,
         entries: rows.map(r => ({
           timeEntryId: r.id,

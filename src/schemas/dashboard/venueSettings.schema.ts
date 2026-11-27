@@ -52,6 +52,12 @@ export const UpdateVenueSettingsSchema = z.object({
     rotatingShiftsEnabled: z.boolean().optional(),
     // «Salida olvidada» (hz:f0a89d19:D3): prendida de fábrica; el negocio la apaga en Equipo → Asistencia.
     salidaOlvidadaEnabled: z.boolean().optional(),
+    // Su hora de corte («HH:mm» en la zona de la sucursal); null regresa a la de fábrica (04:00).
+    salidaOlvidadaCorte: z
+      .string({ invalid_type_error: 'La hora de corte debe ser un texto HH:mm' })
+      .regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'La hora de corte debe ir de 00:00 a 23:59, como 22:00')
+      .nullable()
+      .optional(),
     cashReconciliationEnabled: z.boolean().optional(),
     requirePinLogin: z.boolean().optional(),
     // Propiedad de mesa (PRO): solo el mesero dueño modifica/cierra sus mesas;

@@ -53,6 +53,7 @@ export const DEFAULT_VENUE_SETTINGS = {
   maxShiftDurationEnabled: false, // Enable max shift duration enforcement
   maxShiftDurationHours: 12, // Max hours before auto clock-out
   salidaOlvidadaEnabled: true, // «Salida olvidada»: un turno sin salida se cierra solo al terminar su día (hz:f0a89d19:D3)
+  salidaOlvidadaCorte: null as string | null, // su hora de corte «HH:mm»; null = la de fábrica (04:00)
 
   // Reviews
   autoReplyReviews: false,
@@ -183,6 +184,8 @@ export async function updateVenueSettings(
     maxShiftDurationHours: DEFAULT_VENUE_SETTINGS.maxShiftDurationHours,
     salidaOlvidadaEnabled:
       typeof updates.salidaOlvidadaEnabled === 'boolean' ? updates.salidaOlvidadaEnabled : DEFAULT_VENUE_SETTINGS.salidaOlvidadaEnabled,
+    salidaOlvidadaCorte:
+      typeof updates.salidaOlvidadaCorte === 'string' ? updates.salidaOlvidadaCorte : DEFAULT_VENUE_SETTINGS.salidaOlvidadaCorte,
     autoReplyReviews: DEFAULT_VENUE_SETTINGS.autoReplyReviews,
     notifyBadReviews: DEFAULT_VENUE_SETTINGS.notifyBadReviews,
     badReviewThreshold: DEFAULT_VENUE_SETTINGS.badReviewThreshold,

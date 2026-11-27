@@ -1338,6 +1338,10 @@ model VenueSettings {
   /// siguiente entrada; queda «Salida olvidada · revisar» con la salida de su horario o en 0 horas. PRENDIDO de fábrica, para
   /// todos los negocios; el negocio lo apaga en Equipo → Asistencia. Un venue sin fila de ajustes cuenta como prendido.
   salidaOlvidadaEnabled      Boolean @default(true)
+  /// Hora de corte de la «salida olvidada» de la sucursal, «HH:mm» en su zona (founder 26-nov: «A», como Toast y Square).
+  /// null = la de fábrica (04:00 y nunca antes de 12 h). Con hora, el turno vence en el siguiente corte que caiga al menos
+  /// 1 h después de la entrada. Se elige en Equipo → Asistencia del DASHBOARD.
+  salidaOlvidadaCorte        String?
 
   // Reviews
   autoReplyReviews    Boolean  @default(false)

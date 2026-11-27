@@ -148,6 +148,7 @@ import {
   checkCortesiaEnDescuento,
 } from '../middlewares/cortesiaPidePermiso.middleware'
 import { esSuperadminDeLaSesion, esSuperadminReal } from '../services/access/rolVigente'
+import { leerCorte } from '../services/shared/salidaOlvidada'
 
 const router = express.Router()
 
@@ -6923,7 +6924,7 @@ router.get('/modules', async (req: Request, res: Response, next: NextFunction) =
     // Validate that the venue exists (basic security check)
     const venue = await prisma.venue.findUnique({
       where: { id: venueId },
-      select: { id: true, status: true },
+      select: { id: true, status: true, settings: { select: { salidaOlvidadaEnabled: true, salidaOlvidadaCorte: true } } },
     })
 
     if (!venue) {
@@ -6948,7 +6949,14 @@ router.get('/modules', async (req: Request, res: Response, next: NextFunction) =
       correlationId: req.correlationId,
     })
 
-    return res.status(200).json({ modules })
+    // La app de campo calcula sola, sin red, cuándo vence el turno (salida olvidada): necesita la regla de su sucursal. Campo
+    // nuevo y opcional: las TPV publicadas lo ignoran. Sin fila de ajustes = prendida y con el corte de fábrica (null).
+    const asistencia = {
+      salidaOlvidadaEnabled: venue.settings?.salidaOlvidadaEnabled ?? true,
+      salidaOlvidadaCorte: leerCorte(venue.settings?.salidaOlvidadaCorte) ? venue.settings!.salidaOlvidadaCorte : null,
+    }
+
+    return res.status(200).json({ modules, asistencia })
   } catch (error) {
     logger.error(`❌ [TPV MODULES] Error getting modules`, {
       correlationId: req.correlationId,

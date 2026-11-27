@@ -11,6 +11,7 @@ import {
   cerrarOlvidadasAntesDeChecar,
   cerrarSalidasOlvidadasPendientes,
   corregirSalidaOlvidada,
+  leerCorte,
   limiteDelTurno,
   salidaDeSuHorario,
   textoSalidaYaOlvidada,
@@ -44,6 +45,45 @@ describe('limiteDelTurno', () => {
 
   it('una zona inválida cae a la de México (no truena)', () => {
     expect(limiteDelTurno(mx('2026-11-03T09:00:00'), 'No/Existe')).toEqual(mx('2026-11-04T04:00:00'))
+  })
+})
+
+// La sucursal elige su hora de corte (founder, 26-nov: «A», como Toast y Square). El back-office pidió las 22:00: después de
+// esa hora el turno queda como olvidado. Con hora propia no hay mínimo de 12 h; sólo una hora desde la entrada.
+describe('leerCorte', () => {
+  it('sólo HH:mm de 00:00 a 23:59; lo demás es la regla de fábrica (null)', () => {
+    expect(leerCorte('22:00')).toEqual([22, 0])
+    expect(leerCorte('00:05')).toEqual([0, 5])
+    for (const v of [null, undefined, '', '24:00', '22:60', '7:00', ' 22:00', '22:00:00']) expect(leerCorte(v)).toBeNull()
+  })
+})
+
+describe('limiteDelTurno con la hora de corte de la sucursal', () => {
+  it('22:00: una entrada de las 10:00 o de las 14:00 vence a las 22:00 del mismo día (sin el mínimo de 12 h)', () => {
+    expect(limiteDelTurno(mx('2026-11-03T10:00:00'), MX, null, '22:00')).toEqual(mx('2026-11-03T22:00:00'))
+    expect(limiteDelTurno(mx('2026-11-03T14:00:00'), MX, null, '22:00')).toEqual(mx('2026-11-03T22:00:00'))
+  })
+
+  it('22:00: entrar a menos de una hora del corte (21:30) o después (22:30) vence en el corte del día siguiente', () => {
+    expect(limiteDelTurno(mx('2026-11-03T21:00:00'), MX, null, '22:00')).toEqual(mx('2026-11-03T22:00:00'))
+    expect(limiteDelTurno(mx('2026-11-03T21:30:00'), MX, null, '22:00')).toEqual(mx('2026-11-04T22:00:00'))
+    expect(limiteDelTurno(mx('2026-11-03T22:30:00'), MX, null, '22:00')).toEqual(mx('2026-11-04T22:00:00'))
+  })
+
+  it('con horario que termina después del corte, manda una hora después de su salida (como hoy)', () => {
+    expect(limiteDelTurno(mx('2026-11-03T14:00:00'), MX, mx('2026-11-03T22:00:00'), '22:00')).toEqual(mx('2026-11-03T23:00:00'))
+  })
+
+  it('un corte de madrugada (02:30) cruza la medianoche y usa la zona de la sucursal', () => {
+    expect(limiteDelTurno(mx('2026-11-03T18:00:00'), MX, null, '02:30')).toEqual(mx('2026-11-04T02:30:00'))
+    const tj = new Date('2026-11-03T18:00:00-08:00')
+    expect(limiteDelTurno(tj, 'America/Tijuana', null, '22:00')).toEqual(new Date('2026-11-03T22:00:00-08:00'))
+  })
+
+  it('sin hora o con una hora inválida es la regla de fábrica: 04:00 y nunca antes de 12 h', () => {
+    for (const corte of [null, undefined, '', '25:00', '7', 'abc']) {
+      expect(limiteDelTurno(mx('2026-11-03T22:00:00'), MX, null, corte)).toEqual(mx('2026-11-04T10:00:00'))
+    }
   })
 })
 
@@ -116,7 +156,10 @@ const abierta = (extra: Record<string, unknown> = {}) => ({
   clockInTime: mx('2026-11-03T09:00:00'),
   notes: null,
   breaks: [] as { id: string; startTime: Date; endTime: Date | null }[],
-  venue: { timezone: MX, settings: null as null | { salidaOlvidadaEnabled: boolean; rotatingShiftsEnabled: boolean } },
+  venue: {
+    timezone: MX,
+    settings: null as null | { salidaOlvidadaEnabled: boolean; rotatingShiftsEnabled: boolean; salidaOlvidadaCorte?: string | null },
+  },
   ...extra,
 })
 
@@ -144,7 +187,7 @@ describe('cerrarSalidasOlvidadasPendientes (el job)', () => {
     )
   })
 
-  it('la lectura tiene tope, deja fuera a los negocios que la apagaron y sólo pide las de más de 12 h', async () => {
+  it('la lectura tiene tope, deja fuera a los negocios que la apagaron y pide las de más de 1 h (el corte más temprano posible)', async () => {
     prismaMock.timeEntry.findMany.mockResolvedValue([])
     const ahora = mx('2026-11-04T04:10:00')
 
@@ -153,7 +196,34 @@ describe('cerrarSalidasOlvidadasPendientes (el job)', () => {
     const args = prismaMock.timeEntry.findMany.mock.calls[0][0] as any
     expect(args.take).toBe(500)
     expect(args.where.venue).toEqual({ OR: [{ settings: null }, { settings: { salidaOlvidadaEnabled: true } }] })
-    expect(args.where.clockInTime.lt).toEqual(new Date(ahora.getTime() - 12 * 3_600_000))
+    expect(args.where.clockInTime.lt).toEqual(new Date(ahora.getTime() - 1 * 3_600_000))
+    expect(args.select.venue.select.settings.select).toMatchObject({ salidaOlvidadaCorte: true })
+  })
+
+  it('con corte de las 22:00 cierra a las 22:05 una entrada de las 14:00 (8 h), en 0 h y marcada para revisar', async () => {
+    const e = abierta({
+      clockInTime: mx('2026-11-03T14:00:00'),
+      venue: { timezone: MX, settings: { salidaOlvidadaEnabled: true, rotatingShiftsEnabled: false, salidaOlvidadaCorte: '22:00' } },
+    })
+    prismaMock.timeEntry.findMany.mockResolvedValue([e] as any)
+    prismaMock.staffVenue.findFirst.mockResolvedValue(null)
+    prismaMock.timeEntry.updateMany.mockResolvedValue({ count: 1 })
+
+    await expect(cerrarSalidasOlvidadasPendientes(mx('2026-11-03T22:05:00'))).resolves.toEqual({ cerradas: 1, errores: 0 })
+    expect(prismaMock.timeEntry.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ totalHours: 0, salidaOlvidada: true }) }),
+    )
+  })
+
+  it('con corte de las 22:00, a las 21:50 todavía no toca la entrada de las 14:00', async () => {
+    const e = abierta({
+      clockInTime: mx('2026-11-03T14:00:00'),
+      venue: { timezone: MX, settings: { salidaOlvidadaEnabled: true, rotatingShiftsEnabled: false, salidaOlvidadaCorte: '22:00' } },
+    })
+    prismaMock.timeEntry.findMany.mockResolvedValue([e] as any)
+
+    await expect(cerrarSalidasOlvidadasPendientes(mx('2026-11-03T21:50:00'))).resolves.toEqual({ cerradas: 0, errores: 0 })
+    expect(prismaMock.timeEntry.updateMany).not.toHaveBeenCalled()
   })
 
   it('antes del límite no toca nada', async () => {

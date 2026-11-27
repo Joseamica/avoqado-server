@@ -38,3 +38,22 @@ describe('UpdateVenueSettingsSchema cash reconciliation opt-in', () => {
     expect(parseBody({ cashReconciliationEnabled: 'true' }).success).toBe(false)
   })
 })
+
+// La hora de corte de la «salida olvidada» por sucursal (founder 26-nov: «A»).
+describe('UpdateVenueSettingsSchema salidaOlvidadaCorte', () => {
+  it.each(['22:00', '04:00', '00:00', '23:59'])('acepta %s', v => {
+    const r = parseBody({ salidaOlvidadaCorte: v })
+    expect(r.success).toBe(true)
+    if (r.success) expect(r.data.body.salidaOlvidadaCorte).toBe(v)
+  })
+  it('null regresa a la de fábrica', () => {
+    const r = parseBody({ salidaOlvidadaCorte: null })
+    expect(r.success).toBe(true)
+    if (r.success) expect(r.data.body.salidaOlvidadaCorte).toBeNull()
+  })
+  it.each(['24:00', '22:60', '7:00', '22', 'diez', ''])('rechaza %s con mensaje en español', v => {
+    const r = parseBody({ salidaOlvidadaCorte: v })
+    expect(r.success).toBe(false)
+    if (!r.success) expect(r.error.issues[0].message).toBe('La hora de corte debe ir de 00:00 a 23:59, como 22:00')
+  })
+})
