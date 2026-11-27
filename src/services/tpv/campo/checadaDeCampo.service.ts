@@ -157,8 +157,6 @@ export async function registrarSalidaDeCampo(q: Quien, v: SalidaDeCampoBody, aho
   }
   const { hora, origen } = horaDe(v, ahora)
   let cerradas: SalidaOlvidadaCerrada[] = []
-  // `as`: se asigna dentro de la transacción y TypeScript no lo sigue (sin esto lo estrecha a `null`).
-  let noUsada = null as { cierre: Date; limite: Date } | null
   const { resultado, reemplazo } = await prisma.$transaction(async tx => {
     await candado(tx, q.staffId)
 
@@ -266,7 +264,24 @@ export async function registrarSalidaDeCampo(q: Quien, v: SalidaDeCampoBody, aho
           },
         })
         if (count === 0) continue
-        noUsada = { cierre: cierreAutomatico, limite }
+        // En la misma transacción que la nota (hz:0433f0cb:D4): la bitácora de marca blanca enseña la hora real con este
+        // asiento, no con la nota, y un reenvío de esta llave contesta «repetida» sin volver a escribirlo.
+        await tx.activityLog.create({
+          data: {
+            staffId: q.staffId,
+            venueId: q.venueId,
+            action: 'TIME_ENTRY_LATE_CLOCKOUT_NOT_USED',
+            entity: 'TimeEntry',
+            entityId: e.id,
+            data: {
+              cierreAutomatico: cierreAutomatico.toISOString(),
+              limiteDelTurno: limite.toISOString(),
+              salidaDelCelular: hora.toISOString(),
+              origenHora: origen,
+              llaveSalida: v.llave,
+            },
+          },
+        })
         return {
           resultado: {
             timeEntryId: e.id,
@@ -369,22 +384,6 @@ export async function registrarSalidaDeCampo(q: Quien, v: SalidaDeCampoBody, aho
   })
 
   anotarCierres(cerradas)
-  if (noUsada) {
-    await logAction({
-      staffId: q.staffId,
-      venueId: q.venueId,
-      action: 'TIME_ENTRY_LATE_CLOCKOUT_NOT_USED',
-      entity: 'TimeEntry',
-      entityId: resultado.timeEntryId,
-      data: {
-        cierreAutomatico: noUsada.cierre.toISOString(),
-        limiteDelTurno: noUsada.limite.toISOString(),
-        salidaDelCelular: hora.toISOString(),
-        origenHora: origen,
-        llaveSalida: v.llave,
-      },
-    })
-  }
   if (reemplazo) {
     await logAction({
       staffId: q.staffId,

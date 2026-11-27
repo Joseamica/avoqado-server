@@ -420,6 +420,19 @@ describe('anotarSalidaQueNoSeUso (PAX y POS tras el cierre)', () => {
     expect(prismaMock.timeEntry.updateMany.mock.calls[0][0].data).toEqual(
       expect.objectContaining({ depositPhotoUrl: 'https://x/voucher.jpg' }),
     )
+    // D4: el asiento con la hora real va en la misma transacción que la nota (lo lee la bitácora de marca blanca).
+    expect(prismaMock.$transaction).toHaveBeenCalled()
+    expect(prismaMock.activityLog.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        staffId: 's',
+        venueId: 'v',
+        action: 'TIME_ENTRY_LATE_CLOCKOUT_NOT_USED',
+        entity: 'TimeEntry',
+        entityId: 'te-1',
+        data: expect.objectContaining({ origen: 'PAX', salidaRecibida: expect.any(String) }),
+      }),
+    })
+    expect(mockLogAction).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'TIME_ENTRY_LATE_CLOCKOUT_NOT_USED' }))
   })
 
   // FLAUTAS_C (revisión de apps viejas, 21-nov): la salida tardía de la PAX o del POS tiraba el GPS; en PlayTelecom el GPS
@@ -448,6 +461,7 @@ describe('anotarSalidaQueNoSeUso (PAX y POS tras el cierre)', () => {
 
     expect(t).not.toContain('quedaron anotadas')
     expect(t).toContain('no se pudo anotar')
+    expect(prismaMock.activityLog.create).not.toHaveBeenCalled() // sin nota, sin asiento (D4)
   })
 })
 

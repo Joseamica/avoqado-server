@@ -789,8 +789,9 @@ describe('getStaffAttendance — efectivo por checada agregado en Postgres', () 
       const sinAsientos = await leer()
       expect(sinAsientos.allTimeEntries[0]).toMatchObject({ id: e2.id, salidaOlvidada: true, notaSalidaOlvidada: null })
 
-      // Lo que sí escribió el SERVIDOR, en el orden en que llegó: la app de campo (`checadaDeCampo.service.ts`) y la PAX
-      // (`anotarSalidaQueNoSeUso`). No cuentan: el mismo id con la sucursal de otra organización y uno sin hora legible.
+      // Lo que sí escribió el SERVIDOR: la app de campo (`checadaDeCampo.service.ts`, aquí con la hora de llegada porque el
+      // reloj del celular no servía), la PAX y el POS (`anotarSalidaQueNoSeUso`); el del POS llegó al último pero su hora es la
+      // más temprana. No cuentan: el mismo id con la sucursal de otra organización y uno sin hora legible.
       const porCrear: Array<[string, string, Record<string, unknown>]> = [
         [
           v1,
@@ -798,7 +799,7 @@ describe('getStaffAttendance — efectivo por checada agregado en Postgres', () 
           {
             cierreAutomatico: E2_OUT.toISOString(),
             salidaDelCelular: '2025-03-12T04:40:00.000Z',
-            origenHora: 'CELULAR',
+            origenHora: 'SERVIDOR',
             llaveSalida: 'llave-1',
           },
         ],
@@ -807,6 +808,11 @@ describe('getStaffAttendance — efectivo por checada agregado en Postgres', () 
           '2025-03-12T04:46:00.000Z',
           { origen: 'PAX', salidaRecibida: '2025-03-12T04:45:00.000Z', cierreAutomatico: E2_OUT.toISOString(), gps: null },
         ],
+        [
+          v1,
+          '2025-03-12T04:50:00.000Z',
+          { origen: 'POS', salidaRecibida: '2025-03-12T04:30:00.000Z', cierreAutomatico: E2_OUT.toISOString(), gps: null },
+        ],
         [vB, '2025-03-12T04:47:00.000Z', { salidaDelCelular: '2025-03-12T05:00:00.000Z' }],
         [v1, '2025-03-12T04:48:00.000Z', { origen: 'PAX', salidaRecibida: 'no-es-fecha' }],
       ]
@@ -814,12 +820,14 @@ describe('getStaffAttendance — efectivo por checada agregado en Postgres', () 
       const a = await leer()
       expect(a.venueTimezone).toBeTruthy() // la hora que teclea el gerente es la de la sucursal de la checada (Codex D3 r1 #1)
       const [olvidada, normal] = a.allTimeEntries // la más reciente primero
-      // Sólo la hora de cada salida tardía, en la zona de la sucursal; nunca las notas (las ve quien sólo lee la bitácora; D3 r1 #3).
+      // Sólo la hora de cada salida tardía, en la zona de la sucursal y por hora; nunca las notas (las ve quien sólo lee la
+      // bitácora; D3 r1 #3).
       expect(olvidada).toMatchObject({
         id: e2.id,
         salidaOlvidada: true,
         notaSalidaOlvidada:
-          'Salida del celular a las 22:40 del 11-mar: llegó después del cierre y no se usó.\n' +
+          'Salida del POS a las 22:30 del 11-mar: llegó después del cierre y no se usó.\n' +
+          'Salida del celular recibida a las 22:40 del 11-mar: llegó después del cierre y no se usó.\n' +
           'Salida de la PAX a las 22:45 del 11-mar: llegó después del cierre y no se usó.',
       })
       expect(olvidada.notes).toBeUndefined()
