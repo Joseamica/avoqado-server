@@ -822,6 +822,8 @@ async function apartarLugar(
   /** El precio verificado en el PASO 4: el lugar nuevo lo guarda y, retomado después de publicar otra versión, cobra con él. */
   stripePriceId: string,
 ): Promise<{ id: string; reused: boolean; stripePriceId: string | null }> {
+  // B4: los nombres para el 409 OFFER_CHANGED se leen ANTES de la transacción (nunca otra conexión con la transacción abierta)
+  const nombres = await nombresDeLosPlanes()
   return prisma.$transaction(async tx => {
     const vivo = await tx.launchCampaignRedemption.findFirst({
       where: { organizationId, status: { not: REDEMPTION_STATUS.RELEASED } },
@@ -837,7 +839,7 @@ async function apartarLugar(
       // snapshot es lo que el cliente consintió y NUNCA se reescribe.
       if (vivo.campaignId !== campaign.id || vivo.offerVersion !== campaign.offerVersion) {
         throw new ConflictError('La oferta cambió. Revísala antes de pagar.', 'OFFER_CHANGED', {
-          launchOffer: buildLaunchOfferView(toOfferRow(campaign), now, await nombresDeLosPlanes()),
+          launchOffer: buildLaunchOfferView(toOfferRow(campaign), now, nombres),
         })
       }
       return { id: vivo.id, reused: true, stripePriceId: vivo.stripePriceId ?? null }
