@@ -104,6 +104,8 @@ export async function createCreditPack(
     validityDays?: number
     maxPerCustomer?: number
     displayOrder?: number
+    badgeText?: string | null
+    badgeIcon?: string | null
     items: RenglonPedido[]
   },
 ) {
@@ -167,6 +169,9 @@ export async function createCreditPack(
       validityDays: data.validityDays,
       maxPerCustomer: data.maxPerCustomer,
       displayOrder: data.displayOrder || 0,
+      badgeText: data.badgeText || null,
+      // Un ícono sin etiqueta no se guarda.
+      badgeIcon: data.badgeText ? (data.badgeIcon ?? null) : null,
       stripeProductId,
       stripePriceId,
       items: {
@@ -205,6 +210,8 @@ export async function updateCreditPack(
     maxPerCustomer?: number | null
     displayOrder?: number
     active?: boolean
+    badgeText?: string | null
+    badgeIcon?: string | null
     items?: RenglonPedido[]
   },
 ) {
@@ -317,6 +324,11 @@ export async function updateCreditPack(
         ...(data.maxPerCustomer !== undefined && { maxPerCustomer: data.maxPerCustomer }),
         ...(data.displayOrder !== undefined && { displayOrder: data.displayOrder }),
         ...(data.active !== undefined && { active: data.active }),
+        // Destacado: sin las llaves no se toca (no pisa lo que otra persona editó); sin texto, tampoco queda el ícono.
+        ...(data.badgeText !== undefined && { badgeText: data.badgeText || null }),
+        ...((data.badgeIcon !== undefined || (data.badgeText !== undefined && !data.badgeText)) && {
+          badgeIcon: data.badgeText !== undefined && !data.badgeText ? null : data.badgeIcon,
+        }),
         ...(stripePriceId && { stripePriceId }),
       },
       include: {

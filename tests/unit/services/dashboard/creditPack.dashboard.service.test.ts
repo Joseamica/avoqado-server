@@ -280,7 +280,7 @@ describe('Credit Pack Dashboard Service', () => {
       prismaMock.product.findMany.mockResolvedValue([{ id: 'product-123' }, { id: 'product-456' }])
       prismaMock.creditPack.create.mockResolvedValue(expectedPack)
 
-      const result = await createCreditPack('venue-123', createData)
+      const result = await createCreditPack('venue-123', { ...createData, badgeText: 'Más popular', badgeIcon: 'star' })
 
       expect(result.id).toBe('pack-123')
       expect(result.stripeProductId).toBe('prod_test123')
@@ -298,6 +298,8 @@ describe('Credit Pack Dashboard Service', () => {
         data: expect.objectContaining({
           venueId: 'venue-123',
           name: 'Pack Fitness Premium',
+          badgeText: 'Más popular',
+          badgeIcon: 'star',
           stripeProductId: 'prod_test123',
           stripePriceId: 'price_test123',
           items: {
@@ -448,6 +450,39 @@ describe('Credit Pack Dashboard Service', () => {
 
       expect(result.name).toBe('Pack Premium Actualizado')
       expect(prismaMock.$transaction).toHaveBeenCalled()
+    })
+
+    it('quitar el texto del destacado quita también el ícono', async () => {
+      prismaMock.creditPack.findFirst.mockResolvedValue(createMockPack({ price: new Decimal(600) }))
+      prismaMock.creditPack.update.mockResolvedValue(createMockPack())
+
+      await updateCreditPack('venue-123', 'pack-123', { badgeText: null })
+
+      expect(prismaMock.creditPack.update).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ badgeText: null, badgeIcon: null }) }),
+      )
+    })
+
+    it('guarda el destacado completo', async () => {
+      prismaMock.creditPack.findFirst.mockResolvedValue(createMockPack({ price: new Decimal(600) }))
+      prismaMock.creditPack.update.mockResolvedValue(createMockPack())
+
+      await updateCreditPack('venue-123', 'pack-123', { badgeText: 'Más popular', badgeIcon: 'star' })
+
+      expect(prismaMock.creditPack.update).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ badgeText: 'Más popular', badgeIcon: 'star' }) }),
+      )
+    })
+
+    it('un cambio sin las llaves del destacado no las toca', async () => {
+      prismaMock.creditPack.findFirst.mockResolvedValue(createMockPack({ price: new Decimal(600) }))
+      prismaMock.creditPack.update.mockResolvedValue(createMockPack())
+
+      await updateCreditPack('venue-123', 'pack-123', { name: 'Otro nombre' })
+
+      const data = (prismaMock.creditPack.update.mock.calls[0][0] as any).data
+      expect(data).not.toHaveProperty('badgeText')
+      expect(data).not.toHaveProperty('badgeIcon')
     })
 
     it('guarda active (interruptor «A la venta»), igual que Desactivar', async () => {

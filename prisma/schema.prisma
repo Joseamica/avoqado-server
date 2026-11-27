@@ -16663,6 +16663,10 @@ model CreditPack {
   active         Boolean @default(true)
   displayOrder   Int     @default(0)
 
+  // Destacado del paquete («Más popular»): etiqueta corta e ícono de una lista fija (validada en Zod, no en la base).
+  badgeText String? @db.VarChar(40)
+  badgeIcon String? @db.VarChar(20)
+
   // Stripe (one-time product/price)
   stripeProductId String?
   stripePriceId   String?

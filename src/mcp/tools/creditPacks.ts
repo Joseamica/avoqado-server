@@ -53,6 +53,7 @@ export function registerCreditPackTools(server: McpServer, scope: McpScope) {
           currency: p.currency,
           active: p.active,
           sold: p._count.purchases,
+          badge: p.badgeText ? { text: p.badgeText, icon: p.badgeIcon ?? null } : null,
           includes: p.items.map(renglonDelPaquete),
         })),
       })
