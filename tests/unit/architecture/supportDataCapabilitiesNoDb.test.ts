@@ -12,9 +12,10 @@
  *
  * LO PERMITIDO (lista cerrada; lo demás falla). Una capacidad (`capabilities/**`) importa valores sólo de:
  *  (a) servicios del panel: `src/services/{dashboard,shared,legacy}/**` (menos `legacy/legacyPool.ts`);
- *  (b) los módulos de la B sin base: `support/data/{catalog,check,format,params,paymentText,readRefusal,sanitize,texts}.ts`
- *      (`paymentText.ts`, los textos de un cobro que comparten C2 y C7, lo creó C2; `readRefusal.ts`, `DataReadRefusal` sin dependencias
- *      para que una capacidad no se importe en ciclo con el catálogo, C6 r1);
+ *  (b) los módulos de la B sin base: `support/data/{catalog,check,format,params,paymentText,planText,readRefusal,sanitize,texts}.ts`
+ *      (`paymentText.ts`, los textos de un cobro que comparten C2 y C7, lo creó C2; `planText.ts`, el texto de «Tu plan» que comparten
+ *      C5 y el editor de la oferta, que así rechaza un nombre que el bot no podría decir, lo creó B4; `readRefusal.ts`, `DataReadRefusal`
+ *      sin dependencias para que una capacidad no se importe en ciclo con el catálogo, C6 r1);
  *  (c) los utils puros de UTILS, uno por uno (hoy `src/utils/datetime.ts` y `src/utils/venueDateKeys.ts`), menos lo de UTIL_BANNED
  *      (de `datetime.ts`, `venueStartOfDay`/`venueEndOfDay`: el día sale de `params.ts`, README regla 8, D19);
  *  (d) `date-fns`, `date-fns-tz`, y `@prisma/client` sólo para tipos, sus enums (`PaymentMethod.CASH`, `$Enums`) y `Prisma.Decimal`.
@@ -109,7 +110,7 @@ const READ_REFUSAL = 'src/services/support/data/readRefusal.ts'
 /** (a) Los servicios del panel: lo ÚNICO por lo que una capacidad lee datos. */
 const PANEL = ['src/services/dashboard/', 'src/services/shared/', 'src/services/legacy/']
 /** (b) Los módulos de la B, sin base, con los que una capacidad arma su respuesta. */
-const PURE = ['catalog', 'check', 'format', 'params', 'paymentText', 'readRefusal', 'sanitize', 'texts'].map(
+const PURE = ['catalog', 'check', 'format', 'params', 'paymentText', 'planText', 'readRefusal', 'sanitize', 'texts'].map(
   m => `src/services/support/data/${m}.ts`,
 )
 /** Lo que la guardia nombra y todavía no existe. Vacío: `paymentText.ts` lo creó C2 y `cashDrawerWho.dashboard.service.ts`, C8. */
@@ -128,6 +129,11 @@ const PANEL_NO_DATA = [
     file: 'src/services/dashboard/cashDrawerWho.dashboard.service.ts',
     name: 'cashDrawerIndexesReady',
     why: 'C8 (available): si ya existen tres índices, en el catálogo de Postgres; ningún dato de un negocio',
+  },
+  {
+    file: 'src/services/dashboard/planState.service.ts',
+    name: 'nombresDeLosPlanesDeTuPlan',
+    why: 'C5 (B4): el nombre de cada plan de la versión vigente del editor; un dato de la plataforma, ningún dato de un negocio',
   },
 ]
 const noData = (file: string | undefined, name: string | null | undefined) =>

@@ -1,7 +1,6 @@
-import { getPlanState, type PlanState } from '@/services/dashboard/planState.service'
-import { nombresDeLosPlanes, type NombresDeLosPlanes } from '@/services/billing/nombresDeLosPlanes'
+import { getPlanState, nombresDeLosPlanesDeTuPlan } from '@/services/dashboard/planState.service'
 import type { DataCapability } from '../catalog'
-import { renderPlan, withoutPrice } from '../planText'
+import { renderPlan, type PlanData } from '../planText'
 
 /**
  * C5 · «Estado del plan»: lo que dice «Tu plan» en Facturación › Suscripciones del panel, leído con el mismo servicio que su ruta
@@ -22,9 +21,7 @@ import { renderPlan, withoutPrice } from '../planText'
  */
 export const STRIPE_TIMEOUT_MS = 3_000
 
-export { renderPlan, withoutPrice }
-
-export const planStatus: DataCapability<Record<string, never>, PlanState & { nombres?: NombresDeLosPlanes }> = {
+export const planStatus: DataCapability<Record<string, never>, PlanData> = {
   key: 'plan_status',
   label: 'el estado de tu plan',
   object: 'el estado del plan',
@@ -36,7 +33,7 @@ export const planStatus: DataCapability<Record<string, never>, PlanState & { nom
   read: async scope => ({
     ...(await getPlanState(scope.venueId, { skipPauseOffer: true, stripeTimeoutMs: STRIPE_TIMEOUT_MS })),
     // B4: el nombre de cada plan es el de la versión vigente (nunca falla: sin versión, el de hoy)
-    nombres: await nombresDeLosPlanes(),
+    nombres: await nombresDeLosPlanesDeTuPlan(),
   }),
   render: (scope, _params, state) => renderPlan(scope, state),
 }

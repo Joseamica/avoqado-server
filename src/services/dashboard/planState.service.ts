@@ -36,6 +36,7 @@ import { isLastDiscountedPeriod } from '../billing/ultimoPeriodoConDescuento'
 import { BASIC_PLAN_DEFINITION_WHERE, isBasicPlanDefinition } from '@/services/launchCampaigns/basicPlanAccess'
 import { activeGrantWhere } from '@/services/access/capabilityGrants.service'
 import { numeroDeLaVigente } from '../billing/planOffer'
+import { nombresDeLosPlanes, type NombresDeLosPlanes } from '../billing/nombresDeLosPlanes'
 import { exigirCompraNuevaPermitida } from '../billing/cotizacionDeLaOferta'
 
 /** Win-back coupon offered in the cancellation confirmation email (see scripts/seed-retention-coupon.ts). */
@@ -427,6 +428,15 @@ async function findPlanProFeature(venueId: string) {
     take: PAID_PLAN_TIER_CODES.length,
   })
   return elegirFilaDelPlan(filas)
+}
+
+/**
+ * B4: el nombre de cada plan que dice «Tu plan» (el panel lo lee de `/public/plan-offer`, con la misma regla): el de la versión
+ * vigente del editor (≥ 2), o el de hoy. Es un dato de la plataforma, ningún dato de un negocio, y nunca lanza. Lo lee el bot
+ * (`plan_status`) por aquí, como lee todo lo demás de «Tu plan».
+ */
+export function nombresDeLosPlanesDeTuPlan(): Promise<NombresDeLosPlanes> {
+  return nombresDeLosPlanes()
 }
 
 /**

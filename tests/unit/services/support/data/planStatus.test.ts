@@ -3,13 +3,18 @@
  * la base de verdad (lo que lee getPlanState, Stripe que no contesta, el puesto, la oferta de pausa) está en
  * `tests/integration/support/data/planStatus.integration.test.ts`.
  */
-jest.mock('@/services/dashboard/planState.service', () => ({ getPlanState: jest.fn() }))
+// El bot lee los nombres por el servicio del panel (B4); aquí ese servicio pasa por el de los avisos, también fingido
+jest.mock('@/services/dashboard/planState.service', () => ({
+  getPlanState: jest.fn(),
+  nombresDeLosPlanesDeTuPlan: () => jest.requireMock('@/services/billing/nombresDeLosPlanes').nombresDeLosPlanes(),
+}))
 jest.mock('@/services/billing/nombresDeLosPlanes', () => ({
   nombresDeLosPlanes: jest.fn().mockResolvedValue({ FREE: 'Gratis', PRO: 'Pro', PREMIUM: 'Premium' }),
 }))
 
 import { getPlanState, type PlanOrigin, type PlanState } from '@/services/dashboard/planState.service'
-import { planStatus, renderPlan, withoutPrice } from '@/services/support/data/capabilities/planStatus'
+import { planStatus } from '@/services/support/data/capabilities/planStatus'
+import { renderPlan, withoutPrice } from '@/services/support/data/planText'
 import type { DataRequest, DataScope } from '@/services/support/data/catalog'
 import { checkRendered, template } from '@/services/support/data/check'
 import { SUPPORT_DATA_OMITTED } from '@/services/support/data/texts'

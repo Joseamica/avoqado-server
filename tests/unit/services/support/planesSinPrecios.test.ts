@@ -3,7 +3,11 @@
  * pueden quedar viejos): remiten a «Tu plan». El bot nombra los planes por la versión vigente, y el editor rechaza un nombre que
  * el bot no podría decir.
  */
-jest.mock('@/services/dashboard/planState.service', () => ({ getPlanState: jest.fn() }))
+// El bot lee los nombres por el servicio del panel (B4); aquí ese servicio pasa por el de los avisos, también fingido
+jest.mock('@/services/dashboard/planState.service', () => ({
+  getPlanState: jest.fn(),
+  nombresDeLosPlanesDeTuPlan: () => jest.requireMock('@/services/billing/nombresDeLosPlanes').nombresDeLosPlanes(),
+}))
 jest.mock('@/services/billing/nombresDeLosPlanes', () => ({ nombresDeLosPlanes: jest.fn() }))
 
 import fs from 'fs'
