@@ -1,3 +1,4 @@
+import { Prisma } from '@prisma/client'
 import logger from '@/config/logger'
 import prisma from '@/utils/prismaClient'
 import { logAction } from '@/services/dashboard/activity-log.service'
@@ -19,7 +20,7 @@ export async function ligarCuentaConGoogle(
   google: { sub: string; picture?: string | null },
   organizationId: string | null,
 ): Promise<{ aplicada: boolean; contrasenaAnulada: boolean }> {
-  const data: Record<string, unknown> = { lastLoginAt: new Date() }
+  const data: Prisma.StaffUpdateManyMutationInput = { lastLoginAt: new Date() }
   if (!cuenta.googleId) data.googleId = google.sub
   if (!cuenta.photoUrl && google.picture) data.photoUrl = google.picture
   if (!cuenta.emailVerified) {

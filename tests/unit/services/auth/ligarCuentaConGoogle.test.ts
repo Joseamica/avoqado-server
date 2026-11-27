@@ -66,6 +66,18 @@ describe('ligarCuentaConGoogle', () => {
     expect(warn).toHaveBeenCalled()
   })
 
+  it('con googleId existente y sin verificar: verifica y anula la contraseña, sin pisar el googleId', async () => {
+    const r = await ligarCuentaConGoogle(
+      cuenta({ googleId: 'g-viejo', emailVerified: false, password: 'hash' }),
+      { sub: 'g-otro' },
+      'org-1',
+    )
+    expect(r).toEqual({ aplicada: true, contrasenaAnulada: true })
+    const { data } = updateMany.mock.calls[0][0]
+    expect(data.googleId).toBeUndefined()
+    expect(data).toEqual(expect.objectContaining({ emailVerified: true, password: null }))
+  })
+
   it('ya ligada y verificada: no escribe', async () => {
     const r = await ligarCuentaConGoogle(cuenta({ googleId: 'g-1' }), { sub: 'g-1' }, 'org-1')
     expect(r).toEqual({ aplicada: true, contrasenaAnulada: false })
