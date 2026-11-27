@@ -374,6 +374,9 @@ export async function cerrarSalidasOlvidadasDe(
   // Los candados de la regla de TODAS sus sucursales, en orden de id, antes de cerrar (Codex 26-nov r4 #4): dos personas con
   // turnos abiertos en A y B en distinto orden ya no se esperan en círculo. El de cada cierre después es el mismo (re-entrante).
   // Sólo las sucursales con un turno que ya pasó su límite BASE (r5 #3): una salida normal de un turno vigente no hace fila.
+  // ponytail: un turno pasado el corte pero vigente por su horario sí lo toma; con muchas checadas así a la vez en UNA
+  // sucursal podrían esperar conexiones (Codex 26-nov r6 #5). Con 1-2 promotores por tienda no pasa; si crece, leer el
+  // horario antes del candado.
   const vencidas = abiertas.filter(
     e => ahora >= limiteDelTurno(e.clockInTime, e.venue.timezone, null, e.venue.settings?.salidaOlvidadaCorte),
   )
