@@ -126,6 +126,7 @@ import {
 } from '../middlewares/pin-login-rate-limit.middleware'
 import { capturarVenueDeLaRuta, registerDeviceMiddleware } from '../middlewares/registerDevice.middleware'
 import { validateRequest } from '../middlewares/validation'
+import { googleLoginSchema } from '../schemas/mobile/googleLogin.mobile.schema'
 import { recordFastPaymentParamsSchema, recordPaymentBodySchema } from '../schemas/tpv.schema'
 import {
   gatewayHeartbeatSchema,
@@ -254,6 +255,44 @@ router.param('venueId', capturarVenueDeLaRuta)
  *         description: Account locked, email not verified, or no venue access
  */
 router.post('/auth/login', authMobileController.login)
+
+/**
+ * @openapi
+ * /api/v1/mobile/auth/google/config:
+ *   get:
+ *     tags: [Mobile - Authentication]
+ *     summary: Datos públicos para entrar al POS con Google
+ *     description: Audiencia de ANDROID, nonce de un solo uso y client id de escritorio. Nunca devuelve secretos.
+ *     responses:
+ *       200:
+ *         description: Config de Google para el POS
+ *       503:
+ *         description: Entrar con Google no está disponible
+ */
+router.get('/auth/google/config', authMobileController.googleConfig)
+
+/**
+ * @openapi
+ * /api/v1/mobile/auth/google:
+ *   post:
+ *     tags: [Mobile - Authentication]
+ *     summary: Entrar al POS con Google
+ *     description: |
+ *       PUBLIC. Manda `idToken` (ANDROID) o `code` + `codeVerifier` + `redirectUri` (WINDOWS), nunca los dos.
+ *       Misma respuesta que `/auth/login`.
+ *     responses:
+ *       200:
+ *         description: Login exitoso (accessToken, refreshToken, user, selectedVenueId)
+ *       400:
+ *         description: Cuerpo inválido
+ *       401:
+ *         description: Google no pudo confirmarse o la cuenta no coincide
+ *       404:
+ *         description: No hay cuenta de Avoqado con ese correo
+ *       503:
+ *         description: Entrar con Google no está disponible
+ */
+router.post('/auth/google', validateRequest(googleLoginSchema), authMobileController.googleLogin)
 
 /**
  * @openapi

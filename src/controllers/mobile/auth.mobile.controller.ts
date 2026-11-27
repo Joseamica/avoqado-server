@@ -13,6 +13,8 @@ import { logControllerError } from '../../errors/logControllerError'
 import * as authMobileService from '../../services/mobile/auth.mobile.service'
 import { requestPasswordReset } from '../../services/dashboard/auth.service'
 import { asegurarAparatoAlEntrar } from '../../middlewares/registerDevice.middleware'
+import { entrarAlPosConGoogle, type PaseDelPos } from '../../services/mobile/googleLogin.mobile.service'
+import { configDeGoogleParaElPos } from '../../services/auth/google/paseDeGoogleDelPos'
 
 // ============================================================================
 // EMAIL/PASSWORD AUTHENTICATION
@@ -58,6 +60,48 @@ export const login = async (req: Request, res: Response, next: NextFunction) => 
     })
   } catch (error) {
     logControllerError('mobile login', error)
+    next(error)
+  }
+}
+
+/**
+ * Entrar al POS con Google (hz:6bfcd3a1:D1). PUBLIC; el cuerpo ya viene validado por `googleLoginSchema`.
+ * Misma respuesta que `login`.
+ *
+ * @route POST /api/v1/mobile/auth/google
+ */
+export const googleLogin = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { rememberMe, ...pase } = req.body as { rememberMe?: boolean } & PaseDelPos
+    const deviceId = typeof req.headers['x-device-id'] === 'string' ? req.headers['x-device-id'] : undefined
+
+    const result = await entrarAlPosConGoogle(pase as PaseDelPos, rememberMe, deviceId)
+    await asegurarAparatoAlEntrar(req, result.selectedVenueId, result.staff?.id)
+
+    res.status(200).json({
+      success: true,
+      message: 'Login exitoso',
+      user: result.staff,
+      accessToken: result.accessToken,
+      refreshToken: result.refreshToken,
+      selectedVenueId: result.selectedVenueId,
+    })
+  } catch (error) {
+    logControllerError('mobile google login', error)
+    next(error)
+  }
+}
+
+/**
+ * Lo que el POS necesita para pedirle el pase a Google (sin secretos).
+ *
+ * @route GET /api/v1/mobile/auth/google/config
+ */
+export const googleConfig = async (_req: Request, res: Response, next: NextFunction) => {
+  try {
+    res.status(200).json({ success: true, ...configDeGoogleParaElPos() })
+  } catch (error) {
+    logControllerError('mobile google config', error)
     next(error)
   }
 }
