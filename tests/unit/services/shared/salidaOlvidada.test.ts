@@ -410,9 +410,11 @@ describe('anotarSalidaQueNoSeUso (PAX y POS tras el cierre)', () => {
     venue: { timezone: MX },
   }
 
-  it('pega el voucher a la checada marcada y lo dice', async () => {
+  it('pega el voucher a la checada marcada y lo dice, sin esperar al asiento (Codex D4 r3 #3)', async () => {
     prismaMock.timeEntry.findFirst.mockResolvedValue(marcada as any)
     prismaMock.timeEntry.updateMany.mockResolvedValue({ count: 1 })
+    // Un asiento que nunca termina no detiene la respuesta: la PAX no debe ver un error con la evidencia ya guardada.
+    mockLogAction.mockReturnValueOnce(new Promise(() => {}))
 
     const t = await anotarSalidaQueNoSeUso({ staffId: 's', venueId: 'v', origen: 'PAX', depositPhotoUrl: 'https://x/voucher.jpg' })
 
@@ -421,7 +423,7 @@ describe('anotarSalidaQueNoSeUso (PAX y POS tras el cierre)', () => {
       expect.objectContaining({ depositPhotoUrl: 'https://x/voucher.jpg' }),
     )
     // D4 (Codex r2 #1, founder «A»): primero la nota con su evidencia y después el asiento con la hora real, que lee la
-    // bitácora de marca blanca; si el asiento fallara, la evidencia ya quedó guardada (`logAction` nunca lanza).
+    // bitácora de marca blanca; si el asiento fallara o tardara, la evidencia ya quedó guardada (`logAction` nunca lanza).
     expect(mockLogAction).toHaveBeenCalledWith(
       expect.objectContaining({
         staffId: 's',

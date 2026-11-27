@@ -838,7 +838,7 @@ describe('getStaffAttendance — efectivo por checada agregado en Postgres', () 
     }
   })
 
-  it('una checada con muchas salidas tardías no deja sin nota a otra: tope por checada y aviso de las que faltan (Codex D4 r2 #2)', async () => {
+  it('el tope es por checada y por hora de la SALIDA, sólo con las legibles, y dice cuántas faltan (Codex D4 r2 #2 y r3 #1-#2)', async () => {
     const leer = async () => ((await svc.getStaffAttendance(orgId, DIA)).staff as Array<any>).find(r => r.id === ana)!
     const ids: string[] = (await leer()).allTimeEntries.map((t: any) => t.id)
     expect(ids).toHaveLength(2)
@@ -846,9 +846,8 @@ describe('getStaffAttendance — efectivo por checada agregado en Postgres', () 
     const venueDe = new Map(antes.map(t => [t.id, t.venueId]))
     await prisma.timeEntry.updateMany({ where: { id: { in: ids } }, data: { salidaOlvidada: true } })
     const creados: string[] = []
-    const asiento = async (entityId: string, minuto: number, origen: string) => {
-      const cuando = new Date(Date.UTC(2025, 2, 12, 4, minuto))
-      const data = { origen, salidaRecibida: cuando.toISOString() }
+    const min = (m: number) => new Date(Date.UTC(2025, 2, 12, 4, m))
+    const asiento = async (entityId: string, registrado: number, data: Record<string, unknown>) => {
       creados.push(
         (
           await prisma.activityLog.create({
@@ -858,8 +857,8 @@ describe('getStaffAttendance — efectivo por checada agregado en Postgres', () 
               entityId,
               venueId: venueDe.get(entityId)!,
               staffId: ana,
-              createdAt: cuando,
-              data,
+              createdAt: min(registrado),
+              data: data as any,
             },
           })
         ).id,
@@ -867,9 +866,14 @@ describe('getStaffAttendance — efectivo por checada agregado en Postgres', () 
     }
     try {
       const [x, y] = ids
-      // x: 21 reenvíos de la PAX, todos antes que la única salida de y. Antes, el tope del lote (2 × 10) se llenaba con x.
-      for (let i = 0; i < 21; i++) await asiento(x, i, 'PAX')
-      await asiento(y, 30, 'POS')
+      // x: un asiento ilegible registrado primero, 21 reenvíos de la PAX (22:10 a 22:30) y, registrada al último porque la
+      // cola del celular subió tarde, la salida del celular de las 22:05. y: una sola salida del POS. Antes, el tope del lote
+      // se llenaba con x (r2 #2); luego, los 10 se elegían por hora de registro y la del celular quedaba fuera (r3 #2), y el
+      // ilegible contaba en «Y N más» (r3 #1).
+      await asiento(x, 0, { origen: 'PAX', salidaRecibida: 'no-es-fecha' })
+      for (let i = 0; i < 21; i++) await asiento(x, i, { origen: 'PAX', salidaRecibida: min(10 + i).toISOString() })
+      await asiento(x, 45, { salidaDelCelular: min(5).toISOString(), origenHora: 'RELOJ_DEL_CELULAR' })
+      await asiento(y, 30, { origen: 'POS', salidaRecibida: min(30).toISOString() })
       const [tx, ty] = (await leer()).allTimeEntries
       expect(ty).toMatchObject({
         id: y,
@@ -877,9 +881,10 @@ describe('getStaffAttendance — efectivo por checada agregado en Postgres', () 
       })
       const lineas = (tx.notaSalidaOlvidada as string).split('\n')
       expect(lineas).toHaveLength(11)
-      expect(lineas[0]).toBe('Salida de la PAX a las 22:00 del 11-mar: llegó después del cierre y no se usó.')
-      expect(lineas[9]).toBe('Salida de la PAX a las 22:09 del 11-mar: llegó después del cierre y no se usó.')
-      expect(lineas[10]).toBe('Y 11 salidas tardías más que no se usaron.')
+      expect(lineas[0]).toBe('Salida del celular a las 22:05 del 11-mar: llegó después del cierre y no se usó.')
+      expect(lineas[1]).toBe('Salida de la PAX a las 22:10 del 11-mar: llegó después del cierre y no se usó.')
+      expect(lineas[9]).toBe('Salida de la PAX a las 22:18 del 11-mar: llegó después del cierre y no se usó.')
+      expect(lineas[10]).toBe('Y 12 salidas tardías más que no se usaron.') // 22 legibles − 10; el ilegible no cuenta
     } finally {
       await prisma.activityLog.deleteMany({ where: { id: { in: creados } } })
       for (const t of antes)

@@ -329,14 +329,23 @@ export async function notasDeSalidasNoUsadas(
   const total = new Map<string, number>()
   for (let i = 0; i < ids.length; i += CHECADAS_POR_CONSULTA) {
     const pares = ids.slice(i, i + CHECADAS_POR_CONSULTA).map(id => Prisma.sql`(${id}, ${porId.get(id)!.venueId})`)
+    // Sólo cuentan los asientos con la hora de salida legible, en el formato de `toISOString` que escriben los dos escritores (lo
+    // mismo que lee `lineaDeSalidaNoUsada`), y los 10 que se enseñan son los de la salida más temprana, no los registrados
+    // primero: la cola del celular puede subir después de varios avisos de la PAX (Codex D4 r3 #1 y #2).
     const asientos = await db.$queryRaw<Array<{ entityId: string; data: Prisma.JsonValue; total: number }>>`
       SELECT "entityId", "data", "total" FROM (
         SELECT "entityId", "data",
-               ROW_NUMBER() OVER (PARTITION BY "entityId" ORDER BY "createdAt", "id") AS n,
+               ROW_NUMBER() OVER (PARTITION BY "entityId" ORDER BY "hora" COLLATE "C", "id") AS n,
                COUNT(*) OVER (PARTITION BY "entityId")::int AS total
-        FROM "ActivityLog"
-        WHERE "action" = 'TIME_ENTRY_LATE_CLOCKOUT_NOT_USED' AND "entity" = 'TimeEntry'
-          AND ("entityId", "venueId") IN (${Prisma.join(pares)})
+        FROM (
+          SELECT "entityId", "id", "data",
+                 CASE WHEN jsonb_typeof("data" -> 'salidaDelCelular') = 'string' THEN "data" ->> 'salidaDelCelular'
+                      WHEN "data" ->> 'origen' IN ('PAX', 'POS') THEN "data" ->> 'salidaRecibida' END AS "hora"
+          FROM "ActivityLog"
+          WHERE "action" = 'TIME_ENTRY_LATE_CLOCKOUT_NOT_USED' AND "entity" = 'TimeEntry'
+            AND ("entityId", "venueId") IN (${Prisma.join(pares)})
+        ) h
+        WHERE "hora" ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]+)?Z$'
       ) a
       WHERE n <= ${ASIENTOS_POR_CHECADA}`
     for (const a of asientos) {
@@ -735,7 +744,7 @@ export async function anotarSalidaQueNoSeUso(params: {
   const anotacion = `Salida de la ${params.origen} a las ${hora}: llegó después del cierre de salida olvidada y no se usó. Revisa la hora real.`
   // Primero la nota con su evidencia y después el asiento con la hora real, que es lo que lee la bitácora de marca blanca
   // (hz:0433f0cb:D4). Si el asiento fallara, la evidencia ya quedó: sólo falta esa línea y la marca «revisar» sigue (Codex D4
-  // r2 #1; founder «A»). La PAX y el POS no reenvían la misma salida, así que no se juntan en una transacción.
+  // r2 #1; founder delegó: «A»). La PAX y el POS no reenvían la misma salida, así que no se juntan en una transacción.
   const { count } = await defaultPrisma.timeEntry.updateMany({
     where: { id: e.id, salidaOlvidada: true, notes: e.notes },
     data: {
@@ -749,7 +758,8 @@ export async function anotarSalidaQueNoSeUso(params: {
     },
   })
   if (count === 1) {
-    await logAction({
+    // Sin esperarlo, como en D3: un asiento lento no debe darle a la PAX un error con la evidencia ya guardada (Codex D4 r3 #3).
+    void logAction({
       staffId: params.staffId,
       venueId: params.venueId,
       action: 'TIME_ENTRY_LATE_CLOCKOUT_NOT_USED',
