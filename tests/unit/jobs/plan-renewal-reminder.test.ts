@@ -665,6 +665,19 @@ describe('PlanRenewalReminderJob.runNow — pruebas regaladas sin tarjeta', () =
     renewalSpy.mockRestore()
   })
 
+  it('M6: con la v2 «Plus» el aviso de la prueba regalada dice Plus (y Premium, Premium)', async () => {
+    const pointer = (mockPrisma as any).planOfferPointer.findUnique as jest.Mock
+    pointer.mockResolvedValue(punteroA('ver_v2', 2, definicionDePrueba({ ids: idsDeLaVersion('v2'), nombres: { PRO: 'Plus' } })))
+    conPruebas([prueba()])
+    await new PlanRenewalReminderJob().runNow()
+    expect(freeSpy.mock.calls[0][1]).toMatchObject({ planName: 'Plus' })
+    freeSpy.mockClear()
+    conPruebas([prueba({ feature: { code: 'PLAN_PREMIUM' } })])
+    await new PlanRenewalReminderJob().runNow()
+    expect(freeSpy.mock.calls[0][1]).toMatchObject({ planName: 'Premium' })
+    pointer.mockResolvedValue(null)
+  })
+
   it('lee sólo planes activos sin Stripe de negocios activos, que vencen en <9 días y faltan por avisar para SU fecha, con tope', async () => {
     conPruebas([])
     await new PlanRenewalReminderJob().runNow()

@@ -370,6 +370,34 @@ describe('camino feliz con campaña', () => {
     )
   })
 
+  it('B4 (M5): la campaña cobrada con el precio de la v2 «Plus» pone «Plan Avoqado Plus» en la descripción de Stripe; sin versión, la de hoy', async () => {
+    prismaMock.planOfferPointer.findUnique.mockResolvedValue(
+      punteroA('cv2', 2, definicionDePrueba({ ids: idsDeLaVersion('v2'), nombres: { PRO: 'Plus' } })) as never,
+    )
+    prismaMock.feature.findFirst.mockResolvedValue({
+      id: 'feat-pro',
+      code: 'PLAN_PRO',
+      monthlyPrice: 999,
+      stripeProductId: 'prod_pro',
+    } as never)
+    mockPriceRetrieve.mockResolvedValue({
+      id: 'price_v2_pro_m',
+      active: true,
+      currency: 'mxn',
+      unit_amount: LISTA,
+      tax_behavior: 'inclusive',
+      product: 'prod_pro',
+      recurring: { interval: 'month' },
+    })
+    await activatePlan({ ...BASE, offer: OFERTA_LAUNCH })
+    expect(mockSubCreate.mock.calls[0][0].description).toMatch(/^Plan Avoqado Plus/)
+  })
+
+  it('sin versión, la campaña deja la descripción de hoy («Plan Avoqado Pro»)', async () => {
+    await activatePlan({ ...BASE, offer: OFERTA_LAUNCH })
+    expect(mockSubCreate.mock.calls[0][0].description).toMatch(/^Plan Avoqado Pro/)
+  })
+
   it('la redención queda APPLIED con la suscripción y la huella de tarjeta', async () => {
     await activatePlan({ ...BASE, offer: OFERTA_LAUNCH })
     expect(prismaMock.launchCampaignRedemption.updateMany).toHaveBeenCalledWith({

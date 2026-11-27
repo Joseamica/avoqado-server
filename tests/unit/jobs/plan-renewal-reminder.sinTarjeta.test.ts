@@ -10,6 +10,7 @@
  * La entrada real: `new PlanRenewalReminderJob().runNow()`. El correo es el real (sólo se intercepta `sendEmail`).
  */
 import { prismaMock } from '@tests/__helpers__/setup'
+import { definicionDePrueba, idsDeLaVersion, punteroA } from '@tests/__helpers__/planOfferFixtures'
 import logger from '@/config/logger'
 import emailService from '@/services/email.service'
 import * as planNotification from '@/services/access/planNotification.service'
@@ -156,6 +157,15 @@ describe('recordatorio de la prueba sin tarjeta', () => {
     expect(correoSinTarjeta).toHaveBeenCalledTimes(1)
     expect(stripe.customersRetrieve).toHaveBeenCalledTimes(1)
     expect(prismaMock.venueFeature.update).toHaveBeenCalledTimes(1)
+  })
+
+  it('M6: con la v2 «Plus» el recordatorio de la prueba sin tarjeta dice Plus', async () => {
+    prismaMock.planOfferPointer.findUnique.mockResolvedValue(
+      punteroA('cv2', 2, definicionDePrueba({ ids: idsDeLaVersion('v2'), nombres: { PRO: 'Plus' } })) as never,
+    )
+    await run()
+    expect(correoSinTarjeta).toHaveBeenCalledWith('owner@example.com', expect.objectContaining({ planName: 'Plus' }))
+    prismaMock.planOfferPointer.findUnique.mockResolvedValue(null as never)
   })
 
   it('🔴 con la tarjeta ya puesta en el portal: el recordatorio dice esa tarjeta ••••last4 y el monto', async () => {

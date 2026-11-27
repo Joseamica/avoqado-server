@@ -306,6 +306,21 @@ describe('Subscription lifecycle plan emails', () => {
       expect(en.html).not.toContain('Pro')
     })
 
+    it('M4: un nombre con caracteres de HTML sale escapado en el título, el botón y el cuerpo (texto plano, tal cual)', async () => {
+      await emailService.sendPlanEndedEmail('a@x.com', {
+        locale: 'es',
+        venueName: 'Bar',
+        kind: 'PRO',
+        billingUrl: 'u',
+        planName: 'Plus <b>&',
+      })
+      const arg = spy.mock.calls.at(-1)![0]
+      expect(arg.html).not.toContain('<b>')
+      expect(arg.html).toContain('Plus &lt;b&gt;&amp;')
+      expect(arg.html).toContain('Contratar Plus &lt;b&gt;&amp;')
+      expect(arg.text).toContain('Contratar Plus <b>&:')
+    })
+
     it('«Tu Pro terminó» sin Básico publicado: sólo «Contratar Pro»', async () => {
       await emailService.sendPlanEndedEmail('a@x.com', { locale: 'es', venueName: 'Bar', kind: 'PRO', billingUrl: 'u' })
       const arg = spy.mock.calls[0][0]
@@ -360,6 +375,14 @@ describe('Subscription lifecycle plan emails', () => {
 
   // --- Task 8: sendPlanWinbackEmail ---
   describe('sendPlanWinbackEmail', () => {
+    it('M4: el nombre del plan va escapado en el título y el cuerpo HTML, y tal cual en el texto', async () => {
+      await emailService.sendPlanWinbackEmail('a@x.com', { locale: 'es', venueName: 'Bar', reactivateUrl: 'u', planName: 'Plus <b>' })
+      const arg = spy.mock.calls.at(-1)![0]
+      expect(arg.html).not.toContain('<b>')
+      expect(arg.html).toContain('Plus &lt;b&gt;')
+      expect(arg.text).toContain('Plus <b>')
+    })
+
     it('winback: en subject, free-month copy + CTA url, no emoji', async () => {
       await emailService.sendPlanWinbackEmail('a@x.com', {
         locale: 'en',

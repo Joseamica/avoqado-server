@@ -69,6 +69,7 @@ jest.mock('@/services/launchCampaigns/hybridCampaign.service', () => ({
 }))
 
 import { prismaMock } from '@tests/__helpers__/setup'
+import { definicionDePrueba, idsDeLaVersion, punteroA } from '@tests/__helpers__/planOfferFixtures'
 import logger from '@/config/logger'
 import emailService from '@/services/email.service'
 import * as planNotification from '@/services/access/planNotification.service'
@@ -172,6 +173,36 @@ afterEach(() => {
 })
 
 describe('trial_will_end de la prueba sin tarjeta', () => {
+  it('B4 (M6, M7): con la v2 «Plus» el aviso en la app, su metadata y el correo dicen Plus; la versión se lee UNA vez por aviso, no por persona', async () => {
+    prismaMock.planOfferPointer.findUnique.mockResolvedValue(
+      punteroA('cv2', 2, definicionDePrueba({ ids: idsDeLaVersion('v2'), nombres: { PRO: 'Plus' } })) as never,
+    )
+    mockSubRetrieve.mockResolvedValue(prueba())
+    await handleStripeWebhookEvent(evento(prueba()))
+
+    expect(correoSinTarjeta).toHaveBeenCalledWith('negocio@example.com', expect.objectContaining({ planName: 'Plus' }))
+    expect(avisosEnLaApp()).toEqual([
+      SIN_TARJETA('$926.84').replace(/Avoqado Pro/g, 'Avoqado Plus'),
+      SIN_TARJETA('$926.84').replace(/Avoqado Pro/g, 'Avoqado Plus'),
+    ])
+    const metadatas = (createNotification as jest.Mock).mock.calls.map(
+      (c: unknown[]) => (c[0] as { metadata: { featureName: string } }).metadata,
+    )
+    expect(metadatas.map(m => m.featureName)).toEqual(['Plan Avoqado Plus', 'Plan Avoqado Plus'])
+
+    // Con 5 personas en el equipo se lee la versión las mismas veces que con 2.
+    const lecturasCon2 = prismaMock.planOfferPointer.findUnique.mock.calls.length
+    prismaMock.planOfferPointer.findUnique.mockClear()
+    ;(createNotification as jest.Mock).mockClear()
+    prismaMock.staffVenue.findMany.mockResolvedValue(
+      [1, 2, 3, 4, 5].map(n => ({ staff: { id: `staff-${n}`, email: `s${n}@example.com` } })) as never,
+    )
+    mockSubRetrieve.mockResolvedValue(prueba())
+    await handleStripeWebhookEvent(evento(prueba(), 'evt_trial_will_end_5'))
+    expect((createNotification as jest.Mock).mock.calls).toHaveLength(5)
+    expect(prismaMock.planOfferPointer.findUnique.mock.calls.length).toBe(lecturasCon2)
+  })
+
   it('🔴 §18: trial_will_end de una prueba sin tarjeta y sin tarjeta guardada → «pon tu tarjeta… se cobrarán $926.84… si no, sigues en Gratis» con el amount_due de la vista previa, en el correo y en la app', async () => {
     mockSubRetrieve.mockResolvedValue(prueba())
 

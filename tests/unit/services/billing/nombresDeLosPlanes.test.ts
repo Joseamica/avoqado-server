@@ -5,7 +5,12 @@
 import { prismaMock } from '@tests/__helpers__/setup'
 import { definicionDePrueba, idsDeLaVersion, punteroA, versionUno } from '@tests/__helpers__/planOfferFixtures'
 import logger from '@/config/logger'
-import { nombreDelPlanParaAvisos, nombresDeLosPlanes } from '@/services/billing/nombresDeLosPlanes'
+import {
+  diasDeLaPrueba,
+  nombreDeLaFeatureParaAvisos,
+  nombreDelPlanParaAvisos,
+  nombresDeLosPlanes,
+} from '@/services/billing/nombresDeLosPlanes'
 
 const pointer = prismaMock.planOfferPointer.findUnique as jest.Mock
 const v2Plus = () =>
@@ -52,5 +57,30 @@ describe('nombreDelPlanParaAvisos', () => {
   it('con la vigente dañada: el nombre de hoy', async () => {
     pointer.mockResolvedValue(punteroA('ver_v2', 2, { schemaVersion: 1 }))
     expect(await nombreDelPlanParaAvisos('PLAN_PRO', 'Plan Avoqado Pro')).toBe('Plan Avoqado Pro')
+  })
+})
+
+describe('diasDeLaPrueba (M3)', () => {
+  const DIA = 86_400
+  const HORA = 3_600
+  it('una prueba de 14 días abierta 13 h después de su cotización sigue diciendo 14', () => {
+    expect(diasDeLaPrueba(1_000, 1_000 + 14 * DIA - 13 * HORA)).toBe(14)
+  })
+  it('una prueba de 1 día abierta 13 h después de su cotización dice 1, nunca «30»', () => {
+    expect(diasDeLaPrueba(1_000, 1_000 + 1 * DIA - 13 * HORA)).toBe(1)
+  })
+  it('exacta, sin prueba o sin las dos fechas', () => {
+    expect(diasDeLaPrueba(0, 30 * DIA)).toBe(30)
+    expect(diasDeLaPrueba(null, null)).toBeUndefined()
+    expect(diasDeLaPrueba(undefined, 5)).toBeUndefined()
+    expect(diasDeLaPrueba(10, 10)).toBeUndefined()
+  })
+})
+
+describe('nombreDeLaFeatureParaAvisos', () => {
+  it('un plan lleva el nombre del editor; cualquier otra función, su Feature.name', async () => {
+    pointer.mockResolvedValue(v2Plus())
+    expect(await nombreDeLaFeatureParaAvisos({ code: 'PLAN_PRO', name: 'Plan Avoqado Pro' })).toBe('Plan Avoqado Plus')
+    expect(await nombreDeLaFeatureParaAvisos({ code: 'CHATBOT', name: 'Chatbot' })).toBe('Chatbot')
   })
 })

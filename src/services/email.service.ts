@@ -5212,7 +5212,7 @@ Equipo de Avoqado`
 
     const html = this.buildPlanEmailHtml({
       locale: data.locale,
-      title: subject,
+      title: escapeHtml(subject),
       venueName: data.venueName,
       bodyHtml: bodyHtml + descargarAppHtml({ idioma }),
       ctaLabel,
@@ -5409,7 +5409,7 @@ ${boton}: ${data.billingPortalUrl}`
 
     const html = this.buildPlanEmailHtml({
       locale: data.locale,
-      title: subject,
+      title: escapeHtml(subject),
       venueName: data.venueName,
       bodyHtml,
       ctaLabel,
@@ -5457,7 +5457,7 @@ ${data.unsubscribe ? `\n${en ? 'Stop receiving these notices' : 'Dejar de recibi
 ${en ? 'Avoqado Team' : 'Equipo de Avoqado'}`
     const html = this.buildPlanEmailHtml({
       locale: data.locale,
-      title: subject,
+      title: escapeHtml(subject),
       venueName: escapeHtml(data.venueName),
       bodyHtml,
       ctaLabel,
@@ -5512,6 +5512,7 @@ ${en ? 'Avoqado Team' : 'Equipo de Avoqado'}`
     const greeting = en ? 'Hi,' : 'Hola,'
     const contratarBasico = en ? 'Get Básico' : 'Contratar Básico'
     const contratarPro = en ? `Get ${planName}` : `Contratar ${planName}`
+    const contratarProHtml = en ? `Get ${escapeHtml(planName)}` : `Contratar ${escapeHtml(planName)}`
     const bodyHtml = `
       <p style="font-size: 16px; margin: 0 0 16px 0; color: #000;">${greeting}</p>
       ${parrafosHtml.map(p => `<p style="font-size: 16px; margin: 0 0 16px 0; color: #000;">${p}</p>`).join('\n      ')}`
@@ -5524,12 +5525,12 @@ ${data.unsubscribe ? `\n${en ? 'Stop receiving these notices' : 'Dejar de recibi
 ${en ? 'Avoqado Team' : 'Equipo de Avoqado'}`
     const html = this.buildPlanEmailHtml({
       locale: data.locale,
-      title: subject,
+      title: escapeHtml(subject),
       venueName: escapeHtml(data.venueName),
       bodyHtml,
       ...(precio
-        ? { ctaLabel: contratarBasico, ctaUrl: data.billingUrl, secondaryCta: { label: contratarPro, url: data.billingUrl } }
-        : { ctaLabel: contratarPro, ctaUrl: data.billingUrl }),
+        ? { ctaLabel: contratarBasico, ctaUrl: data.billingUrl, secondaryCta: { label: contratarProHtml, url: data.billingUrl } }
+        : { ctaLabel: contratarProHtml, ctaUrl: data.billingUrl }),
       unsubscribe: data.unsubscribe,
     })
     return this.sendEmail({
@@ -5600,7 +5601,7 @@ ${en ? 'Avoqado Team' : 'Equipo de Avoqado'}`
 
     const html = this.buildPlanEmailHtml({
       locale: data.locale,
-      title: subject,
+      title: escapeHtml(subject),
       venueName: escapeHtml(data.venueName),
       bodyHtml,
       ctaLabel,
@@ -5685,7 +5686,7 @@ ${en ? 'Avoqado Team' : 'Equipo de Avoqado'}`
 
     const html = this.buildPlanEmailHtml({
       locale: data.locale,
-      title: subject,
+      title: escapeHtml(subject),
       venueName: escapeHtml(data.venueName),
       bodyHtml,
       ctaLabel,
@@ -5701,6 +5702,7 @@ ${en ? 'Avoqado Team' : 'Equipo de Avoqado'}`
   async sendPlanWinbackEmail(email: string, data: PlanWinbackEmailData): Promise<boolean> {
     // B4 Task 2: el nombre del plan es el del editor; sin él, «Pro» como hoy.
     const planName = data.planName ?? 'Pro'
+    const planHtml = escapeHtml(planName)
     const subject =
       data.locale === 'en'
         ? `Come back to Avoqado ${planName} — your first month is free`
@@ -5713,7 +5715,7 @@ ${en ? 'Avoqado Team' : 'Equipo de Avoqado'}`
       bodyHtml = `
       <p style="font-size: 16px; margin: 0 0 16px 0; color: #000;">Hi,</p>
       <p style="font-size: 16px; margin: 0 0 24px 0; color: #000;">
-        We miss you. Reactivate Avoqado ${planName} and your first month is free. Your data is intact and access turns back on instantly.
+        We miss you. Reactivate Avoqado ${planHtml} and your first month is free. Your data is intact and access turns back on instantly.
       </p>`
       text = `Hi,
 
@@ -5726,7 +5728,7 @@ Avoqado Team`
       bodyHtml = `
       <p style="font-size: 16px; margin: 0 0 16px 0; color: #000;">Hola,</p>
       <p style="font-size: 16px; margin: 0 0 24px 0; color: #000;">
-        Te extrañamos. Reactiva Avoqado ${planName} y tu primer mes es gratis. Tus datos siguen intactos y el acceso se reactiva al instante.
+        Te extrañamos. Reactiva Avoqado ${planHtml} y tu primer mes es gratis. Tus datos siguen intactos y el acceso se reactiva al instante.
       </p>`
       text = `Hola,
 
@@ -5739,7 +5741,7 @@ Equipo de Avoqado`
 
     const html = this.buildPlanEmailHtml({
       locale: data.locale,
-      title: subject,
+      title: escapeHtml(subject),
       venueName: data.venueName,
       bodyHtml,
       ctaLabel,

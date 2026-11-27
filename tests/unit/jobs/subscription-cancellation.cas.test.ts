@@ -130,6 +130,23 @@ describe('B4 · el correo de «tu suscripción se canceló» dice el plan con el
     expect(mockCanceledEmail).toHaveBeenCalledWith('dueno@cafe.mx', expect.objectContaining({ featureName: 'Plan Avoqado Plus' }))
   })
 
+  it('M6: el correo de «tu prueba terminó» de un plan también lleva «Plan Avoqado Plus»; sin versión, el de hoy', async () => {
+    mockVersionQueCobra.mockResolvedValue({
+      definition: { FREE: { displayName: 'Gratis' }, PRO: { displayName: 'Plus' }, PREMIUM: { displayName: 'Premium' } },
+    })
+    ;(prisma.venueFeature.findMany as jest.Mock).mockImplementation(async (args: any) =>
+      args?.where?.stripeSubscriptionId === null
+        ? [{ ...trialVencido, feature: { id: 'f8', code: 'PLAN_PRO', name: 'Plan Avoqado Pro' } }]
+        : [],
+    )
+    await new SubscriptionCancellationJob().runNow()
+    expect(mockTrialEmail).toHaveBeenCalledWith('dueno@cafe.mx', expect.objectContaining({ featureName: 'Plan Avoqado Plus' }))
+    mockTrialEmail.mockClear()
+    mockVersionQueCobra.mockResolvedValue(null)
+    await new SubscriptionCancellationJob().runNow()
+    expect(mockTrialEmail).toHaveBeenCalledWith('dueno@cafe.mx', expect.objectContaining({ featureName: 'Plan Avoqado Pro' }))
+  })
+
   it('sin versión: el Feature.name de hoy; y una función que no es plan nunca cambia', async () => {
     conPlan()
     await new SubscriptionCancellationJob().runNow()

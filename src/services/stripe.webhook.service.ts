@@ -1199,6 +1199,8 @@ async function sendPlanTrialEndingNotifications(
     if (staffMembers.length === 0) logger.warn('⚠️ No OWNER/ADMIN staff found for venue', { venueId })
 
     // B4 Task 2: el nombre del plan sigue a la versión del editor; sin ella, «Premium» / «Pro» como hoy.
+    // M7: UNA lectura de la versión por aviso (no una por cada persona del equipo).
+    const nombreDeLaFeature = await nombreDeLaFeatureParaAvisos(venueFeature.feature)
     const planName = (await nombresDeLosPlanes())[venueFeature.feature.code === 'PLAN_PREMIUM' ? 'PREMIUM' : 'PRO']
     // An empty or non-IANA zone makes toLocaleDateString throw, and `fecha` is computed before BOTH notices.
     const timeZone = zonaValida(venue.timezone)
@@ -1220,7 +1222,7 @@ async function sendPlanTrialEndingNotifications(
           title: `⏰ Prueba gratuita terminando pronto`,
           message,
           metadata: {
-            featureName: await nombreDeLaFeatureParaAvisos(venueFeature.feature),
+            featureName: nombreDeLaFeature,
             trialEndDate: trialEnd.toISOString(),
             billingPortalUrl,
           },

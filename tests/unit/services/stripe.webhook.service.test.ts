@@ -699,7 +699,7 @@ describe('Stripe Webhook Service - Critical Tests', () => {
         request: null,
         api_version: '2023-10-16',
         data: { object: { id: 'in_failed_b4', object: 'invoice', subscription: 'sub_123', attempt_count: 1 } },
-      } as Stripe.Event)
+      } as unknown as Stripe.Event)
       return createNotification
     }
     afterEach(() => mockVersionQueCobra.mockResolvedValue(null))

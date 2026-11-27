@@ -45,6 +45,12 @@ jest.mock('@/services/onboarding/ensureVenue.service', () => ({
   __esModule: true,
   ensureVenueForOnboarding: jest.fn().mockResolvedValue({ id: 'venue-1', slug: 'negocio-test', status: 'ONBOARDING' }),
 }))
+// B4 Task 2: la lectura «fresca» del nombre (la del plan vigente al enviar) devuelve un centinela, para ver cuándo el correo y el
+// aviso usan el nombre de la versión que CITA la compra y no esa lectura.
+jest.mock('@/services/billing/nombresDeLosPlanes', () => ({
+  ...jest.requireActual('@/services/billing/nombresDeLosPlanes'),
+  nombresDeLosPlanes: jest.fn(async () => ({ FREE: 'FRESCO', PRO: 'FRESCO', PREMIUM: 'FRESCO' })),
+}))
 const mockDestino = jest.fn()
 jest.mock('@/services/access/planNotification.service', () => ({
   __esModule: true,
@@ -496,6 +502,35 @@ describe('B2 Task 4: activate-plan cobra un intento nuevo con su comprobante', (
     expect(correo).toMatchObject({ payNow: false, firstChargeAmountCents: PRO_M })
     expect(correo.introAmountCents).toBeUndefined()
     expect(resendService.sendPlanActivatedNotice).toHaveBeenCalledWith(expect.objectContaining({ payNow: false, firstChargeCents: PRO_M }))
+  })
+
+  it('B4 (M2): la confirmación y el aviso al equipo llevan el nombre de la versión CITADA («Plus»), no una lectura nueva', async () => {
+    conVigente(definicionDePrueba({ ids: idsDeLaVersion('v2'), netos: { 'PRO:monthly': 79900 }, nombres: { PRO: 'Plus' } }))
+    mockDestino.mockResolvedValue({ email: 'duena@example.com', locale: 'es', venueName: 'Negocio' })
+    await pedir({ quoteToken: comprobante() })
+    await new Promise(r => setImmediate(r))
+    await new Promise(r => setImmediate(r))
+    expect((emailService.sendPlanConfirmationEmail as jest.Mock).mock.calls[0][1]).toMatchObject({ planName: 'Plus' })
+    expect(resendService.sendPlanActivatedNotice).toHaveBeenCalledWith(expect.objectContaining({ planName: 'Plus' }))
+  })
+
+  it('sin versión citada (la llave de hoy) el correo usa la lectura del nombre de siempre', async () => {
+    mockDestino.mockResolvedValue({ email: 'duena@example.com', locale: 'es', venueName: 'Negocio' })
+    await pedir({ offer: { kind: 'STANDARD', expectedFirstChargeCents: 0 } })
+    await new Promise(r => setImmediate(r))
+    await new Promise(r => setImmediate(r))
+    expect((emailService.sendPlanConfirmationEmail as jest.Mock).mock.calls[0][1]).toMatchObject({ planName: 'FRESCO' })
+  })
+
+  it('B4 (M3): una prueba de 14 días abierta 13 h después de su cotización dice 14 (el caso de 1 día, en nombresDeLosPlanes.test)', async () => {
+    const fin = Math.floor(new Date('2026-12-25T00:00:00Z').getTime() / 1000)
+    conVigente(v2())
+    mockDestino.mockResolvedValue({ email: 'duena@example.com', locale: 'es', venueName: 'Negocio' })
+    mockSubRetrieve.mockResolvedValue(suscripcion({ trial_start: fin - (14 * 86_400 - 13 * 3_600), trial_end: fin }))
+    await pedir({ quoteToken: comprobante() })
+    await new Promise(r => setImmediate(r))
+    await new Promise(r => setImmediate(r))
+    expect((emailService.sendPlanConfirmationEmail as jest.Mock).mock.calls[0][1]).toMatchObject({ trialDays: 14 })
   })
 
   it('el aviso y la confirmación de Pro mensual pagando hoy con la versión no anuncian la introducción legacy', async () => {

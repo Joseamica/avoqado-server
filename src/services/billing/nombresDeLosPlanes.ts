@@ -45,13 +45,14 @@ export async function nombreDelPlanParaAvisos(code: 'PLAN_PRO' | 'PLAN_PREMIUM',
 }
 
 /**
- * Los días de la prueba de UNA suscripción, tal como los leyó Stripe: `round((trial_end − trial_start) / 86400)`. 🔴 Nunca de
- * «lo vigente»: la suscripción pudo abrirse con otra versión. `undefined` si no tuvo prueba o Stripe no trae las dos fechas
- * (el correo cae a «30», como hoy).
+ * Los días de la prueba de UNA suscripción, tal como los leyó Stripe: `ceil((trial_end − trial_start) / 86400)`. 🔴 Nunca de
+ * «lo vigente»: la suscripción pudo abrirse con otra versión. Con `ceil`, una prueba de 14 días abierta 13 h después de su
+ * cotización sigue diciendo «14» y una de 1 día, «1» (nunca cae a «30» si hay prueba). `undefined` sólo si no hubo prueba o
+ * Stripe no trae las dos fechas (el correo cae a «30», como hoy).
  */
 export function diasDeLaPrueba(trialStart: number | null | undefined, trialEnd: number | null | undefined): number | undefined {
   if (typeof trialStart !== 'number' || typeof trialEnd !== 'number') return undefined
-  const dias = Math.round((trialEnd - trialStart) / 86400)
+  const dias = Math.ceil((trialEnd - trialStart) / 86400)
   return dias > 0 ? dias : undefined
 }
 
