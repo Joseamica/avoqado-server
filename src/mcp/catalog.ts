@@ -475,6 +475,7 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   store_anomalies: 'read',
   store_sales_trend: 'read',
   subscription_status: 'read',
+  plan_prices: 'read',
   supplier_invoices: 'read',
   import_supplier_invoice_xml: 'write',
   identify_supplier_invoice_line: 'write',

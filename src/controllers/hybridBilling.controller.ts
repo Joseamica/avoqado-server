@@ -1,3 +1,4 @@
+import { planesPublicos } from '@/services/billing/planesPublicos'
 import { asyncHandler } from '@/utils/asyncHandler'
 import { BadRequestError } from '@/errors/AppError'
 import { z } from 'zod'
@@ -85,6 +86,12 @@ export const campaignCatalog = asyncHandler(async (req, res) => {
   const query = featureCatalogQuery.safeParse(req.query)
   if (!query.success) throw new BadRequestError('Revisa los filtros del catálogo.')
   res.json({ success: true, data: listFeatureCatalog(query.data) })
+})
+/** Planes editables (B4): los planes pagados vigentes, sólo campos públicos. Con la vigente dañada, el 503 de `ofertaVigente`. */
+export const publicPlanOffer = asyncHandler(async (_req, res) => {
+  const data = await planesPublicos()
+  res.set('Cache-Control', 'public, max-age=30')
+  res.json({ success: true, data })
 })
 export const publicBasicPlan = asyncHandler(async (_req, res) => res.json({ success: true, data: await getPublicBasicPlan() }))
 export const basicPlan = asyncHandler(async (_req, res) => res.json({ success: true, data: await getBasicPlanRow() }))

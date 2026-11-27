@@ -3,6 +3,7 @@ import logger from '@/config/logger'
 import { BadRequestError, ConflictError } from '@/errors/AppError'
 import { FREE_TIER_CODES } from '@/services/access/basePlan.service'
 import { versionQueCobra, type OfertaVigente } from '@/services/billing/planOffer'
+import { planPagadoPublico, type PrecioPublico } from '@/services/billing/planesPublicos'
 import prisma from '@/utils/prismaClient'
 import { HYBRID_DEPENDENCIES } from './hybridDependencies'
 import { listPriceBoard } from './hybridListPrice.service'
@@ -28,7 +29,16 @@ export interface PublicFeature {
 export interface PublicPlan {
   tier: PlanTier
   name: string
+  /** Pesos con IVA, el mensual (como siempre). */
   price: number
+  // Planes editables (B4): sólo cuando la lista sale de una versión del editor. Mismos campos públicos que `planesPublicos`
+  // (dinero en CENTAVOS, netos y con IVA); sin versión del editor no existen y la respuesta es la de hoy.
+  displayName?: string
+  monthly?: PrecioPublico
+  annual?: PrecioPublico
+  trialDays?: number
+  requiresCard?: boolean
+  onSale?: boolean
 }
 export interface PublicPriceList {
   plans: PublicPlan[]
@@ -171,7 +181,19 @@ async function planesDeLaVersion(vigente: OfertaVigente): Promise<PlanesDeLaList
       })
       continue
     }
-    plans.push({ tier, name: plan.displayName, price: plan.monthly.grossCents / 100 })
+    // Los términos salen de la MISMA definición ya leída (una sola foto), por la misma copia pública que `planesPublicos`.
+    const publico = planPagadoPublico(plan)
+    plans.push({
+      tier,
+      name: plan.displayName,
+      price: plan.monthly.grossCents / 100,
+      displayName: publico.displayName,
+      monthly: publico.monthly,
+      annual: publico.annual,
+      trialDays: publico.trialDays,
+      requiresCard: publico.requiresCard,
+      onSale: publico.onSale,
+    })
     composition.set(tier, new Set(incluidas))
   }
   return { plans, composition }
