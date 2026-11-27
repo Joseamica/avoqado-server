@@ -99,6 +99,7 @@ import {
   customerPhoneChangeRequestSchema,
   customerPhoneChangeVerifySchema,
   customerMyListSchema,
+  customerClassReservationsSchema,
   customerGiftCardClaimSchema,
 } from '../schemas/dashboard/creditPack.schema'
 import { giftCardClaimRateLimiters } from '../middlewares/gift-card-lookup-rate-limit.middleware'
@@ -472,6 +473,18 @@ router.get(
   authenticateCustomer,
   activarReservasSiFalta,
   customerPortalController.getPortal,
+)
+
+// Sus clases reservadas en la ventana del horario (mismas dateFrom/dateTo): «Reservada» en el horario y «¿sí quedó?» tras un error
+// de red. El mismo cerco que el portal; sin el candado de plan: leer lo ya reservado nunca se bloquea.
+router.get(
+  '/venues/:venueSlug/customer/class-reservations',
+  portalReadLimit,
+  resolveVenueBySlug,
+  authenticateCustomer,
+  activarReservasSiFalta,
+  validateRequest(customerClassReservationsSchema),
+  customerPortalController.listMyClassReservations,
 )
 
 router.patch(

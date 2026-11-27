@@ -46,6 +46,16 @@ import {
 import { CREDIT_RESERVATION_NOT_ALIVE } from '@/services/credits/ilimitado'
 import { porcentajeDeDevolucion } from '@/services/dashboard/creditPack.public.service'
 import { enqueuePassSessionSync } from '@/services/aggregators/core/sessionSync.service'
+import { leerRangoDelHorario, type MotivoDeRangoInvalido } from '@/services/reservation/rangoDelHorario'
+
+/** Los mensajes de siempre del horario (el widget ya los conoce); «mis reservas de clase» tiene los suyos, en español. */
+const MENSAJE_DE_RANGO_DEL_HORARIO: Record<MotivoDeRangoInvalido, string> = {
+  FORMATO_DESDE: 'dateFrom must be YYYY-MM-DD',
+  FECHA_DESDE: 'dateFrom is not a valid date',
+  FORMATO_HASTA: 'dateTo must be YYYY-MM-DD',
+  FECHA_HASTA: 'dateTo is not a valid date',
+  HASTA_ANTES_DE_DESDE: 'dateTo must be on or after dateFrom',
+}
 
 // ==========================================
 // PUBLIC RESERVATION CONTROLLER (Unauthenticated)
@@ -534,35 +544,10 @@ export async function getAvailability(req: Request, res: Response, next: NextFun
       if (flowType !== 'class') {
         throw new BadRequestError('Range mode requires type=class')
       }
-      // YYYY-MM-DD validation — strict to keep the SQL query bounded.
-      const dateRe = /^\d{4}-\d{2}-\d{2}$/
-      if (!dateRe.test(dateFrom)) {
-        throw new BadRequestError('dateFrom must be YYYY-MM-DD')
-      }
-      const fromDate = new Date(`${dateFrom}T00:00:00Z`)
-      if (Number.isNaN(fromDate.getTime())) {
-        throw new BadRequestError('dateFrom is not a valid date')
-      }
-      // Default to +30 days when dateTo missing; cap at +60 days to avoid abuse.
-      let toDate: Date
-      if (dateTo) {
-        if (!dateRe.test(dateTo)) {
-          throw new BadRequestError('dateTo must be YYYY-MM-DD')
-        }
-        toDate = new Date(`${dateTo}T00:00:00Z`)
-        if (Number.isNaN(toDate.getTime())) {
-          throw new BadRequestError('dateTo is not a valid date')
-        }
-      } else {
-        toDate = new Date(fromDate)
-        toDate.setUTCDate(toDate.getUTCDate() + 30)
-      }
-      const maxTo = new Date(fromDate)
-      maxTo.setUTCDate(maxTo.getUTCDate() + 60)
-      if (toDate.getTime() > maxTo.getTime()) toDate = maxTo
-      if (toDate.getTime() < fromDate.getTime()) {
-        throw new BadRequestError('dateTo must be on or after dateFrom')
-      }
+      // YYYY-MM-DD, +30 days when dateTo is missing, capped at +60 days. ONE reader shared with
+      // `/customer/class-reservations`, so a class listed here is listed there with the same dates.
+      const rango = leerRangoDelHorario(dateFrom, dateTo)
+      if (!rango.ok) throw new BadRequestError(MENSAJE_DE_RANGO_DEL_HORARIO[rango.motivo])
 
       const onlinePercent = settings.scheduling?.onlineCapacityPercent ?? 100
       // Skip sessions that are too close to start to satisfy the venue's
@@ -578,7 +563,7 @@ export async function getAvailability(req: Request, res: Response, next: NextFun
       // refuse to book "con tanta anticipacion".
       const maxAdvanceDays = settings.scheduling?.maxAdvanceDays ?? 0
       const latestStart = maxAdvanceDays > 0 ? new Date(Date.now() + maxAdvanceDays * 24 * 60 * 60 * 1000) : null
-      const requestedEnd = new Date(`${toDate.toISOString().slice(0, 10)}T23:59:59.999`)
+      const requestedEnd = rango.hasta
       const effectiveEnd = latestStart && latestStart < requestedEnd ? latestStart : requestedEnd
 
       // Single Prisma query across the whole window — no per-product fan-out.
@@ -590,7 +575,7 @@ export async function getAvailability(req: Request, res: Response, next: NextFun
           status: 'SCHEDULED',
           ...(productId ? { productId } : { product: { type: 'CLASS', active: true } }),
           startsAt: {
-            gte: earliestStart && earliestStart > new Date(`${dateFrom}T00:00:00`) ? earliestStart : new Date(`${dateFrom}T00:00:00`),
+            gte: earliestStart && earliestStart > rango.desde ? earliestStart : rango.desde,
             lte: effectiveEnd,
           },
         },
@@ -649,7 +634,7 @@ export async function getAvailability(req: Request, res: Response, next: NextFun
 
       return res.json({
         dateFrom,
-        dateTo: toDate.toISOString().slice(0, 10),
+        dateTo: rango.dateTo,
         slots,
       })
     }

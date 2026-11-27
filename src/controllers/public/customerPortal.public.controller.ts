@@ -5,6 +5,7 @@ import type { CustomerAuthContext } from '../../middlewares/customerAuth.middlew
 import prisma from '../../utils/prismaClient'
 import { computeBookingAccess, withBookingAccess } from '../../services/public/bookingAccess.service'
 import { guardarTarjetaEnMiCuenta } from '../../services/giftCards/giftCardClaim.service'
+import { listarMisReservasDeClase } from '../../services/public/misReservasDeClase.public.service'
 import { ipDelCliente } from '../../utils/clientIp'
 
 async function resolveVenueBySlug(venueSlug: string) {
@@ -143,6 +144,26 @@ export async function listMyDiscounts(req: Request, res: Response, next: NextFun
   try {
     const { customerId, venueId } = (req as any).customerAuth as CustomerAuthContext
     res.json(await customerPortalService.listarMisDescuentos(venueId, customerId, pedirPagina(req)))
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
+ * GET /public/venues/:venueSlug/customer/class-reservations?dateFrom=&dateTo=&cursor= — sus clases reservadas en la ventana del
+ * horario (las MISMAS `dateFrom`/`dateTo` que el widget manda al horario), por páginas de 100 que impone el servidor.
+ */
+export async function listMyClassReservations(req: Request, res: Response, next: NextFunction) {
+  try {
+    const auth = (req as any).customerAuth as CustomerAuthContext
+    const texto = (v: unknown) => (typeof v === 'string' ? v : undefined)
+    res.json(
+      await listarMisReservasDeClase(auth.venueId, auth, {
+        dateFrom: texto(req.query.dateFrom) ?? '',
+        dateTo: texto(req.query.dateTo),
+        cursor: texto(req.query.cursor),
+      }),
+    )
   } catch (error) {
     next(error)
   }

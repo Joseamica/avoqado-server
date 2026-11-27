@@ -269,6 +269,26 @@ export const customerMyListSchema = z.object({
     .passthrough(),
 })
 
+/**
+ * «Mis reservas de clase»: las mismas `dateFrom`/`dateTo` que el horario público. Sin `limit`: la página (100) la impone el servidor;
+ * las fechas imposibles, el orden y el tope de 60 días los juzga el servicio (`leerRangoDelHorario`).
+ */
+export const customerClassReservationsSchema = z.object({
+  params: z.object({ venueSlug: z.string().min(1) }),
+  query: z
+    .object({
+      dateFrom: z
+        .string({ required_error: 'Falta la fecha de inicio (dateFrom).', invalid_type_error: 'La fecha de inicio debe ser un texto.' })
+        .regex(/^\d{4}-\d{2}-\d{2}$/, 'La fecha de inicio debe tener el formato AAAA-MM-DD.'),
+      dateTo: z
+        .string({ invalid_type_error: 'La fecha final debe ser un texto.' })
+        .regex(/^\d{4}-\d{2}-\d{2}$/, 'La fecha final debe tener el formato AAAA-MM-DD.')
+        .optional(),
+      cursor: z.string({ invalid_type_error: 'Cursor inválido' }).max(80, 'Cursor inválido').optional(),
+    })
+    .passthrough(),
+})
+
 /** S13: «Guardar en mi cuenta». Sólo la forma; el código lo juzga el servicio (mal escrito o ajeno = el mismo 404). */
 export const customerGiftCardClaimSchema = z.object({
   params: z.object({ venueSlug: z.string().min(1) }),
