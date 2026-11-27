@@ -385,6 +385,7 @@ describe('createPlanSubscription', () => {
         venueId: 'venue-1',
         customerId: 'cus_1',
         paymentMethodId: 'pm_1',
+        priceId: 'price_cotizado',
         tierCode: 'PLAN_PRO',
         interval: 'monthly',
         trialPeriodDays: 0,

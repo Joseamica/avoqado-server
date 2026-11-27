@@ -6171,7 +6171,7 @@ router.get(
  *                 linkingNumberOutcome: { type: string, enum: [APPLIED, UNCHANGED, SUPERSEDED_BY_NEWER, LOCKED_BY_BACKOFFICE, DISABLED] }
  *                 portedNumberOutcome: { type: string, enum: [APPLIED, UNCHANGED, SUPERSEDED_BY_NEWER, LOCKED_BY_BACKOFFICE, DISABLED, NOT_PORTABILIDAD], description: 'NOT_PORTABILIDAD: la venta no es de portabilidad y el portado no se guardó' }
  *                 linkingDuplicate: { type: boolean, description: 'El número guardado ya está en otra venta de la organización' }
- *                 portedDuplicate: { type: boolean }
+ *                 portedDuplicate: { type: boolean, description: 'Siempre false: el portado puede repetirse (26-nov)' }
  *       400:
  *         description: Invalid request data; SALE_REJECTED, CAPTURE_REQUIRED (número sin captureSeq, o captureSeq incompleto) o INVALID_LINKING_NUMBER
  *       404:
@@ -6236,7 +6236,7 @@ router.post(
  *                 linkingNumberOutcome: { type: string, enum: [APPLIED, UNCHANGED, SUPERSEDED_BY_NEWER, LOCKED_BY_BACKOFFICE] }
  *                 portedNumberOutcome: { type: string, enum: [APPLIED, UNCHANGED, SUPERSEDED_BY_NEWER, LOCKED_BY_BACKOFFICE, NOT_PORTABILIDAD], description: 'NOT_PORTABILIDAD: la venta no es de portabilidad y el portado no se guardó' }
  *                 linkingDuplicate: { type: boolean }
- *                 portedDuplicate: { type: boolean }
+ *                 portedDuplicate: { type: boolean, description: 'Siempre false: el portado puede repetirse (26-nov)' }
  *       400:
  *         description: INVALID_LINKING_NUMBER, SALE_REJECTED o cuerpo incompleto
  *       403:

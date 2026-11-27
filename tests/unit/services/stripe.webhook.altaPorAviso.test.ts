@@ -53,13 +53,20 @@ const planActivo = {
   venue: { id: 'v1', name: 'Test Venue', status: 'ACTIVE' },
 }
 const base = { id: 'in_1', amount_paid: 1000, amount_due: 1000, attempt_count: 1, currency: 'mxn', customer: 'cus_1' }
-const vieja = (extra: Record<string, unknown>) => ({ ...base, subscription: 'sub_pro', ...extra }) as unknown as Stripe.Invoice
+/** La metadata de la suscripción de un alta con versión del editor (la que el cobro le pone al crearla). */
+const META = { organizationId: 'org-1', planActivationKey: 'plan-activation:org-1:1', planOfferVersion: '2' }
+/** La forma 2020-03-02 (la que manda el endpoint de planes en prod): `subscription` y `subscription_details.metadata`. */
+const vieja = (extra: Record<string, unknown>) =>
+  ({ ...base, subscription: 'sub_pro', subscription_details: { metadata: META }, ...extra }) as unknown as Stripe.Invoice
+/** La forma basil: todo bajo `parent.subscription_details`. */
 const basil = (extra: Record<string, unknown>) =>
   ({
     ...base,
-    parent: { type: 'subscription_details', subscription_details: { subscription: 'sub_pro', metadata: {} } },
+    parent: { type: 'subscription_details', subscription_details: { subscription: 'sub_pro', metadata: META } },
     ...extra,
   }) as unknown as Stripe.Invoice
+/** Una factura de suscripción sin la metadata en ninguna de las dos formas. */
+const sinMetadata = (extra: Record<string, unknown>) => ({ ...base, subscription: 'sub_pro', ...extra }) as unknown as Stripe.Invoice
 
 beforeEach(() => {
   jest.clearAllMocks()
@@ -72,9 +79,18 @@ describe('🔴 H0: la primera factura pagada programa el cierre del alta', () =>
   it.each([
     ['forma vieja (2020-03-02, prod)', vieja],
     ['forma basil', basil],
-  ])('%s: la factura de alta (subscription_create) lo programa con su suscripción', async (_n, factura) => {
-    await handleInvoicePaymentSucceeded(factura({ billing_reason: 'subscription_create' }))
-    expect(programarCierreDelAltaPorAviso).toHaveBeenCalledWith('sub_pro')
+  ])(
+    '%s: la factura de alta (subscription_create) lo programa con su suscripción y la metadata de la suscripción que trae',
+    async (_n, factura) => {
+      await handleInvoicePaymentSucceeded(factura({ billing_reason: 'subscription_create' }))
+      // B2 Task 5: la metadata sale de la factura misma (sin otra llamada), en la forma que la mande el endpoint.
+      expect(programarCierreDelAltaPorAviso).toHaveBeenCalledWith('sub_pro', META)
+    },
+  )
+
+  it('B2 Task 5: sin la metadata en ninguna de las dos formas, la programa con null (lo de hoy)', async () => {
+    await handleInvoicePaymentSucceeded(sinMetadata({ billing_reason: 'subscription_create' }))
+    expect(programarCierreDelAltaPorAviso).toHaveBeenCalledWith('sub_pro', null)
   })
 
   it('también cuando el plan ya estaba activo (la salida temprana de «ya activo» no lo salta)', async () => {
@@ -88,7 +104,7 @@ describe('🔴 H0: la primera factura pagada programa el cierre del alta', () =>
     const corrida = handleInvoicePaymentSucceeded(vieja({ billing_reason: 'subscription_create' }))
     await jest.advanceTimersByTimeAsync(2_000)
     await corrida
-    expect(programarCierreDelAltaPorAviso).toHaveBeenCalledWith('sub_pro')
+    expect(programarCierreDelAltaPorAviso).toHaveBeenCalledWith('sub_pro', META)
   })
 
   it.each(['subscription_cycle', 'subscription_update', 'manual'])('una factura %s (renovación u otra) no lo programa', async motivo => {

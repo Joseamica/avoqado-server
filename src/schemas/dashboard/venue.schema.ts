@@ -164,6 +164,11 @@ export const convertDemoVenueSchema = z.object({
       // Stripe integration fields (optional)
       selectedFeatures: z.array(z.string()).optional(),
       paymentMethodId: z.string().optional(),
+
+      // Planes editables (B2, Task 8): el plan elegido (`{ tier: 'FREE' }` o `{ tier, interval, quoteToken }`). Sin forma aquí a
+      // propósito (b2-r3 #8): sin versión del editor no se lee (con `null` o un texto, el cuerpo pasa como hoy); con ella, lo revisa el
+      // servicio (`leerPlanDeLaConversion`).
+      plan: z.unknown().optional(),
     })
     // Acta Constitutiva is required for PERSONA_MORAL
     .refine(
@@ -221,6 +226,9 @@ export const createBillingPortalSessionSchema = z.object({
     returnUrl: z
       .string({ required_error: 'Falta la dirección web de regreso' })
       .url({ message: 'La dirección web de regreso no es válida' }),
+    // Planes editables (B2, Task 7): `PONER_TARJETA` abre el portal en el flujo de la tarjeta, sólo con una versión del editor. Sin
+    // forma aquí a propósito: sin versión del editor el campo no se lee (con `null` o un texto, el cuerpo pasa como hoy).
+    flujo: z.unknown().optional(),
   }),
 })
 
@@ -257,6 +265,11 @@ export const createPlanCheckoutSessionSchema = z.object({
     tier: z.enum(['PRO', 'PREMIUM'], { errorMap: () => ({ message: "El plan debe ser 'PRO' o 'PREMIUM'" }) }).default('PRO'),
     // D3: la fecha del primer cobro que Facturación mostró en «Quedarme con mi plan». Opcional: los clientes de siempre no la mandan.
     primerCobroAnunciado: z.string().datetime({ message: 'La fecha del primer cobro no es válida' }).optional(),
+    // Planes editables (B2, Tasks 7 y 8): el comprobante de «Tu plan» y la aceptación de la demo. Sin forma aquí a propósito: sin
+    // versión del editor no se leen (con `null`, un texto o un id que no es cuid, el cuerpo pasa como hoy); con ella, los revisa el
+    // servicio.
+    quoteToken: z.unknown().optional(),
+    acceptanceId: z.unknown().optional(),
   }),
 })
 

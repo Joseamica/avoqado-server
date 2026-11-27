@@ -36,6 +36,7 @@ describe('createPlanCheckoutSession', () => {
     const url = await createPlanCheckoutSession({
       venueId: 'v1',
       customerId: 'cus_1',
+      priceId: 'price_cotizado',
       interval: 'monthly',
       successUrl: 'https://dash/venues/acme/settings/billing/subscriptions?checkout=success',
       cancelUrl: 'https://dash/venues/acme/settings/billing/subscriptions?checkout=cancel',
@@ -44,12 +45,11 @@ describe('createPlanCheckoutSession', () => {
     })
 
     expect(url).toBe('https://checkout.stripe.com/c/pay/cs_1')
-    expect(mockPriceList).toHaveBeenCalledWith(expect.objectContaining({ lookup_keys: ['plan_pro_monthly'] }), expect.anything())
 
     const arg = mockSessionCreate.mock.calls[0][0]
     expect(arg.mode).toBe('subscription')
     expect(arg.customer).toBe('cus_1')
-    expect(arg.line_items).toEqual([{ price: 'price_monthly', quantity: 1 }])
+    expect(arg.line_items).toEqual([{ price: 'price_cotizado', quantity: 1 }])
     expect(arg.allow_promotion_codes).toBe(true)
     expect(arg.success_url).toContain('checkout=success')
     expect(arg.cancel_url).toContain('checkout=cancel')
@@ -64,6 +64,7 @@ describe('createPlanCheckoutSession', () => {
     await createPlanCheckoutSession({
       venueId: 'v1',
       customerId: 'cus_1',
+      priceId: 'price_cotizado',
       interval: 'monthly',
       successUrl: 'https://ok',
       cancelUrl: 'https://no',
@@ -78,39 +79,38 @@ describe('createPlanCheckoutSession', () => {
   })
 
   it('annual: uses the annual price lookup_key', async () => {
-    mockPriceList.mockResolvedValue({ data: [{ id: 'price_annual' }] })
     await createPlanCheckoutSession({
       venueId: 'v1',
       customerId: 'cus_1',
+      priceId: 'price_cotizado',
       interval: 'annual',
       successUrl: 'https://dash/ok',
       cancelUrl: 'https://dash/cancel',
     })
-    expect(mockPriceList).toHaveBeenCalledWith(expect.objectContaining({ lookup_keys: ['plan_pro_annual'] }), expect.anything())
     const arg = mockSessionCreate.mock.calls[0][0]
-    expect(arg.line_items[0].price).toBe('price_annual')
+    expect(arg.line_items[0].price).toBe('price_cotizado')
   })
 
   it('defaults to PLAN_PRO when tierCode is omitted (back-compat)', async () => {
     await createPlanCheckoutSession({
       venueId: 'v1',
       customerId: 'cus_1',
+      priceId: 'price_cotizado',
       interval: 'monthly',
       successUrl: 'https://dash/ok',
       cancelUrl: 'https://dash/cancel',
     })
     expect(mockFeatureFindFirst).toHaveBeenCalledWith(expect.objectContaining({ where: { code: 'PLAN_PRO', active: true } }))
-    expect(mockPriceList).toHaveBeenCalledWith(expect.objectContaining({ lookup_keys: ['plan_pro_monthly'] }), expect.anything())
     const arg = mockSessionCreate.mock.calls[0][0]
     expect(arg.metadata).toEqual(expect.objectContaining({ tierCode: 'PLAN_PRO' }))
     expect(arg.subscription_data.metadata).toEqual(expect.objectContaining({ tierCode: 'PLAN_PRO' }))
   })
 
   it('PREMIUM monthly: resolves the plan_premium_monthly price and stamps tierCode PLAN_PREMIUM', async () => {
-    mockPriceList.mockResolvedValue({ data: [{ id: 'price_premium_monthly' }] })
     const url = await createPlanCheckoutSession({
       venueId: 'v1',
       customerId: 'cus_1',
+      priceId: 'price_cotizado',
       interval: 'monthly',
       tierCode: 'PLAN_PREMIUM',
       successUrl: 'https://dash/venues/acme/settings/billing/subscriptions?checkout=success',
@@ -122,11 +122,10 @@ describe('createPlanCheckoutSession', () => {
     expect(url).toBe('https://checkout.stripe.com/c/pay/cs_1')
     // Looks up the PLAN_PREMIUM feature, not PLAN_PRO.
     expect(mockFeatureFindFirst).toHaveBeenCalledWith(expect.objectContaining({ where: { code: 'PLAN_PREMIUM', active: true } }))
-    expect(mockPriceList).toHaveBeenCalledWith(expect.objectContaining({ lookup_keys: ['plan_premium_monthly'] }), expect.anything())
 
     const arg = mockSessionCreate.mock.calls[0][0]
     expect(arg.mode).toBe('subscription')
-    expect(arg.line_items).toEqual([{ price: 'price_premium_monthly', quantity: 1 }])
+    expect(arg.line_items).toEqual([{ price: 'price_cotizado', quantity: 1 }])
     expect(arg.metadata).toEqual(expect.objectContaining({ venueId: 'v1', tierCode: 'PLAN_PREMIUM' }))
     expect(arg.subscription_data.metadata).toEqual(
       expect.objectContaining({ venueId: 'v1', tierCode: 'PLAN_PREMIUM', featureId: 'feat-premium', featureCode: 'PLAN_PREMIUM' }),
@@ -136,46 +135,45 @@ describe('createPlanCheckoutSession', () => {
   })
 
   it('PREMIUM annual: uses the plan_premium_annual lookup_key', async () => {
-    mockPriceList.mockResolvedValue({ data: [{ id: 'price_premium_annual' }] })
     await createPlanCheckoutSession({
       venueId: 'v1',
       customerId: 'cus_1',
+      priceId: 'price_cotizado',
       interval: 'annual',
       tierCode: 'PLAN_PREMIUM',
       successUrl: 'https://dash/ok',
       cancelUrl: 'https://dash/cancel',
     })
-    expect(mockPriceList).toHaveBeenCalledWith(expect.objectContaining({ lookup_keys: ['plan_premium_annual'] }), expect.anything())
     const arg = mockSessionCreate.mock.calls[0][0]
-    expect(arg.line_items[0].price).toBe('price_premium_annual')
+    expect(arg.line_items[0].price).toBe('price_cotizado')
   })
 
-  it('throws a clear error when the PLAN_PRO price cannot be resolved', async () => {
-    mockPriceList.mockResolvedValue({ data: [] })
+  it('usa el priceId recibido y no lista por llave', async () => {
+    await createPlanCheckoutSession({
+      venueId: 'v1',
+      customerId: 'cus_1',
+      priceId: 'price_cotizado',
+      interval: 'monthly',
+      successUrl: 'https://dash/ok',
+      cancelUrl: 'https://dash/cancel',
+    })
+    expect(mockSessionCreate.mock.calls[0][0].line_items[0].price).toBe('price_cotizado')
+    expect(mockPriceList).not.toHaveBeenCalled()
+  })
+
+  it('sin el plan en el catálogo lanza y no abre sesión', async () => {
+    mockFeatureFindFirst.mockResolvedValue(null)
     await expect(
       createPlanCheckoutSession({
         venueId: 'v1',
         customerId: 'cus_1',
-        interval: 'monthly',
-        successUrl: 'https://dash/ok',
-        cancelUrl: 'https://dash/cancel',
-      }),
-    ).rejects.toThrow(/plan_pro_monthly/)
-    expect(mockSessionCreate).not.toHaveBeenCalled()
-  })
-
-  it('throws a clear error when the PLAN_PREMIUM price cannot be resolved', async () => {
-    mockPriceList.mockResolvedValue({ data: [] })
-    await expect(
-      createPlanCheckoutSession({
-        venueId: 'v1',
-        customerId: 'cus_1',
+        priceId: 'price_cotizado',
         interval: 'annual',
         tierCode: 'PLAN_PREMIUM',
         successUrl: 'https://dash/ok',
         cancelUrl: 'https://dash/cancel',
       }),
-    ).rejects.toThrow(/plan_premium_annual/)
+    ).rejects.toThrow(/PLAN_PREMIUM/)
     expect(mockSessionCreate).not.toHaveBeenCalled()
   })
 })
@@ -185,15 +183,12 @@ describe('🔴 Codex C3: se abre bajo el candado de la regla', () => {
     await createPlanCheckoutSession({
       venueId: 'v1',
       customerId: 'cus_1',
+      priceId: 'price_cotizado',
       interval: 'monthly',
       successUrl: 'https://dash/ok',
       cancelUrl: 'https://dash/no',
     })
 
-    expect(mockPriceList).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.objectContaining({ timeout: expect.any(Number), maxNetworkRetries: 0 }),
-    )
     expect(mockSessionCreate).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({ timeout: expect.any(Number), maxNetworkRetries: 0 }),
@@ -206,6 +201,7 @@ describe('🔴 Codex C3: se abre bajo el candado de la regla', () => {
     await createPlanCheckoutSession({
       venueId: 'v1',
       customerId: 'cus_1',
+      priceId: 'price_cotizado',
       interval: 'monthly',
       successUrl: 's',
       cancelUrl: 'c',
@@ -215,9 +211,85 @@ describe('🔴 Codex C3: se abre bajo el candado de la regla', () => {
     expect(conPrueba.subscription_data.trial_end).toBe(Math.floor(fin.getTime() / 1000))
     expect(conPrueba.allow_promotion_codes).toBe(false)
 
-    await createPlanCheckoutSession({ venueId: 'v1', customerId: 'cus_1', interval: 'monthly', successUrl: 's', cancelUrl: 'c' })
+    await createPlanCheckoutSession({
+      venueId: 'v1',
+      customerId: 'cus_1',
+      priceId: 'price_cotizado',
+      interval: 'monthly',
+      successUrl: 's',
+      cancelUrl: 'c',
+    })
     const normal = mockSessionCreate.mock.calls[1][0]
     expect(normal.subscription_data.trial_end).toBeUndefined()
     expect(normal.allow_promotion_codes).toBe(true)
+  })
+})
+
+// Planes editables (B2, Task 7): la compra de «Tu plan» con una versión del editor cita su versión en la metadata.
+describe('extraMetadata (B2, Task 7)', () => {
+  const abrir = (extraMetadata?: Record<string, string>) =>
+    createPlanCheckoutSession({
+      venueId: 'v1',
+      customerId: 'cus_1',
+      priceId: 'price_v2_pro_m',
+      interval: 'monthly',
+      tierCode: 'PLAN_PRO',
+      successUrl: 's',
+      cancelUrl: 'c',
+      venueName: 'Acme',
+      venueSlug: 'acme',
+      ...(extraMetadata ? { extraMetadata } : {}),
+    })
+
+  it('extraMetadata va en metadata y en subscription_data.metadata sin pisar kind, venueId, tierCode ni interval; sin ella, el cuerpo de siempre', async () => {
+    await abrir()
+    const deSiempre = mockSessionCreate.mock.calls[0]
+
+    await abrir({
+      planOfferVersion: '2',
+      planOfferPrecioDe: '2',
+      // Lo que intenta pisar lo nuestro no lo pisa.
+      kind: 'OTRO',
+      venueId: 'v_ajeno',
+      tierCode: 'PLAN_PREMIUM',
+      interval: 'annual',
+    })
+    const conVersion = mockSessionCreate.mock.calls[1][0]
+
+    expect(conVersion.metadata).toEqual({
+      planOfferVersion: '2',
+      planOfferPrecioDe: '2',
+      kind: 'PLAN_CHECKOUT',
+      venueId: 'v1',
+      tierCode: 'PLAN_PRO',
+      interval: 'monthly',
+    })
+    expect(conVersion.subscription_data.metadata).toEqual({
+      planOfferVersion: '2',
+      planOfferPrecioDe: '2',
+      kind: 'PLAN_CHECKOUT',
+      venueId: 'v1',
+      tierCode: 'PLAN_PRO',
+      featureId: 'feat-pro',
+      featureCode: 'PLAN_PRO',
+      interval: 'monthly',
+      venueName: 'Acme',
+      venueSlug: 'acme',
+    })
+
+    // Sin ella, exactamente el cuerpo de siempre: las mismas llaves, en el mismo orden, y las mismas opciones.
+    expect(deSiempre[0].metadata).toEqual({ kind: 'PLAN_CHECKOUT', venueId: 'v1', tierCode: 'PLAN_PRO', interval: 'monthly' })
+    expect(Object.keys(deSiempre[0].metadata)).toEqual(['kind', 'venueId', 'tierCode', 'interval'])
+    expect(Object.keys(deSiempre[0].subscription_data.metadata)).toEqual([
+      'kind',
+      'venueId',
+      'tierCode',
+      'featureId',
+      'featureCode',
+      'interval',
+      'venueName',
+      'venueSlug',
+    ])
+    expect(deSiempre[1]).toEqual({ timeout: 15_000, maxNetworkRetries: 0 })
   })
 })

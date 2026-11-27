@@ -42,6 +42,12 @@ jest.mock('@/services/online-ordering/card/guards', () => ({
   assertNotFolioInTx: jest.fn(async () => undefined),
 }))
 jest.mock('@/services/dashboard/activity-log.service', () => ({ logAction: jest.fn() }))
+// D39: el canje revisa que no haya un cobro de la terminal sin desenlace (lee `terminalPaymentRequest`, que los `tx` a mano no traen).
+// Se prueba en `canjeCandadoDeLaOferta.test.ts` y en la integración.
+jest.mock('@/services/shared/orderCancelGuard', () => ({
+  ...jest.requireActual('@/services/shared/orderCancelGuard'),
+  assertNoLiveTerminalCharge: jest.fn(async () => undefined),
+}))
 jest.mock('@/services/wallet/notifyPassUpdated.service', () => ({ notifyCustomerPassUpdated: jest.fn() }))
 jest.mock('@/services/venueSalesGuard', () => ({ __esModule: true, assertVenueSalesEnabled: jest.fn() }))
 jest.mock('@/communication/sockets', () => ({ __esModule: true, default: { getBroadcastingService: jest.fn(() => null) } }))

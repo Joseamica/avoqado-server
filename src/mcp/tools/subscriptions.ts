@@ -52,6 +52,15 @@ export function summarizeSubscriptions(rows: SuperadminVenueSubscription[]): Sub
 // `start_plan_checkout` action tool once the MCP gains a vetted action/write surface.
 // Read state via `subscription_status` below in the meantime.
 //
+// CAPABILITY NOTE (MCP sync, planes editables B2 Task 7): once the SUPERADMIN publishes an editor version of the plan offer
+// (v2+), GET /api/v1/dashboard/venues/:venueId/plan adds `cotizacion` — per plan and interval, the price of that version and a
+// signed `quoteToken` (scope `venue:<venueId>`, 24 h; amounts are integer CENTS there, the Stripe-mirror exception) — and, for a
+// trial WITHOUT a card, `estadoDeLaPrueba` (SIN_TARJETA / CON_TARJETA / TERMINADA, the card Stripe would charge and the amount of
+// Stripe's preview). plan/checkout then REQUIRES that `quoteToken` (409 OFFER_CHANGED otherwise), and POST
+// …/billing-portal with { flujo: 'PONER_TARJETA' } opens Stripe's portal straight on the card flow. None of it is an MCP tool: the
+// checkout and the portal mint live Stripe URLs (same reasons as above), and `subscription_status` keeps reporting the
+// subscription state. A future read tool for the quote must convert those cents to PESOS at its boundary.
+//
 // CAPABILITY NOTE (MCP sync): the backend also exposes a cancellation-retention action —
 // POST /api/v1/dashboard/venues/:venueId/plan/retention-offer (controller
 // venueDashboardService → planStateService.applyRetentionOffer). It accepts

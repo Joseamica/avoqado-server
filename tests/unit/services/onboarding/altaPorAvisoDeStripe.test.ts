@@ -44,6 +44,84 @@ describe('cerrarAltaPorAvisoDeStripe', () => {
     expect(cerrarAltaSinNavegador).not.toHaveBeenCalled()
   })
 
+  it('🔴 aviso de factura pagada de una suscripción cuyo id no se guardó, con su metadata de versión e intento → registra el id y cierra; sin esa metadata, nada (como hoy)', async () => {
+    // Nadie apunta a esa suscripción: la respuesta del create se perdió antes de guardar su id (b2-r1 #1).
+    prismaMock.onboardingProgress.findFirst.mockResolvedValue(null)
+    prismaMock.onboardingProgress.findUnique.mockResolvedValue({
+      organizationId: 'org-1',
+      completedAt: null,
+      planActivationStatus: 'IN_PROGRESS',
+      planActivationAttempt: 3,
+      planStripeSubscriptionId: null,
+    } as never)
+    prismaMock.onboardingProgress.updateMany.mockResolvedValue({ count: 1 } as never)
+    const metadata = { organizationId: 'org-1', planActivationKey: 'plan-activation:org-1:3', planOfferVersion: '2' }
+
+    await cerrarAltaPorAvisoDeStripe('sub_1', metadata)
+
+    expect(prismaMock.onboardingProgress.updateMany).toHaveBeenCalledWith({
+      where: { organizationId: 'org-1', planActivationAttempt: 3, planActivationStatus: 'IN_PROGRESS', planStripeSubscriptionId: null },
+      data: { planStripeSubscriptionId: 'sub_1' },
+    })
+    expect(cerrarAltaSinNavegador).toHaveBeenCalledWith('org-1', 'aviso-stripe')
+
+    // Sin esa metadata (sin versión, de otro intento u otra organización, o ya sin IN_PROGRESS): lo de hoy, nada.
+    for (const otra of [
+      undefined,
+      null,
+      {},
+      { organizationId: 'org-1', planActivationKey: 'plan-activation:org-1:3' },
+      { ...metadata, planActivationKey: 'plan-activation:org-1:2' },
+      { ...metadata, planActivationKey: 'plan-activation:org-2:3' },
+    ]) {
+      jest.clearAllMocks()
+      await cerrarAltaPorAvisoDeStripe('sub_1', otra as Record<string, string> | null | undefined)
+      expect(prismaMock.onboardingProgress.updateMany).not.toHaveBeenCalled()
+      expect(cerrarAltaSinNavegador).not.toHaveBeenCalled()
+    }
+
+    // El CAS no tocó la fila (otro camino ya registró su id o el intento cambió): no se cierra desde aquí.
+    jest.clearAllMocks()
+    prismaMock.onboardingProgress.updateMany.mockResolvedValue({ count: 0 } as never)
+    await cerrarAltaPorAvisoDeStripe('sub_1', metadata)
+    expect(cerrarAltaSinNavegador).not.toHaveBeenCalled()
+
+    // Ya no está a medio pago: nada.
+    jest.clearAllMocks()
+    prismaMock.onboardingProgress.findUnique.mockResolvedValue({
+      organizationId: 'org-1',
+      completedAt: null,
+      planActivationStatus: 'DECLINED',
+      planActivationAttempt: 3,
+      planStripeSubscriptionId: null,
+    } as never)
+    await cerrarAltaPorAvisoDeStripe('sub_1', metadata)
+    expect(prismaMock.onboardingProgress.updateMany).not.toHaveBeenCalled()
+    expect(cerrarAltaSinNavegador).not.toHaveBeenCalled()
+  })
+
+  it('programarCierreDelAltaPorAviso pasa la metadata de la factura al cierre', async () => {
+    jest.useFakeTimers()
+    prismaMock.onboardingProgress.findFirst.mockResolvedValue(null)
+    prismaMock.onboardingProgress.findUnique.mockResolvedValue({
+      organizationId: 'org-1',
+      completedAt: null,
+      planActivationStatus: 'IN_PROGRESS',
+      planActivationAttempt: 1,
+      planStripeSubscriptionId: null,
+    } as never)
+    prismaMock.onboardingProgress.updateMany.mockResolvedValue({ count: 1 } as never)
+
+    programarCierreDelAltaPorAviso('sub_1', {
+      organizationId: 'org-1',
+      planActivationKey: 'plan-activation:org-1:1',
+      planOfferVersion: '2',
+    })
+    await jest.advanceTimersByTimeAsync(30_000)
+
+    expect(cerrarAltaSinNavegador).toHaveBeenCalledWith('org-1', 'aviso-stripe')
+  })
+
   it.each(['NONE', 'DECLINED'])('con el plan en %s no hace nada', async estado => {
     prismaMock.onboardingProgress.findFirst.mockResolvedValue({ organizationId: 'org-1', planActivationStatus: estado })
     await cerrarAltaPorAvisoDeStripe('sub_1')

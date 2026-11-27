@@ -22,6 +22,9 @@
  * --confirm-db (the `cancelar-ordenes-fantasma.ts` pattern, plus the name: several databases share `localhost`). It is the
  * only defense against an inherited DATABASE_URL pointing elsewhere. The Prisma client is loaded only after that check,
  * from that same DATABASE_URL.
+ *
+ * 🔴 Planes editables (B1, design §15): once the plan offer has a version (`scripts/seed-plan-offer-v1.ts`), a plan's price
+ * only changes by publishing a version. --apply then refuses (SeedRefusal, exit 2): the refused write leaves nothing behind.
  */
 import { STANDARD_PLAN_GROSS_CENTS } from '../src/services/access/planPricing.constants'
 import type { PlanSeedOutcome } from '../src/services/launchCampaigns/hybridListPrice.service'
@@ -53,7 +56,7 @@ export interface SeedResult {
 export class SeedRefusal extends Error {}
 
 /** Host and database name of the DATABASE_URL this run connects to. The full URL (with its password) is never printed. */
-function database(): { host: string; name: string } {
+export function database(): { host: string; name: string } {
   const url = process.env.DATABASE_URL
   if (!url) throw new SeedRefusal('Falta DATABASE_URL: no hay base a la que conectarse.')
   let parsed: URL
@@ -118,17 +121,26 @@ export async function seedPlanLists(
     staffId = staff.id
   }
 
+  // Since the plan offer has a version, its publisher owns the plan lists: the old writers answer this 409.
+  const refusal = (error: unknown): never => {
+    if ((error as { code?: string } | null)?.code === 'PLAN_OFFER_OWNS_PLAN_LISTS')
+      throw new SeedRefusal(
+        '🔴 Se negó: los planes ya tienen versión de la oferta y su precio sólo cambia publicando desde «Planes» en el SUPERADMIN. La negativa no escribió nada.',
+      )
+    throw error
+  }
+
   const board = await listPriceBoard()
   const results: SeedResult[] = []
   for (const tier of TIERS) {
     const productKey = `PLAN:${tier}`
     const price = STANDARD_PLAN_GROSS_CENTS[tier].monthly / 100
     const row = board.find(candidate => candidate.productKey === productKey)!
-    const outcome = options.apply ? (await seedPlanList(tier, price, staffId!)).outcome : planSeedOutcome(row, price)
+    const outcome = options.apply ? (await seedPlanList(tier, price, staffId!).catch(refusal)).outcome : planSeedOutcome(row, price)
     // After the seed nothing is pending, so --apply always brings the composition up to date (a no-op when it already is);
     // the dry run only reads it.
     const composed = options.apply
-      ? await recomposePlanList(tier, staffId!)
+      ? await recomposePlanList(tier, staffId!).catch(refusal)
       : { ...(await planListCompositionGap(tier)), recomposed: false }
     const result = { productKey, outcome, price, current: row.price, pending: row.pendingPrice, ...composed }
     results.push(result)

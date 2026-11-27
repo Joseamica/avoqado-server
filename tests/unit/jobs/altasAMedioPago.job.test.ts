@@ -28,13 +28,17 @@ beforeEach(() => {
 })
 
 describe('altas-a-medio-pago', () => {
-  it('J.1 revisa sólo altas a medio pago, con suscripción, sin lease vivo y quietas 15 min; lote acotado', async () => {
+  it('J.1 revisa sólo altas a medio pago, con suscripción (o de una versión del editor sin su id, B2 Task 5), sin lease vivo y quietas 15 min; lote acotado', async () => {
     const ahora = Date.now()
     await nuevoJob().runNow()
 
     const { where, take } = consultasDel('IN_PROGRESS')[0][0]
     expect(take).toBe(25)
-    expect(where).toMatchObject({ completedAt: null, planActivationStatus: 'IN_PROGRESS', planStripeSubscriptionId: { not: null } })
+    expect(where).toMatchObject({ completedAt: null, planActivationStatus: 'IN_PROGRESS' })
+    expect(where).not.toHaveProperty('planStripeSubscriptionId')
+    expect(where.AND).toEqual([
+      { OR: [{ planStripeSubscriptionId: { not: null } }, { planStripeSubscriptionId: null, planOfferVersionNumber: { gte: 2 } }] },
+    ])
     expect(where.OR).toEqual([{ planActivationLeaseUntil: null }, { planActivationLeaseUntil: { lt: expect.any(Date) } }])
     const quieta = where.updatedAt.lt.getTime()
     expect(ahora - quieta).toBeGreaterThanOrEqual(15 * 60_000 - 1_000)

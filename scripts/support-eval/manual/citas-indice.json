@@ -910,7 +910,7 @@
     "avoqado-android:app/src/main/java/com/avoqado/pos/designsystem/components/PlanGate.kt": [
       {
         "pagina": "android/lealtad/canjear-puntos",
-        "sourceRef": "06e8011534e2d36bd738d707e68c73b08f06b71e"
+        "sourceRef": "98a114df07c2eb0a6a3e7d1c336e6c152de38a1b"
       },
       {
         "pagina": "android/mesas/abrir-mesa-y-ordenar",
@@ -922,7 +922,7 @@
       },
       {
         "pagina": "windows/lealtad/canjear-puntos",
-        "sourceRef": "06e8011534e2d36bd738d707e68c73b08f06b71e"
+        "sourceRef": "98a114df07c2eb0a6a3e7d1c336e6c152de38a1b"
       },
       {
         "pagina": "windows/mesas/abrir-mesa-y-ordenar",
@@ -1920,7 +1920,7 @@
       },
       {
         "pagina": "android/lealtad/canjear-puntos",
-        "sourceRef": "06e8011534e2d36bd738d707e68c73b08f06b71e"
+        "sourceRef": "98a114df07c2eb0a6a3e7d1c336e6c152de38a1b"
       },
       {
         "pagina": "android/mesas/abrir-mesa-y-ordenar",
@@ -1956,7 +1956,7 @@
       },
       {
         "pagina": "windows/lealtad/canjear-puntos",
-        "sourceRef": "06e8011534e2d36bd738d707e68c73b08f06b71e"
+        "sourceRef": "98a114df07c2eb0a6a3e7d1c336e6c152de38a1b"
       },
       {
         "pagina": "windows/mesas/abrir-mesa-y-ordenar",
@@ -2331,12 +2331,20 @@
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/payment/presentation/CobroDeCuentaScreen.kt": [
       {
+        "pagina": "android/lealtad/canjear-puntos",
+        "sourceRef": "98a114df07c2eb0a6a3e7d1c336e6c152de38a1b"
+      },
+      {
         "pagina": "windows/cobro/cancelar-cobro-en-la-terminal",
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
       },
       {
         "pagina": "windows/cobro/cobro-sin-confirmar-en-la-terminal",
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+      },
+      {
+        "pagina": "windows/lealtad/canjear-puntos",
+        "sourceRef": "98a114df07c2eb0a6a3e7d1c336e6c152de38a1b"
       }
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowScreen.kt": [
@@ -2455,6 +2463,10 @@
         "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
       },
       {
+        "pagina": "android/lealtad/canjear-puntos",
+        "sourceRef": "98a114df07c2eb0a6a3e7d1c336e6c152de38a1b"
+      },
+      {
         "pagina": "android/lealtad/sello-que-no-se-sumo",
         "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
       },
@@ -2497,6 +2509,10 @@
       {
         "pagina": "windows/impresoras/pantalla-de-cocina-sin-internet",
         "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
+      },
+      {
+        "pagina": "windows/lealtad/canjear-puntos",
+        "sourceRef": "98a114df07c2eb0a6a3e7d1c336e6c152de38a1b"
       },
       {
         "pagina": "windows/lealtad/sello-que-no-se-sumo",
@@ -2842,7 +2858,7 @@
       },
       {
         "pagina": "android/lealtad/canjear-puntos",
-        "sourceRef": "06e8011534e2d36bd738d707e68c73b08f06b71e"
+        "sourceRef": "98a114df07c2eb0a6a3e7d1c336e6c152de38a1b"
       },
       {
         "pagina": "android/ordenes/cambiar-o-quitar-articulos-del-carrito",
@@ -2890,7 +2906,7 @@
       },
       {
         "pagina": "windows/lealtad/canjear-puntos",
-        "sourceRef": "06e8011534e2d36bd738d707e68c73b08f06b71e"
+        "sourceRef": "98a114df07c2eb0a6a3e7d1c336e6c152de38a1b"
       },
       {
         "pagina": "windows/maquina-de-efectivo/cobrar-en-la-maquina-de-efectivo",
@@ -4030,7 +4046,7 @@
     "avoqado-android:app/src/main/java/com/avoqado/pos/settings/domain/PosMode.kt": [
       {
         "pagina": "android/lealtad/canjear-puntos",
-        "sourceRef": "06e8011534e2d36bd738d707e68c73b08f06b71e"
+        "sourceRef": "98a114df07c2eb0a6a3e7d1c336e6c152de38a1b"
       },
       {
         "pagina": "android/mesas/abrir-mesa-y-ordenar",
@@ -4042,7 +4058,7 @@
       },
       {
         "pagina": "windows/lealtad/canjear-puntos",
-        "sourceRef": "06e8011534e2d36bd738d707e68c73b08f06b71e"
+        "sourceRef": "98a114df07c2eb0a6a3e7d1c336e6c152de38a1b"
       },
       {
         "pagina": "windows/mesas/abrir-mesa-y-ordenar",
@@ -4156,11 +4172,11 @@
     "avoqado-android:app/src/main/java/com/avoqado/pos/tables/data/TableModels.kt": [
       {
         "pagina": "android/lealtad/canjear-puntos",
-        "sourceRef": "06e8011534e2d36bd738d707e68c73b08f06b71e"
+        "sourceRef": "98a114df07c2eb0a6a3e7d1c336e6c152de38a1b"
       },
       {
         "pagina": "windows/lealtad/canjear-puntos",
-        "sourceRef": "06e8011534e2d36bd738d707e68c73b08f06b71e"
+        "sourceRef": "98a114df07c2eb0a6a3e7d1c336e6c152de38a1b"
       }
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/tables/data/TableServiceRepository.kt": [
@@ -4183,6 +4199,16 @@
         "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
       }
     ],
+    "avoqado-android:app/src/main/java/com/avoqado/pos/tables/presentation/RewardsDialog.kt": [
+      {
+        "pagina": "android/lealtad/canjear-puntos",
+        "sourceRef": "98a114df07c2eb0a6a3e7d1c336e6c152de38a1b"
+      },
+      {
+        "pagina": "windows/lealtad/canjear-puntos",
+        "sourceRef": "98a114df07c2eb0a6a3e7d1c336e6c152de38a1b"
+      }
+    ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/tables/presentation/TableOrderScreen.kt": [
       {
         "pagina": "android/cobro/dar-descuento-o-cortesia",
@@ -4194,7 +4220,7 @@
       },
       {
         "pagina": "android/lealtad/canjear-puntos",
-        "sourceRef": "06e8011534e2d36bd738d707e68c73b08f06b71e"
+        "sourceRef": "98a114df07c2eb0a6a3e7d1c336e6c152de38a1b"
       },
       {
         "pagina": "android/mesas/abrir-mesa-y-ordenar",
@@ -4222,7 +4248,7 @@
       },
       {
         "pagina": "windows/lealtad/canjear-puntos",
-        "sourceRef": "06e8011534e2d36bd738d707e68c73b08f06b71e"
+        "sourceRef": "98a114df07c2eb0a6a3e7d1c336e6c152de38a1b"
       },
       {
         "pagina": "windows/mesas/abrir-mesa-y-ordenar",
@@ -4256,7 +4282,7 @@
       },
       {
         "pagina": "android/lealtad/canjear-puntos",
-        "sourceRef": "06e8011534e2d36bd738d707e68c73b08f06b71e"
+        "sourceRef": "98a114df07c2eb0a6a3e7d1c336e6c152de38a1b"
       },
       {
         "pagina": "android/mesas/abrir-mesa-y-ordenar",
@@ -4284,7 +4310,7 @@
       },
       {
         "pagina": "windows/lealtad/canjear-puntos",
-        "sourceRef": "06e8011534e2d36bd738d707e68c73b08f06b71e"
+        "sourceRef": "98a114df07c2eb0a6a3e7d1c336e6c152de38a1b"
       },
       {
         "pagina": "windows/mesas/abrir-mesa-y-ordenar",
@@ -4302,7 +4328,7 @@
     "avoqado-android:app/src/main/java/com/avoqado/pos/tables/presentation/TablesScreen.kt": [
       {
         "pagina": "android/lealtad/canjear-puntos",
-        "sourceRef": "06e8011534e2d36bd738d707e68c73b08f06b71e"
+        "sourceRef": "98a114df07c2eb0a6a3e7d1c336e6c152de38a1b"
       },
       {
         "pagina": "android/mesas/abrir-mesa-y-ordenar",
@@ -4318,7 +4344,7 @@
       },
       {
         "pagina": "windows/lealtad/canjear-puntos",
-        "sourceRef": "06e8011534e2d36bd738d707e68c73b08f06b71e"
+        "sourceRef": "98a114df07c2eb0a6a3e7d1c336e6c152de38a1b"
       },
       {
         "pagina": "windows/mesas/abrir-mesa-y-ordenar",
@@ -4840,7 +4866,7 @@
       },
       {
         "pagina": "android/lealtad/canjear-puntos",
-        "sourceRef": "06e8011534e2d36bd738d707e68c73b08f06b71e"
+        "sourceRef": "98a114df07c2eb0a6a3e7d1c336e6c152de38a1b"
       },
       {
         "pagina": "android/lealtad/sello-que-no-se-sumo",
@@ -4980,7 +5006,7 @@
       },
       {
         "pagina": "windows/lealtad/canjear-puntos",
-        "sourceRef": "06e8011534e2d36bd738d707e68c73b08f06b71e"
+        "sourceRef": "98a114df07c2eb0a6a3e7d1c336e6c152de38a1b"
       },
       {
         "pagina": "windows/lealtad/sello-que-no-se-sumo",
@@ -5150,11 +5176,11 @@
     "avoqado-android:avoqado-server/src/services/mobile/loyalty.mobile.service.ts": [
       {
         "pagina": "android/lealtad/canjear-puntos",
-        "sourceRef": "06e8011534e2d36bd738d707e68c73b08f06b71e"
+        "sourceRef": "98a114df07c2eb0a6a3e7d1c336e6c152de38a1b"
       },
       {
         "pagina": "windows/lealtad/canjear-puntos",
-        "sourceRef": "06e8011534e2d36bd738d707e68c73b08f06b71e"
+        "sourceRef": "98a114df07c2eb0a6a3e7d1c336e6c152de38a1b"
       }
     ],
     "avoqado-android:avoqado-server/src/services/mobile/order.mobile.service.ts": [
@@ -5164,7 +5190,7 @@
       },
       {
         "pagina": "android/lealtad/canjear-puntos",
-        "sourceRef": "06e8011534e2d36bd738d707e68c73b08f06b71e"
+        "sourceRef": "98a114df07c2eb0a6a3e7d1c336e6c152de38a1b"
       },
       {
         "pagina": "android/lealtad/sello-que-no-se-sumo",
@@ -5176,7 +5202,7 @@
       },
       {
         "pagina": "windows/lealtad/canjear-puntos",
-        "sourceRef": "06e8011534e2d36bd738d707e68c73b08f06b71e"
+        "sourceRef": "98a114df07c2eb0a6a3e7d1c336e6c152de38a1b"
       },
       {
         "pagina": "windows/lealtad/sello-que-no-se-sumo",
@@ -5299,6 +5325,16 @@
       {
         "pagina": "windows/cobro/dar-descuento-o-cortesia",
         "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
+      }
+    ],
+    "avoqado-android:avoqado-server/src/services/terminal-payment.service.ts": [
+      {
+        "pagina": "android/lealtad/canjear-puntos",
+        "sourceRef": "98a114df07c2eb0a6a3e7d1c336e6c152de38a1b"
+      },
+      {
+        "pagina": "windows/lealtad/canjear-puntos",
+        "sourceRef": "98a114df07c2eb0a6a3e7d1c336e6c152de38a1b"
       }
     ],
     "avoqado-android:avoqado-web-dashboard/src/components/Sidebar/app-sidebar.tsx": [
@@ -5588,7 +5624,7 @@
       },
       {
         "pagina": "windows/lealtad/canjear-puntos",
-        "sourceRef": "06e8011534e2d36bd738d707e68c73b08f06b71e"
+        "sourceRef": "98a114df07c2eb0a6a3e7d1c336e6c152de38a1b"
       },
       {
         "pagina": "windows/mesas/abrir-mesa-y-ordenar",
@@ -5755,6 +5791,12 @@
       {
         "pagina": "windows/impresoras/pantalla-de-cocina-sin-internet",
         "sourceRef": "6e37a5418eda101109e73fd319bdb3eb5932cbe6"
+      }
+    ],
+    "avoqado-tpv:app/src/main/java/com/jaac/avoqado_tpv/core/data/network/PermisoRequerido.kt": [
+      {
+        "pagina": "tpv/mesas/descuento-en-la-cuenta-de-la-mesa",
+        "sourceRef": "a48295a1fd9273c36459a29e6a5d59a6a5122791"
       }
     ],
     "avoqado-tpv:app/src/main/java/com/jaac/avoqado_tpv/core/data/workers/PaymentSyncWorker.kt": [
@@ -6004,7 +6046,7 @@
       },
       {
         "pagina": "tpv/mesas/descuento-en-la-cuenta-de-la-mesa",
-        "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660"
+        "sourceRef": "a48295a1fd9273c36459a29e6a5d59a6a5122791"
       },
       {
         "pagina": "tpv/mesas/fusionar-cuentas",
@@ -6831,6 +6873,10 @@
         "sourceRef": "4c92a98fab1256782524e72748f44bfe99e2052d"
       },
       {
+        "pagina": "tpv/mesas/descuento-en-la-cuenta-de-la-mesa",
+        "sourceRef": "a48295a1fd9273c36459a29e6a5d59a6a5122791"
+      },
+      {
         "pagina": "tpv/mesas/mover-mesa",
         "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660"
       },
@@ -6842,7 +6888,13 @@
     "avoqado-tpv:app/src/main/java/com/jaac/avoqado_tpv/features/tables/data/api/TablesApiService.kt": [
       {
         "pagina": "tpv/mesas/descuento-en-la-cuenta-de-la-mesa",
-        "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660"
+        "sourceRef": "a48295a1fd9273c36459a29e6a5d59a6a5122791"
+      }
+    ],
+    "avoqado-tpv:app/src/main/java/com/jaac/avoqado_tpv/features/tables/domain/model/AvailableDiscount.kt": [
+      {
+        "pagina": "tpv/mesas/descuento-en-la-cuenta-de-la-mesa",
+        "sourceRef": "a48295a1fd9273c36459a29e6a5d59a6a5122791"
       }
     ],
     "avoqado-tpv:app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/AssignWaiterSheet.kt": [
@@ -6860,7 +6912,7 @@
     "avoqado-tpv:app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/DiscountPickerSheet.kt": [
       {
         "pagina": "tpv/mesas/descuento-en-la-cuenta-de-la-mesa",
-        "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660"
+        "sourceRef": "a48295a1fd9273c36459a29e6a5d59a6a5122791"
       }
     ],
     "avoqado-tpv:app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/MergeOrdersSheet.kt": [
@@ -6890,7 +6942,7 @@
       },
       {
         "pagina": "tpv/mesas/descuento-en-la-cuenta-de-la-mesa",
-        "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660"
+        "sourceRef": "a48295a1fd9273c36459a29e6a5d59a6a5122791"
       }
     ],
     "avoqado-tpv:app/src/main/java/com/jaac/avoqado_tpv/features/tables/presentation/TableCheckoutViewModel.kt": [
@@ -7049,6 +7101,12 @@
         "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660"
       }
     ],
+    "avoqado-tpv:avoqado-server/src/controllers/tpv/discount.tpv.controller.ts": [
+      {
+        "pagina": "tpv/mesas/descuento-en-la-cuenta-de-la-mesa",
+        "sourceRef": "a48295a1fd9273c36459a29e6a5d59a6a5122791"
+      }
+    ],
     "avoqado-tpv:avoqado-server/src/routes/dashboard.routes.ts": [
       {
         "pagina": "tpv/sesion/pin-incorrecto",
@@ -7122,7 +7180,7 @@
       },
       {
         "pagina": "tpv/mesas/descuento-en-la-cuenta-de-la-mesa",
-        "sourceRef": "031f14db2969606125a4a04c9f8f30bdd402a660"
+        "sourceRef": "a48295a1fd9273c36459a29e6a5d59a6a5122791"
       },
       {
         "pagina": "tpv/mesas/fusionar-cuentas",

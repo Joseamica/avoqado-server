@@ -93,7 +93,20 @@ export class OfertaDeCanjeCambio extends BadRequestError {
  * previa). `deLaCabecera`: la clienta enseñada es la de la cabecera de la cuenta (la tablet sólo conoce ésa); si otra caja la cambió,
  * aunque la anterior siga ligada (`OrderCustomer`), la oferta ya no es la que se enseñó (Codex android r10 #1).
  */
-export type OfertaEsperada = { monto: number; puntos?: number; deLaCabecera?: boolean }
+export type OfertaEsperada = {
+  monto: number
+  puntos?: number
+  deLaCabecera?: boolean
+  /**
+   * D39 (Codex r1 #2 y #3): la versión de la cuenta que enseñó la caja. Con ella, cualquier cambio de la cuenta (otra caja, el panel, el
+   * mismo canje que ya entró y cuya respuesta se perdió: el canje sube la versión) es el 409 del candado. Opcional: sin ella, como antes.
+   */
+  version?: number
+}
+
+/** D39 (Codex r1 #4): un canje no baja la cuenta mientras la terminal tiene un cobro con el importe de antes. */
+export const CANJE_CON_COBRO_EN_LA_TERMINAL =
+  'Hay un cobro con tarjeta en curso en la terminal para esta cuenta: espera a que termine para canjear puntos.'
 
 /**
  * 🔴 `LoyaltyTransaction.createdById` and `OrderDiscount.appliedById` FK to
@@ -342,6 +355,7 @@ export async function redeemPointsToOrderInTransaction(
       originSystem: true,
       status: true,
       customerId: true,
+      version: true,
     },
   })
   if (!order) throw new NotFoundError('Orden no encontrada')
@@ -353,12 +367,19 @@ export async function redeemPointsToOrderInTransaction(
   // el IVA dos veces (P12). Esos cambios se hacen en el POS externo.
   rechazarSiEsImportada(order)
   await rechazarSiEsCuentaDeTarjetas(tx, orderId, 'canje de puntos')
+  // D39 (Codex r1 #4): la terminal admitida cobra el importe que se le mandó; bajar la cuenta debajo de él cobraría de más. Bajo el MISMO
+  // candado que la admisión (`bloquearCuentaParaEditar` → `lockExistingOrderForPayment`): o la terminal ve el canje, o el canje la ve.
+  const { assertNoLiveTerminalCharge } = await import('../shared/orderCancelGuard')
+  await assertNoLiveTerminalCharge(tx, { venueId, orderId }, { mensaje: CANJE_CON_COBRO_EN_LA_TERMINAL })
   if (order.paymentStatus === 'PAID' || order.paymentStatus === 'PARTIAL') {
     throw negativa('No se puede modificar una orden ya pagada')
   }
   // D650: sólo los puntos de un cliente que está en la cuenta, leído bajo su candado (tomado arriba).
   if (!(await estaEnLaCuenta(tx, orderId, order.customerId, customerId))) throw negativa(CLIENTE_FUERA_DE_LA_CUENTA)
   if (esperado?.deLaCabecera && order.customerId !== customerId) throw negativa('La clienta de esta cuenta ya es otra.')
+  if (esperado?.version !== undefined && order.version !== esperado.version) {
+    throw new OfertaDeCanjeCambio('La cuenta cambió: vuelve a revisar los puntos.')
+  }
 
   const effectiveConfig = config ?? (await getOrCreateLoyaltyConfig(venueId, tx))
   if (!effectiveConfig.active) throw negativa('El programa de lealtad no está activo en esta sucursal')
@@ -442,6 +463,8 @@ export async function redeemPointsToOrderInTransaction(
   })
 
   const totals = await recalculateOrderTotals(orderId, 0, Number(order.paidAmount || 0), tx)
+  // D39 r10 (founder, «Sí, de raíz»): sin freno de $0.00. Una cuenta que los puntos cubren se cierra con un cobro de $0 («Cerrar
+  // cuenta ($0.00)» en Pedidos, como Mesas cierra una cortesía).
   return { pointsToBurn, discountAmount, newBalance, transaction, row, totals }
 }
 

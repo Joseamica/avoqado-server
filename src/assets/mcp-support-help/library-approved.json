@@ -164,7 +164,7 @@
       "gateKind": "FEATURE"
     },
     "android/lealtad/canjear-puntos": {
-      "sha256": "c287fa5bc80d38134bf2f24200d2ccfaef512fcc26e18a96b931172bcb636ca9",
+      "sha256": "aee734aaa50d47526c98020cae5194e3ce50ea270f5f2c6704e9398a83ff395f",
       "requiredPermissions": [
         "tables:read",
         "orders:update",
@@ -1221,7 +1221,7 @@
       "gateKind": "FEATURE"
     },
     "tpv/mesas/descuento-en-la-cuenta-de-la-mesa": {
-      "sha256": "b7f63938b8e06d23188dc583b68b2ff4241efd11f63744fe63ec40398f934756",
+      "sha256": "0ecd72e823bb4f349855e2d91fe93b396e839db97f18b88a496aa2c637ed2b20",
       "requiredPermissions": [
         "discounts:apply"
       ],

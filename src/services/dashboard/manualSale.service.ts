@@ -495,6 +495,7 @@ export interface RowResult {
    * repetido no frena la fila: sólo avisa antes de confirmar.
    */
   linkingDuplicate?: boolean
+  /** Ya no se manda: el portado puede repetirse (back-office, 26-nov). Queda en el tipo por los clientes que lo leen. */
   portedDuplicate?: boolean
 }
 
@@ -633,7 +634,8 @@ export async function bulkManualSales(
  * Marca los repetidos de la vista previa: contra la organización con UNA consulta para todo el archivo (las filas aún no
  * existen, así que `verificationId` va null y su ICCID descuenta su propio histórico), y contra las demás filas de
  * «crear» con un conteo en memoria. El mismo número en vinculación y portado de una fila cuenta una vez: no es repetido
- * consigo mismo.
+ * consigo mismo. Sólo se marca la vinculación: el portado puede repetirse (back-office, 26-nov), aunque sigue contando contra
+ * la vinculación de otra fila.
  */
 async function markDuplicateNumbers(orgId: string, rows: NumberedRow[]): Promise<void> {
   const inOrg = await findDuplicatesForSales(
@@ -654,6 +656,5 @@ async function markDuplicateNumbers(orgId: string, rows: NumberedRow[]): Promise
   for (const r of rows) {
     const found = inOrg.get(String(r.result.index))
     if (found?.linking || inFile(r.linkingNumber)) r.result.linkingDuplicate = true
-    if (found?.ported || inFile(r.portedNumber)) r.result.portedDuplicate = true
   }
 }

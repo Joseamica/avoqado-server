@@ -34,6 +34,11 @@ jest.mock('../../../../src/services/onboarding/ensureVenue.service', () => ({
 jest.mock('../../../../src/services/onboarding/signup.service', () => ({ __esModule: true }))
 jest.mock('../../../../src/services/onboarding/testPaymentLink.service', () => ({ __esModule: true }))
 
+jest.mock('../../../../src/services/billing/precioDelPlan', () => ({
+  resolverPrecioDelPlan: jest.fn().mockResolvedValue({ priceId: 'price_x', unitAmount: 0 }),
+  // Codex b2-code r5 A: el `catch` del alta larga pregunta `instanceof LecturaDeLaOfertaFallida`; aquí ninguna lectura falla.
+  LecturaDeLaOfertaFallida: class LecturaDeLaOfertaFallida extends Error {},
+}))
 jest.mock('../../../../src/services/stripe.service', () => ({
   __esModule: true,
   createOnboardingSetupIntent: jest.fn(),

@@ -18,6 +18,7 @@ import { daAcceso } from '@/services/access/ventanaDeAcceso'
 import { GRANDFATHER_SELECT, resolveGrandfathered } from '@/services/access/grandfather'
 import {
   retrievePlanSubscription,
+  type ResumenDeLaSuscripcionDelPlan,
   setSubscriptionCancelAtPeriodEnd,
   applySubscriptionCoupon,
   pauseSubscriptionCollection,
@@ -34,6 +35,7 @@ import { precioConDescuentoCents } from '../billing/descuentoDelPlan'
 import { isLastDiscountedPeriod } from '../billing/ultimoPeriodoConDescuento'
 import { BASIC_PLAN_DEFINITION_WHERE, isBasicPlanDefinition } from '@/services/launchCampaigns/basicPlanAccess'
 import { activeGrantWhere } from '@/services/access/capabilityGrants.service'
+import { exigirCompraNuevaPermitida } from '../billing/cotizacionDeLaOferta'
 
 /** Win-back coupon offered in the cancellation confirmation email (see scripts/seed-retention-coupon.ts). */
 const CANCELLATION_WINBACK_COUPON = 'WINBACK_30_1M'
@@ -187,6 +189,11 @@ export interface PlanOrigin {
     duration: 'once' | 'repeating' | 'forever'
     endsAt: string | null
   } | null
+  /**
+   * Planes editables (B2, Task 7): un `CLASSIC` cuya prueba SIN tarjeta todavía no tiene con qué cobrarse (Stripe la cancelará al
+   * terminar). Sólo viaja entonces: «Tu plan» dice «pon tu tarjeta para seguir» en vez de «se renueva».
+   */
+  faltaTarjeta?: true
 }
 
 const NO_ORIGIN: PlanOrigin = {
@@ -204,7 +211,7 @@ const NO_ORIGIN: PlanOrigin = {
 
 function classicOrigin(
   tier: 'PRO' | 'PREMIUM',
-  stripeSub: Awaited<ReturnType<typeof retrievePlanSubscription>> | null,
+  stripeSub: ResumenDeLaSuscripcionDelPlan | null,
   price: PlanState['price'],
   subscriptionId: string,
 ): PlanOrigin {
@@ -227,6 +234,7 @@ function classicOrigin(
             endsAt: stripeSub.descuento.endsAt ? stripeSub.descuento.endsAt.toISOString() : null,
           }
         : null,
+    ...(stripeSub?.faltaTarjeta ? { faltaTarjeta: true as const } : {}),
   }
 }
 
@@ -316,7 +324,7 @@ async function basicOfferOf(
   basicPlan: PlanState['basicPlan'],
   grandfathered: boolean,
   origin: PlanOrigin,
-  stripeSub: Awaited<ReturnType<typeof retrievePlanSubscription>> | null,
+  stripeSub: ResumenDeLaSuscripcionDelPlan | null,
   now: Date,
 ): Promise<PlanState['basicOffer']> {
   if (grandfathered || basicPlan) return null
@@ -401,6 +409,23 @@ export async function getPlanState(
   venueId: string,
   options: { skipPauseOffer?: boolean; stripeTimeoutMs?: number } = {},
 ): Promise<PlanState> {
+  return (await getPlanStateYSuscripcion(venueId, { skipPauseOffer: options.skipPauseOffer, stripeTimeoutMs: options.stripeTimeoutMs }))
+    .planState
+}
+
+/**
+ * `getPlanState` y, aparte, lo que leyó de la suscripción de Stripe (`null` sin suscripción o si Stripe falló). Planes editables (B2,
+ * Task 7): la cotización de «Tu plan» usa ESA misma lectura (la prueba sin tarjeta y qué tarjeta cobraría), sin pedirla otra vez.
+ * `planState` es exactamente el de `getPlanState`.
+ */
+export async function getPlanStateYSuscripcion(
+  venueId: string,
+  /**
+   * `conTarjeta` (fix round 1): con una prueba SIN tarjeta, leer también qué tarjeta cobraría Stripe (`origin.faltaTarjeta`). Sólo
+   * `GET /plan`; `getPlanState` nunca lo pide.
+   */
+  options: { skipPauseOffer?: boolean; stripeTimeoutMs?: number; conTarjeta?: boolean } = {},
+): Promise<{ planState: PlanState; suscripcion: ResumenDeLaSuscripcionDelPlan | null }> {
   const venue = await prisma.venue.findUnique({
     where: { id: venueId },
     select: { id: true, stripeCustomerId: true, ...GRANDFATHER_SELECT },
@@ -418,7 +443,7 @@ export async function getPlanState(
   if (!vf) {
     const origin = await planContractOrigin(venueId)
     const basicPlan = await basicPlanOf(venueId, new Date())
-    return {
+    const planState: PlanState = {
       hasPlan: false,
       state: 'none',
       planTier: null,
@@ -439,14 +464,20 @@ export async function getPlanState(
       basicPlan,
       basicOffer: await basicOfferOf(basicPlan, grandfathered, origin, null, new Date()),
     }
+    return { planState, suscripcion: null }
   }
 
   // Read Stripe only when a subscription exists; tolerate failures.
-  let stripeSub: Awaited<ReturnType<typeof retrievePlanSubscription>> | null = null
+  let stripeSub: ResumenDeLaSuscripcionDelPlan | null = null
   if (vf.stripeSubscriptionId) {
     try {
-      stripeSub = options.stripeTimeoutMs
-        ? await retrievePlanSubscription(vf.stripeSubscriptionId, { timeoutMs: options.stripeTimeoutMs })
+      // Sin `conTarjeta`, las llamadas de siempre (los mismos argumentos).
+      const lectura = {
+        ...(options.stripeTimeoutMs ? { timeoutMs: options.stripeTimeoutMs } : {}),
+        ...(options.conTarjeta ? { conTarjeta: true } : {}),
+      }
+      stripeSub = Object.keys(lectura).length
+        ? await retrievePlanSubscription(vf.stripeSubscriptionId, lectura)
         : await retrievePlanSubscription(vf.stripeSubscriptionId)
     } catch (error) {
       logger.warn('getPlanState: failed to retrieve Stripe subscription; degrading to nulls', {
@@ -515,7 +546,7 @@ export async function getPlanState(
   const basicPlan = await basicPlanOf(venueId, now)
   const basicOffer = await basicOfferOf(basicPlan, grandfathered, origin, stripeSub, now)
 
-  return {
+  const planState: PlanState = {
     hasPlan,
     state,
     planTier: tier,
@@ -538,6 +569,7 @@ export async function getPlanState(
     basicPlan,
     basicOffer,
   }
+  return { planState, suscripcion: stripeSub }
 }
 
 /** What cancelling carries: the owner's reason (optional) and who asked. */
@@ -647,7 +679,12 @@ async function setCancelIntent(venueId: string, cancel: boolean, input: CancelPl
 
 /** Schedule cancellation at period end (venue stays entitled until currentPeriodEnd), with the owner's reason if given. */
 export async function cancelPlan(venueId: string, input: CancelPlanInput = {}): Promise<PlanState> {
-  if (input.purpose === 'BASIC_PLAN') await assertProCanEndForBasic(venueId)
+  if (input.purpose === 'BASIC_PLAN') {
+    // Planes editables (B2, Task 10, §11.2): con una versión del editor el Básico ya no se vende, así que «Terminar mi Pro» para
+    // pasar a él responde 409 PLAN_NOT_ON_SALE antes de programar nada (ni Stripe). Sin versión del editor, lo de hoy.
+    await exigirCompraNuevaPermitida(prisma, { venueId, tier: null, basico: true })
+    await assertProCanEndForBasic(venueId)
+  }
   return setCancelIntent(venueId, true, input)
 }
 

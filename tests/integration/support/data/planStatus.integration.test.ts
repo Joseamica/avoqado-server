@@ -49,6 +49,10 @@ const stripeSub = (now: Date, over: Partial<StripeSub> = {}): StripeSub => ({
   interval: 'month',
   grossAmountCents: 115884,
   descuento: null,
+  // Planes editables (B2, Task 7): una suscripción de hoy, no una prueba sin tarjeta.
+  sinTarjeta: false,
+  trialEnd: null,
+  noHabraCobro: false,
   ...over,
 })
 const stripeAnswers = (sub: StripeSub) => jest.spyOn(stripeService, 'retrievePlanSubscription').mockResolvedValue(sub)

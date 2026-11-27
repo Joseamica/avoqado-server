@@ -11,14 +11,16 @@ gateKind: FEATURE
 money: true
 versionMin: 2.8.1
 sourceRepo: avoqado-tpv
-sourceRef: 031f14db2969606125a4a04c9f8f30bdd402a660
-deviceTested: 2026-11-25
+sourceRef: a48295a1fd9273c36459a29e6a5d59a6a5122791
+deviceTested: 2026-11-26
 keywords:
   - descuento en la mesa
   - descuento a la cuenta
   - quitar descuento de la mesa
   - quitar cargo por servicio
   - requiere autorización de gerente
+  - cortesía en gris
+  - no me deja dar la cortesía
 ---
 
 ## Antes de empezar
@@ -29,7 +31,7 @@ Es en el cobro de la cuenta de una mesa (después de tocar *Pagar*). Se eligen d
 
 1. En la cuenta de la mesa, toca *Pagar*.
 2. Toca *+ Agregar descuento*.
-3. En *Descuentos disponibles*, toca el descuento: se aplica a la cuenta y baja lo que queda por cobrar.
+3. En *Descuentos disponibles*, toca el descuento: se aplica y baja lo que queda por cobrar. Una cortesía sólo la da quien tiene permiso de cortesías: sin él, sale en gris (o avisa al tocarla); pídela a tu gerente.
 4. Para quitar un descuento o un cargo por servicio que se puso a mano, toca el botón − junto a él, si sale.
 5. Cobra como siempre.
 

@@ -173,6 +173,9 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   HybridCreditAllocation: 'Modules, Features & Billing',
 
   HybridOfferPublication: 'Modules, Features & Billing',
+  PlanOfferVersion: 'Modules, Features & Billing',
+  PlanOfferPointer: 'Modules, Features & Billing',
+  PlanAcceptance: 'Modules, Features & Billing',
   BillingObligationConflict: 'Modules, Features & Billing',
   Invoice: 'Modules, Features & Billing',
   InvoiceItem: 'Modules, Features & Billing',

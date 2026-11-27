@@ -1,6 +1,7 @@
 import documentRequestsRoutes from './superadmin/documentRequests.routes'
 import hybridCampaignRoutes from './superadmin/hybridCampaign.routes'
 import hybridPricingRoutes from './superadmin/hybridPricing.routes'
+import planOfferRoutes from './superadmin/planOffer.routes'
 // src/routes/superadmin.routes.ts
 import express from 'express'
 import { authenticateTokenMiddleware } from '../middlewares/authenticateToken.middleware'
@@ -69,6 +70,8 @@ router.use('/launch-campaigns', launchCampaignRoutes)
 router.use('/hybrid-campaigns', hybridCampaignRoutes)
 // Precios de lista y «% de descuento» (spec 2026-09-30). Hereda el guardia de SUPERADMIN del padre.
 router.use('/hybrid-pricing', hybridPricingRoutes)
+// La oferta de los planes en versiones (planes editables B1). Hereda el guardia de SUPERADMIN del padre.
+router.use('/plan-offer', planOfferRoutes)
 // «Cliente de antes» de toda la organización (CRM C1): mismo controlador y esquema que la ruta legacy de /dashboard/superadmin.
 router.post(
   '/organizations/:organizationId/plan/grandfathered',

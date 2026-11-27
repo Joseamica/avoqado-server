@@ -39,6 +39,7 @@ import {
   tierQueVendeLaSuscripcion,
   getOrCreateStripeCustomer,
   planLookupKey,
+  stripeAfirmaQueNoExiste,
 } from '../stripe.service'
 import { autorizarObligacionNueva, TIMEOUT_DE_LA_TRANSACCION_MS } from '../access/autorizarObligacionNueva'
 import { inventarioDeObligaciones } from '../access/inventarioDeObligaciones'
@@ -46,6 +47,19 @@ import { ensureVenueForOnboarding } from './ensureVenue.service'
 import { primerCobroCubierto } from './primerCobroPagado'
 import { basicPlanValido, fusionarV2SetupData, MENSAJE_BASIC_PLAN_INVALIDO, parseV2Plan } from './onboardingProgress.service'
 import { modalidadDePrueba, type TrialModality } from '../billing/modalidadDePrueba'
+import { resolverPrecioPorLlave } from '../billing/precioDelPlan'
+import {
+  codigoDelPlan,
+  precioDeLaOferta,
+  priceIdVigente,
+  versionQueCobra,
+  type OfertaVigente,
+  type Periodicidad,
+  type PlanPagado,
+} from '../billing/planOffer'
+import { basicoDeLaBienvenida } from '../billing/avisosDelBasico'
+import { DIA_MS, ofertaCambio, planFueraDeVenta, revisarComprobante } from '../billing/opcionesDeCompra'
+import { verificarCotizacion, type CotizacionFirmada } from '../billing/comprobanteDeCotizacion'
 import {
   isLegacyIntroEligible,
   LEGACY_INTRO_OFFER,
@@ -60,6 +74,9 @@ import { LAUNCH_CAMPAIGN_SELECT, toOfferRow, type LaunchCampaignRow } from '../l
 import { PLAN_ACTIVATION_STATUS, REDEMPTION_STATUS } from '../launchCampaigns/launchCampaignEnums'
 import { idDelCuponDelDescuento } from './cuponDelDescuento'
 import { terminarAltaCobradaSinRomper, type ViaDelCierre } from './terminarAltaCobrada'
+import { registrarSuscripcionDelIntento } from './registrarSuscripcionDelIntento'
+import { cerrarAltaEnGratis, pruebaSinTarjetaTerminada, pruebaTerminadaSinTarjeta } from './cerrarAltaEnGratis'
+import { avisoDeLaPruebaSinTarjeta, clienteDeStripeVivo, type TarjetaVisible } from '../billing/tarjetaQueCobraria'
 import { billingPageUrl } from '@/utils/dashboardLinks'
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || '')
@@ -84,6 +101,11 @@ const SUSCRIPCION_COBRADA = ['active', 'trialing', 'past_due', 'unpaid'] as cons
 export type ActivatePlanOffer =
   | { kind: 'LAUNCH'; code: string; offerVersion: number; expectedFirstChargeCents: number }
   | { kind: 'STANDARD'; expectedFirstChargeCents: number }
+  /**
+   * Planes editables (B2, Task 6, §16, §18): la prueba SIN tarjeta. Sólo llega con una versión del editor (la validación de la
+   * ruta no la reconoce sin ella); sin método de pago y sin pagar hoy. Lo guardado conserva el `kind` de hoy (`STANDARD`).
+   */
+  | { kind: 'STANDARD_SIN_TARJETA'; expectedFirstChargeCents: 0 }
 
 export interface ActivatePlanInput {
   organizationId: string
@@ -91,11 +113,18 @@ export interface ActivatePlanInput {
   tier: PaidPlanTier
   interval: PlanBillingInterval
   payNow: boolean
-  paymentMethodId: string
+  /** La tarjeta del cobro. Falta sólo con `STANDARD_SIN_TARJETA` (B2 Task 6); en los demás tipos, la validación la exige. */
+  paymentMethodId?: string
   offer: ActivatePlanOffer
   language?: 'es' | 'en'
   /** Plan Básico: la prueba de Pro que termina sola sin cobrar. Sólo con PRO mensual y `payNow: false`. */
   basicPlan?: boolean
+  /**
+   * Planes editables (B2): el comprobante firmado de la cotización del alta. 🔴 Viaja APARTE de `offer` (el controlador lo
+   * separa) para que ningún camino lo guarde ni lo devuelva. Sólo lo lee el camino con una versión del editor; sin ella, ni su
+   * forma se revisa.
+   */
+  quoteToken?: unknown
 }
 
 export interface ActivatePlanResult {
@@ -109,6 +138,14 @@ export interface ActivatePlanResult {
   /** Plan Básico: cómo termina la prueba, leído de la suscripción REAL (nunca de lo pedido). Sin prueba, no viaja. */
   trialModality?: TrialModality
   trialEndsAt?: string
+  /**
+   * Planes editables (B2, Task 6, §18): una prueba SIN tarjeta (la metadata de su suscripción). Con ella viajan, leídos de Stripe
+   * en ese momento, la tarjeta que cobraría al terminar (`null` = ninguna; si no se pudo leer, no viaja) y si NO habrá cobro
+   * (cancelación programada o cobranza en pausa). Sin prueba sin tarjeta, ninguno viaja.
+   */
+  sinTarjeta?: true
+  tarjetaQueCobrara?: TarjetaVisible | null
+  noHabraCobro?: boolean
 }
 
 /** El 503 del resultado desconocido. NO es un fallo: es «no sé», y el cliente reintenta igual. */
@@ -145,6 +182,12 @@ function requiereAutenticacion(clientSecret: string): AppError {
   )
 }
 
+/** Stripe rechazó el `trial_end` por estar en el pasado (400 `invalid_request_error`, `param: 'trial_end'`; medido el 26-nov). */
+function rechazoElFinDePrueba(error: unknown): boolean {
+  const e = error as { type?: string; param?: string } | null
+  return (e?.type === 'StripeInvalidRequestError' || e?.type === 'invalid_request_error') && e?.param === 'trial_end'
+}
+
 export function esErrorDeTarjeta(error: unknown): error is Stripe.errors.StripeError {
   const e = error as { type?: string; code?: string }
   return e?.type === 'StripeCardError' || e?.type === 'card_error'
@@ -175,18 +218,135 @@ function primerCobroDe(sub: Stripe.Subscription, respaldo: number): number {
   return respaldo
 }
 
+/**
+ * Planes editables (B2): un intento STANDARD con una versión publicada por el editor. `comprobante` es el que se cobra (su
+ * versión, su precio, su fin de prueba); `rechazo`, por qué no se puede cobrar con lo que llegó. Nunca los dos a la vez.
+ */
+export interface EstandarConVersion {
+  version: OfertaVigente
+  comprobante: CotizacionFirmada | null
+  rechazo: AppError | null
+}
+
 interface Cotizacion {
   expected: number
   campaign: LaunchCampaignRow | null
   listPriceCents: number
+  /** Sólo STANDARD con una versión del editor (`versionQueCobra()`); sin ella no existe y todo es B0/B1. */
+  estandar?: EstandarConVersion
+  /**
+   * B2 Task 5 (b2-r9 #3): leer la oferta lanzó y quien llama pidió diferirlo (un intento anterior `IN_PROGRESS` que pudo
+   * cobrar). Lleva el error tal cual: se lanza sólo si el PASO 6 termina en un intento nuevo.
+   */
+  lecturaFallida?: { error: unknown }
+}
+
+/**
+ * Planes editables (B2): ¿el comprobante de esta petición sirve para cobrar un intento NUEVO con la versión vigente? Nunca
+ * lanza: devuelve el rechazo para que quien llama lo lance donde le toque. En este orden:
+ *  1. el Básico, con una versión del editor, ya no se vende (`PLAN_NOT_ON_SALE`);
+ *  2. un plan con `onSale` falso tampoco;
+ *  3. el comprobante mismo (`revisarComprobante`, alcance `org:<id>`): falta, no es válido, venció, es de otra versión, o de
+ *     otro plan o periodicidad;
+ *  4. con tarjeta y el plan de la vigente sin tarjeta → `SIN_TARJETA`; sin tarjeta y el plan con tarjeta → `CON_TARJETA`;
+ *  5. otro bruto que el de la vigente, otro primer cobro que el que la persona vio, u otro fin de prueba que el de sus días
+ *     (o un fin con 0 días) → `QUOTE_MISMATCH`;
+ *  6. `payNow` que no es «el comprobante no tiene prueba» → `PAGO_HOY`.
+ */
+export function revisarComprobanteDelAlta(args: {
+  input: Pick<ActivatePlanInput, 'tier' | 'interval' | 'payNow' | 'basicPlan' | 'paymentMethodId'> & {
+    offer: { expectedFirstChargeCents: number }
+    quoteToken?: unknown
+  }
+  organizationId: string
+  version: OfertaVigente
+  ahora: Date
+}): { comprobante: CotizacionFirmada; rechazo: null } | { comprobante: null; rechazo: AppError } {
+  const { input, organizationId, version, ahora } = args
+  const n = version.number
+  const plan = version.definition[input.tier]
+  const rechazo = (error: AppError) => ({ comprobante: null, rechazo: error })
+
+  if (input.basicPlan === true) return rechazo(planFueraDeVenta('BASICO', 'Básico'))
+  if (!plan.onSale) return rechazo(planFueraDeVenta(input.tier, plan.displayName))
+
+  const revisado = revisarComprobante({
+    token: input.quoteToken,
+    alcance: `org:${organizationId}`,
+    tier: input.tier,
+    interval: input.interval,
+    versionNumber: n,
+    ahora,
+  })
+  if (revisado.comprobante === null) return revisado
+  const { comprobante } = revisado
+
+  // B2 Task 6: sin tarjeta (`STANDARD_SIN_TARJETA`) el plan de la vigente no puede pedirla. Sus días de prueba también se exigen:
+  // una versión sin tarjeta siempre tiene prueba (el esquema de la versión), y un comprobante sin prueba no pasa el `PAGO_HOY` de
+  // abajo (la prueba sin tarjeta nunca paga hoy).
+  const conTarjeta = Boolean(input.paymentMethodId)
+  if (conTarjeta && !plan.requiresCard) return rechazo(ofertaCambio('SIN_TARJETA', n))
+  if (!conTarjeta && plan.requiresCard) return rechazo(ofertaCambio('CON_TARJETA', n))
+
+  const bruto = precioDeLaOferta(version.definition, input.tier, input.interval).grossCents
+  const finEsperado = plan.trialDays > 0 ? comprobante.issuedAt.getTime() + plan.trialDays * DIA_MS : null
+  const finFirmado = comprobante.trialEndsAt ? comprobante.trialEndsAt.getTime() : null
+  if (
+    comprobante.precioCents !== bruto ||
+    comprobante.firstChargeCents !== input.offer.expectedFirstChargeCents ||
+    finFirmado !== finEsperado
+  ) {
+    return rechazo(ofertaCambio('QUOTE_MISMATCH', n))
+  }
+  if (input.payNow !== (comprobante.trialEndsAt === null)) return rechazo(ofertaCambio('PAGO_HOY', n))
+  return { comprobante, rechazo: null }
 }
 
 /**
  * PASO 3 — la cotización del SERVIDOR, y la comparación contra lo que el cliente dice haber
  * visto. Es la única fuente del precio.
  */
-async function cotizar(input: ActivatePlanInput, progress: { launchCampaignId: string | null }, now: Date): Promise<Cotizacion> {
-  if (input.offer.kind === 'STANDARD') {
+async function cotizar(
+  input: ActivatePlanInput,
+  progress: { launchCampaignId: string | null },
+  now: Date,
+  /**
+   * B2 Task 5 (b2-r9 #3): con un intento anterior `IN_PROGRESS`, un error al leer la oferta NO sale aquí: vuelve como
+   * `lecturaFallida` y lo decide el PASO 6. Sin un intento anterior, sale aquí como hoy.
+   */
+  opciones: { diferirLectura?: boolean } = {},
+): Promise<Cotizacion> {
+  if (input.offer.kind === 'STANDARD' || input.offer.kind === 'STANDARD_SIN_TARJETA') {
+    // Planes editables (B2): con una versión del editor el precio sale de su comprobante. 🔴 Aquí NO se lanza su rechazo: lo
+    // lanza el PASO 4, o lo difiere (Task 5) cuando hay un intento anterior que pudo cobrar. Sin versión, lo de hoy, literal.
+    let version: OfertaVigente | null
+    try {
+      version = await versionQueCobra()
+    } catch (error) {
+      if (!opciones.diferirLectura) throw error
+      logger.warn('activate-plan: no se pudo leer la oferta — se resuelve primero el intento anterior', {
+        organizationId: input.organizationId,
+        error: error instanceof Error ? error.message : String(error),
+      })
+      return {
+        expected: input.offer.expectedFirstChargeCents,
+        campaign: null,
+        // Nunca se lee: sin la oferta no hay intento nuevo (se lanza `lecturaFallida`) y el cierre lee la suscripción.
+        listPriceCents: STANDARD_PLAN_GROSS_CENTS[input.tier][input.interval],
+        lecturaFallida: { error },
+      }
+    }
+    if (version) {
+      const { comprobante, rechazo } = revisarComprobanteDelAlta({ input, organizationId: input.organizationId, version, ahora: now })
+      return {
+        expected: comprobante?.firstChargeCents ?? input.offer.expectedFirstChargeCents,
+        campaign: null,
+        listPriceCents: comprobante?.precioCents ?? precioDeLaOferta(version.definition, input.tier, input.interval).grossCents,
+        estandar: { version, comprobante, rechazo },
+      }
+    }
+    // 🔴 B2 Task 6: la prueba sin tarjeta sólo existe con una versión del editor. Sin ella nunca cae al precio de hoy: no se cobra.
+    if (input.offer.kind === 'STANDARD_SIN_TARJETA') throw ofertaCambio('VERSION', 1)
     const expected = standardFirstChargeCents(standardPlanQuote(), input.tier, input.interval, input.payNow)
     if (expected !== input.offer.expectedFirstChargeCents) {
       throw new ConflictError('El precio cambió. Revísalo antes de pagar.', 'OFFER_CHANGED', {
@@ -277,12 +437,30 @@ async function verificarPlanConfigurado(tier: PaidPlanTier): Promise<void> {
   )
 }
 
-async function verificarPrecioDeStripe(tier: PaidPlanTier, interval: PlanBillingInterval, esperado: number): Promise<void> {
+/**
+ * De dónde salió el precio verificado: la relectura antes de cobrar compara contra la MISMA fuente. `LUGAR` (el precio que
+ * guardó el lugar apartado de la campaña) y `SUSCRIPCION` (el que de verdad cobró el intento de un lugar de antes de B1) no se
+ * releen: Avoqado no archiva precios (diseño §15). Un precio de la `VERSION` que el PASO 7 guardó en el lugar apartado también se
+ * relee como `LUGAR` (Codex B1 #2); la `LLAVE`, nunca: se relee como B0.
+ */
+type OrigenDelPrecio = 'VERSION' | 'LLAVE' | 'LUGAR' | 'SUSCRIPCION'
+type PrecioVerificado = { priceId: string; unitAmount: number; origen: OrigenDelPrecio }
+
+/**
+ * B0, tal cual: el precio de la LLAVE del plan, con su 409 `PLAN_PRICE_MISMATCH` también cuando la lista viene vacía (nunca
+ * el 503 del resolver). Es el camino sin una versión publicada por el editor (tablas vacías o sólo la v1).
+ */
+async function verificarPrecioPorLlave(
+  tier: PaidPlanTier,
+  interval: PlanBillingInterval,
+  esperado: number,
+): Promise<{ priceId: string; unitAmount: number }> {
   const tierCode = tier === 'PREMIUM' ? ('PLAN_PREMIUM' as const) : ('PLAN_PRO' as const)
   const lookupKey = planLookupKey(tierCode, interval)
   const prices = await stripe.prices.list({ lookup_keys: [lookupKey], limit: 1 })
-  const unitAmount = prices.data[0]?.unit_amount
-  if (unitAmount !== esperado) {
+  const price = prices.data[0]
+  const unitAmount = price?.unit_amount
+  if (!price || unitAmount !== esperado) {
     // 🚨 a propósito: significa que alguien movió el precio en Stripe debajo de una oferta viva.
     logger.error('🚨 activate-plan: el precio de Stripe no coincide con el snapshot — NO se cobra', {
       lookupKey,
@@ -294,6 +472,190 @@ async function verificarPrecioDeStripe(tier: PaidPlanTier, interval: PlanBilling
       stripe: unitAmount ?? null,
     })
   }
+  // El MISMO precio que se leyó aquí es el que se cobra: no se vuelve a listar la llave.
+  return { priceId: price.id, unitAmount }
+}
+
+/**
+ * PASO 4 — el precio que se va a cobrar tiene que ser el que el cliente consintió (`esperado`).
+ *
+ * - Sin una versión publicada por el editor (`version` nulo): `verificarPrecioPorLlave`, idéntico a B0.
+ * - Con ella: el `priceId` de su ranura con `prices.retrieve`. Un precio que Stripe ya no tiene (404), inactivo, de otro
+ *   monto o una ranura sin precio dan el MISMO 409 `PLAN_PRICE_MISMATCH` de la llave (la pantalla se recarga), nunca el 503
+ *   del resolver.
+ *
+ * `version` es la que leyó el PASO 3 (`cotizar`, B2): una sola lectura decide si el intento va por la llave o por el
+ * comprobante, así una versión publicada en medio no hace cobrar con ella a quien no trae su comprobante.
+ */
+async function verificarPrecioDeStripe(
+  version: OfertaVigente | null,
+  tier: PaidPlanTier,
+  interval: PlanBillingInterval,
+  esperado: number,
+): Promise<{ priceId: string; unitAmount: number; origen: 'VERSION' | 'LLAVE' }> {
+  if (!version) return { ...(await verificarPrecioPorLlave(tier, interval, esperado)), origen: 'LLAVE' }
+  return verificarPrecioDeLaVersion(version, tier, interval, esperado)
+}
+
+/** El 409 `PLAN_PRICE_MISMATCH` de un precio que no es el consentido, con su 🚨 (alguien movió el precio debajo de una oferta). */
+function precioNoCoincide(contexto: Record<string, unknown>, esperado: number, stripeAmount: number | null, motivo: string): AppError {
+  logger.error('🚨 activate-plan: el precio que se iba a cobrar no coincide con el snapshot — NO se cobra', {
+    ...contexto,
+    esperado,
+    stripe: stripeAmount,
+    motivo,
+  })
+  return new ConflictError('El precio del plan cambió. Vuelve a cargar la página.', 'PLAN_PRICE_MISMATCH', {
+    esperado,
+    stripe: stripeAmount,
+  })
+}
+
+/**
+ * Lo que un precio de CAMPAÑA tiene que ser además de su monto: activo, en MXN, mensual, con el IVA incluido (las mismas
+ * comprobaciones con las que se activó la campaña) y del PRODUCTO del plan. Devuelve el motivo si no lo es.
+ *
+ * 🔴 El producto no es ceremonia: el cupón de la campaña se creó con `applies_to: [producto del plan]`; un precio de otro
+ * producto con el mismo monto cobraría la lista completa, sin el descuento anunciado.
+ */
+function formaDeCampanaQueFalta(price: Stripe.Price, productoDelPlan: string | null): string | null {
+  if (price.active !== true) return 'INACTIVO'
+  if (price.currency !== 'mxn') return 'OTRA_MONEDA'
+  if (price.recurring?.interval !== 'month') return 'NO_ES_MENSUAL'
+  if (price.tax_behavior !== 'inclusive') return 'SIN_IVA_INCLUIDO'
+  const producto = typeof price.product === 'string' ? price.product : (price.product as { id?: string } | null)?.id
+  if (!productoDelPlan || producto !== productoDelPlan) return 'OTRO_PRODUCTO'
+  return null
+}
+
+/** El producto de Stripe del plan: el de su `Feature` activa (`PLAN_PRO` / `PLAN_PREMIUM`). `null` si no lo tiene (falla cerrado). */
+async function productoDelPlan(tier: PaidPlanTier): Promise<string | null> {
+  const code = tier === 'PREMIUM' ? 'PLAN_PREMIUM' : 'PLAN_PRO'
+  const feature = await prisma.feature.findFirst({ where: { code, active: true }, select: { stripeProductId: true } })
+  return feature?.stripeProductId ?? null
+}
+
+/**
+ * El precio de la ranura de una versión del editor. Con `campana` exige además la forma de un precio de campaña (también el
+ * producto del plan).
+ */
+async function verificarPrecioDeLaVersion(
+  version: OfertaVigente,
+  tier: PaidPlanTier,
+  interval: PlanBillingInterval,
+  esperado: number,
+  campana?: { productoDelPlan: string | null },
+): Promise<{ priceId: string; unitAmount: number; origen: 'VERSION' }> {
+  const ranura = precioDeLaOferta(version.definition, tier, interval)
+  const contexto = {
+    origen: 'VERSION',
+    versionId: version.versionId,
+    number: version.number,
+    tier,
+    interval,
+    priceId: ranura.stripePriceId,
+  }
+  if (!ranura.stripePriceId) throw precioNoCoincide(contexto, esperado, null, 'SIN_PRECIO')
+
+  let price: Stripe.Price
+  try {
+    price = await stripe.prices.retrieve(ranura.stripePriceId)
+  } catch (error) {
+    if (stripeAfirmaQueNoExiste(error)) throw precioNoCoincide(contexto, esperado, null, 'NO_EXISTE')
+    throw error
+  }
+  const unitAmount = price.unit_amount ?? null
+  if (!price.active) throw precioNoCoincide(contexto, esperado, unitAmount, 'INACTIVO')
+  if (unitAmount !== esperado || ranura.grossCents !== esperado) throw precioNoCoincide(contexto, esperado, unitAmount, 'OTRO_MONTO')
+  const falta = campana ? formaDeCampanaQueFalta(price, campana.productoDelPlan) : null
+  if (falta) throw precioNoCoincide(contexto, esperado, unitAmount, falta)
+  // El MISMO precio que se leyó aquí es el que se cobra; la relectura sólo compara el puntero.
+  return { priceId: ranura.stripePriceId, unitAmount: esperado, origen: 'VERSION' }
+}
+
+/** Un precio ya leído (del lugar o de la suscripción) que se va a cobrar sin releer: su monto, su forma y su producto, o 409. */
+function exigirPrecioDeCampana(
+  price: Stripe.Price | null | undefined,
+  esperado: number,
+  productoDelPlan: string | null,
+  contexto: Record<string, unknown>,
+): { priceId: string; unitAmount: number } {
+  if (!price?.id) throw precioNoCoincide(contexto, esperado, null, 'SIN_PRECIO')
+  const unitAmount = price.unit_amount ?? null
+  const falta = formaDeCampanaQueFalta(price, productoDelPlan) ?? (unitAmount !== esperado ? 'OTRO_MONTO' : null)
+  if (falta) throw precioNoCoincide({ ...contexto, priceId: price.id }, esperado, unitAmount, falta)
+  return { priceId: price.id, unitAmount: esperado }
+}
+
+/**
+ * PASO 4 de un intento de CAMPAÑA (planes editables B1). La campaña consintió `listPriceCentsSnapshot`; ése es el monto que se
+ * exige en todos los caminos (409 `PLAN_PRICE_MISMATCH` si no). `LaunchCampaign.stripePriceId` no se usa para cobrar.
+ *
+ * - **Sin una versión publicada por el editor** (`versionQueCobra()` nulo; B1 con el interruptor apagado): el camino de hoy,
+ *   literal, para todo intento: `verificarPrecioPorLlave` (`LLAVE`), con sus códigos de hoy y la relectura de B0.
+ * - **Con ella**, en este orden:
+ *   1. el lugar `RESERVED` de esta organización, campaña y versión de la oferta **con** su `stripePriceId` → ése (`LUGAR`);
+ *   2. un lugar `RESERVED` **sin** precio (apartado antes de B1) con la suscripción de su intento → el precio que de verdad
+ *      cobró ese intento (`SUSCRIPCION`). Sólo si la suscripción es de ESE lugar (`metadata.launchRedemptionId`): la de otro
+ *      intento (otro lugar, o una prueba estándar) o una que Stripe ya no tiene (404) caen al paso 3, como en B0;
+ *   3. un lugar `RESERVED` sin precio ni suscripción suya → la llave (`LLAVE`; la llave nunca se movió después de B1, §15);
+ *   4. un intento nuevo → el mensual de la versión (`VERSION`).
+ *   En LUGAR, SUSCRIPCION y VERSION el precio también tiene que ser del producto del plan (el `applies_to` del cupón); la LLAVE
+ *   sigue literal, como B0.
+ */
+async function precioDeLaCampana(
+  campaign: LaunchCampaignRow,
+  organizationId: string,
+  progress: { planStripeSubscriptionId: string | null },
+): Promise<PrecioVerificado> {
+  const tier = campaign.planTier as PaidPlanTier
+  const esperado = campaign.listPriceCentsSnapshot as number
+  const version = await versionQueCobra()
+  if (!version) return { ...(await verificarPrecioPorLlave(tier, 'monthly', esperado)), origen: 'LLAVE' }
+
+  const lugar = await prisma.launchCampaignRedemption.findFirst({
+    where: { organizationId, campaignId: campaign.id, offerVersion: campaign.offerVersion, status: REDEMPTION_STATUS.RESERVED },
+    select: { id: true, stripePriceId: true },
+  })
+  const contexto = { organizationId, campaignId: campaign.id, redemptionId: lugar?.id ?? null }
+
+  if (lugar?.stripePriceId) {
+    let price: Stripe.Price
+    try {
+      price = await stripe.prices.retrieve(lugar.stripePriceId)
+    } catch (error) {
+      if (stripeAfirmaQueNoExiste(error)) throw precioNoCoincide({ ...contexto, origen: 'LUGAR' }, esperado, null, 'NO_EXISTE')
+      throw error
+    }
+    return { ...exigirPrecioDeCampana(price, esperado, await productoDelPlan(tier), { ...contexto, origen: 'LUGAR' }), origen: 'LUGAR' }
+  }
+
+  if (lugar && progress.planStripeSubscriptionId) {
+    // El precio que de verdad cobró ese intento. Un 404 (Stripe dice que no existe) cae a la llave; cualquier otro error sube
+    // tal cual («no pude ver» nunca se lee como «no existe»).
+    let sub: Stripe.Subscription | null
+    try {
+      sub = await stripe.subscriptions.retrieve(progress.planStripeSubscriptionId)
+    } catch (error) {
+      if (!stripeAfirmaQueNoExiste(error)) throw error
+      sub = null
+    }
+    if (sub && sub.metadata?.launchRedemptionId === lugar.id) {
+      const price = sub.items?.data?.[0]?.price as Stripe.Price | undefined
+      return {
+        ...exigirPrecioDeCampana(price, esperado, await productoDelPlan(tier), {
+          ...contexto,
+          origen: 'SUSCRIPCION',
+          subscriptionId: sub.id,
+        }),
+        origen: 'SUSCRIPCION',
+      }
+    }
+  }
+
+  if (lugar) return { ...(await verificarPrecioPorLlave(tier, 'monthly', esperado)), origen: 'LLAVE' }
+
+  return verificarPrecioDeLaVersion(version, tier, 'monthly', esperado, { productoDelPlan: await productoDelPlan(tier) })
 }
 
 /**
@@ -337,9 +699,14 @@ export async function hayCobroDelAltaSinCerrar(progress: {
   planActivationStatus: string | null
   planActivationAttempt: number
   planStripeSubscriptionId: string | null
+  /** B2 Task 6: la versión del intento. Sólo con una del editor (≥ 2) se lee la suscripción guardada; sin ella, lo de hoy. */
+  planOfferVersionNumber?: number | null
 }): Promise<boolean> {
   if (progress.planActivationStatus !== PLAN_ACTIVATION_STATUS.IN_PROGRESS) return false
-  if (progress.planStripeSubscriptionId) return true
+  // 🔴 B2 Task 6 (b2-r3 #3): una prueba sin tarjeta que Stripe ya canceló sin cobrar no es un cobro abierto. Sólo puede existir con
+  // una versión del editor: sin ella, el id guardado basta como hoy, sin leer Stripe. Con ella, si es esa prueba, se sigue mirando
+  // lo demás (la búsqueda por la llave y lo vivo del negocio), igual que sin id.
+  if (progress.planStripeSubscriptionId && !(await esPruebaTerminadaGuardada(progress))) return true
   // Sin cliente de Stripe no pudo crearse ninguna suscripción: el cliente se crea ANTES de cobrar (paso 4).
   const llave = `plan-activation:${progress.organizationId}:${progress.planActivationAttempt}`
   let afterId: string | undefined
@@ -355,7 +722,9 @@ export async function hayCobroDelAltaSinCerrar(progress: {
       try {
         const { encontrada, cubrioTodo } = await buscarSuscripcionDelIntento(stripeCustomerId as string, llave)
         if (!cubrioTodo) return true
-        if (encontrada && (encontrada as Stripe.Subscription).status !== 'incomplete_expired') return true
+        const delIntento = encontrada as Stripe.Subscription | null
+        // B2 Task 6: la prueba sin tarjeta que terminó sin cobrar tampoco cuenta (sólo lee Stripe si es `canceled` con su metadata).
+        if (delIntento && delIntento.status !== 'incomplete_expired' && !(await pruebaSinTarjetaTerminada(delIntento))) return true
         // 🔴 Codex R13: el carril viejo de `complete` cobra con otra llave (`onboarding-complete:<org>`) y sin ese metadata,
         // y su cobro dudoso también deja IN_PROGRESS. Un negocio que aún no termina su alta no tiene por qué tener NINGUNA
         // suscripción de plan viva: cualquiera que esté cobrando (o a medio cobrar) cuenta como abierta.
@@ -381,6 +750,52 @@ export async function hayCobroDelAltaSinCerrar(progress: {
 }
 
 /**
+ * B2 Task 6: ¿la suscripción guardada del intento es la prueba sin tarjeta que ya terminó sin cobrar? Sin versión del editor, `false`
+ * sin leer nada. «No pude ver» nunca es «terminó»: un error de Stripe es `false` (el cobro cuenta como abierto, como hoy).
+ */
+async function esPruebaTerminadaGuardada(progress: {
+  organizationId: string
+  planStripeSubscriptionId: string | null
+  planOfferVersionNumber?: number | null
+}): Promise<boolean> {
+  if ((progress.planOfferVersionNumber ?? 0) < 2 || !progress.planStripeSubscriptionId) return false
+  try {
+    return await pruebaSinTarjetaTerminada(await stripe.subscriptions.retrieve(progress.planStripeSubscriptionId))
+  } catch (error) {
+    logger.warn('complete: no se pudo leer la suscripción guardada del alta — se trata como un cobro abierto', {
+      organizationId: progress.organizationId,
+      error: error instanceof Error ? error.message : String(error),
+    })
+    return false
+  }
+}
+
+/** Cuántos negocios con cliente de Stripe se recorren al buscar la suscripción de un intento por su llave (un alta tiene uno). */
+const TOPE_DE_NEGOCIOS_POR_LLAVE = 100
+
+/**
+ * B2 Task 5 (b2-r1 #1): la suscripción del intento con esa llave entre los clientes de Stripe de los negocios de la
+ * organización (como `hayCobroDelAltaSinCerrar`), para cuando el intento nunca guardó su id. `null` si no está o si no se
+ * pudo recorrer todo (más de 100 negocios, o un cliente con más suscripciones que el tope): «no la vi» nunca autoriza nada.
+ * Un error de Stripe sube tal cual.
+ */
+async function suscripcionDelIntentoEnSusNegocios(organizationId: string, planActivationKey: string): Promise<Stripe.Subscription | null> {
+  const conCliente = await prisma.venue.findMany({
+    where: { organizationId, stripeCustomerId: { not: null } },
+    select: { id: true, stripeCustomerId: true },
+    orderBy: { id: 'asc' },
+    take: TOPE_DE_NEGOCIOS_POR_LLAVE + 1,
+  })
+  if (conCliente.length > TOPE_DE_NEGOCIOS_POR_LLAVE) return null
+  for (const { stripeCustomerId } of conCliente) {
+    const { encontrada, cubrioTodo } = await buscarSuscripcionDelIntento(stripeCustomerId as string, planActivationKey)
+    if (encontrada) return encontrada
+    if (!cubrioTodo) return null
+  }
+  return null
+}
+
+/**
  * PASO 7 — apartar el lugar del cupo. Una sola transacción.
  *
  * 🔴 `findFirst` y no `findUnique`: el candado es el índice único PARCIAL
@@ -393,7 +808,9 @@ async function apartarLugar(
   venueId: string,
   staffId: string,
   now: Date,
-): Promise<{ id: string; reused: boolean }> {
+  /** El precio verificado en el PASO 4: el lugar nuevo lo guarda y, retomado después de publicar otra versión, cobra con él. */
+  stripePriceId: string,
+): Promise<{ id: string; reused: boolean; stripePriceId: string | null }> {
   return prisma.$transaction(async tx => {
     const vivo = await tx.launchCampaignRedemption.findFirst({
       where: { organizationId, status: { not: REDEMPTION_STATUS.RELEASED } },
@@ -412,7 +829,7 @@ async function apartarLugar(
           launchOffer: buildLaunchOfferView(toOfferRow(campaign), now),
         })
       }
-      return { id: vivo.id, reused: true }
+      return { id: vivo.id, reused: true, stripePriceId: vivo.stripePriceId ?? null }
     }
 
     // 🔴 EL CANDADO DEL CUPO. En Read Committed, `UPDATE … WHERE count < cap` bloquea la fila y
@@ -452,10 +869,11 @@ async function apartarLugar(
         discountMonths: campaign.discountMonths,
         listPriceCents: campaign.listPriceCentsSnapshot as number,
         stripeCouponId: campaign.stripeCouponId as string,
+        stripePriceId,
       },
       select: { id: true },
     })
-    return { id: creada.id, reused: false }
+    return { id: creada.id, reused: false, stripePriceId }
   })
 }
 
@@ -560,8 +978,64 @@ async function exigirPrimerCobroPagado(venueId: string, subscriptionId: string, 
 const esCobrada = (estado: string) => (SUSCRIPCION_COBRADA as readonly string[]).includes(estado)
 const idDe = (valor: string | { id: string } | null | undefined) => (typeof valor === 'string' ? valor : valor?.id)
 
+/** El PaymentIntent de la primera factura, leído de sus pagos (el predeterminado, o el primero de tipo PaymentIntent). */
+function piDeLosPagos(pagos: Stripe.ApiList<Stripe.InvoicePayment>): Stripe.PaymentIntent | null {
+  const delPi = pagos.data.filter(p => p.payment.type === 'payment_intent')
+  const pago = delPi.find(p => p.is_default) ?? delPi[0]
+  return typeof pago?.payment.payment_intent === 'object' ? pago.payment.payment_intent : null
+}
+
+/**
+ * B2 Task 5 (b2-r7 #6, carry 2): la modalidad con la que se CERRÓ el cobro, leída de la suscripción recuperada. Nunca del
+ * cuerpo ni del comprobante: `pagada` (su primera factura cobró algo, o ya está `active`), `sinTarjeta` (su metadata),
+ * `paymentMethodId` (su método), `offerVersion` (su metadata `planOfferVersion`) y `precioCents` (lo que su precio cobra).
+ */
+interface ModalidadCobrada {
+  pagada: boolean
+  sinTarjeta: boolean
+  paymentMethodId: string | null
+  offerVersion: number | null
+  precioCents: number | null
+}
+function modalidadCobrada(sub: Stripe.Subscription): ModalidadCobrada {
+  const factura = typeof sub.latest_invoice === 'object' ? (sub.latest_invoice as { amount_paid?: number } | null) : null
+  const version = Number(sub.metadata?.planOfferVersion)
+  const unitAmount = (sub.items?.data?.[0]?.price as { unit_amount?: number | null } | undefined)?.unit_amount
+  return {
+    pagada: (factura?.amount_paid ?? 0) > 0 || sub.status === 'active',
+    sinTarjeta: sub.metadata?.sinTarjeta === 'true',
+    paymentMethodId: idDe(sub.default_payment_method) ?? null,
+    offerVersion: Number.isSafeInteger(version) && version >= 1 ? version : null,
+    precioCents: typeof unitAmount === 'number' ? unitAmount : null,
+  }
+}
+
 /** El lugar del cupo que apartó un intento, tal como lo dejó en la metadata de su suscripción. */
 type LugarDelIntento = { redemptionId: string; campaignId: string; offerVersion: string }
+
+/**
+ * Codex b2-code #2 (r4 #2): la versión y la periodicidad que firma el comprobante de la petición, aunque ya no sea el de la vigente
+ * (el reenvío del navegador tras el reto manda el suyo). `null` sin comprobante, o si no es legible para esta organización (firma,
+ * alcance o vencimiento): nunca lanza. Sólo lo lee la recuperación de un reto con versión del editor (o con la oferta ilegible).
+ */
+function loQueFirmaElComprobante(token: unknown, organizationId: string, ahora: Date): LoQueFirmaElComprobante | null {
+  if (token === undefined || token === null) return null
+  try {
+    const { versionNumber, interval, tier, firstChargeCents } = verificarCotizacion(token, `org:${organizationId}`, ahora)
+    return { versionNumber, interval, tier, firstChargeCents }
+  } catch {
+    return null
+  }
+}
+
+/** Lo que el reto compara del comprobante de la petición (r4 #2 y r5 B): su versión, su periodicidad, su plan y su primer cobro. */
+type LoQueFirmaElComprobante = { versionNumber: number; interval: Periodicidad; tier: PlanPagado; firstChargeCents: number }
+
+/** La periodicidad del precio de una suscripción del plan (`null` si no la trae). */
+function periodicidadDeLaSuscripcion(sub: Stripe.Subscription): 'monthly' | 'annual' | null {
+  const periodo = sub.items?.data?.[0]?.price?.recurring?.interval
+  return periodo === 'year' ? 'annual' : periodo === 'month' ? 'monthly' : null
+}
 
 /** Si falta cualquiera de los tres datos, `null`: no se libera nada que no se pueda nombrar completo. */
 function lugarDeLaMetadata(sub: Stripe.Subscription): LugarDelIntento | null {
@@ -630,6 +1104,17 @@ async function anularIntento(sub: Stripe.Subscription): Promise<'DESCARTADA' | {
  * la oferta (o ninguna) y pagar hoy: es el pedido que el propio navegador manda tras el reto. Cualquier lectura que falle
  * ⇒ 503 con el lease VIVO (regla 4). Los 409/402/503 de aquí salen tal cual: el llamador NO lo envuelve en su `try/catch`
  * de lecturas. Cada 503 de «no sé» deja un `logger.warn` con organización, suscripción y estado (nunca el secreto).
+ *
+ * 🔴 Codex b2-code #2 (r3 y r4, la regla corregida), también la versión de la oferta estándar (`planOfferVersion` de la suscripción)
+ * y la periodicidad de la suscripción:
+ * - con un comprobante VÁLIDO en la petición (`comprobanteDelPedido`: lo que firma el token, que no necesita leer el puntero):
+ *   decide el comprobante, aunque la lectura de la oferta falle: su versión, su periodicidad (r4 #2), su plan y si su primer cobro es
+ *   hoy (r5 B), nunca los del cuerpo. La tarjeta sigue siendo la del cuerpo;
+ * - sin comprobante válido y con la versión del editor LEÍDA (`delEditor`): la versión vacía y la periodicidad del cuerpo; contra un
+ *   reto de una versión del editor no es el mismo intento (se anula y sale el rechazo de la petición, como hoy);
+ * - sin comprobante válido y con la lectura de la oferta fallida, o sin versión del editor: lo de B1, sin comparar.
+ * Un comprobante NUEVO (otra versión u otro ciclo) no reanuda el reto viejo: se anula y se estrena intento. El reenvío del navegador
+ * con SU comprobante (aunque ya no sea el de la vigente) sí lo reanuda.
  */
 async function resolverIntentoIncompleto(args: {
   sub: Stripe.Subscription
@@ -638,8 +1123,23 @@ async function resolverIntentoIncompleto(args: {
   organizationId: string
   attempt: number
   lease: Date
+  delEditor: boolean
+  comprobanteDelPedido: LoQueFirmaElComprobante | null
 }): Promise<{ recuperada: Stripe.Subscription | null; lugarDescartado: LugarDelIntento | null }> {
-  const { input, campaign, organizationId, attempt, lease } = args
+  const { input, campaign, organizationId, attempt, lease, delEditor, comprobanteDelPedido } = args
+  /** La versión y la periodicidad con que se compara el reto (ver arriba); `null` = no se compara (B1). */
+  const comparadoCon = comprobanteDelPedido
+    ? { version: String(comprobanteDelPedido.versionNumber), interval: comprobanteDelPedido.interval }
+    : delEditor
+      ? { version: '', interval: input.interval }
+      : null
+  // 🔴 Codex b2-code r5 B: con un comprobante válido, también el plan y «pagar hoy» salen de él (su primer cobro), no del cuerpo.
+  const planPedido = comprobanteDelPedido
+    ? codigoDelPlan(comprobanteDelPedido.tier)
+    : input.tier === 'PREMIUM'
+      ? 'PLAN_PREMIUM'
+      : 'PLAN_PRO'
+  const pagaHoy = comprobanteDelPedido ? comprobanteDelPedido.firstChargeCents > 0 : input.payNow
   const leer = async <T>(lectura: () => Promise<T>): Promise<T> => {
     try {
       return await lectura()
@@ -674,9 +1174,7 @@ async function resolverIntentoIncompleto(args: {
     if (!factura?.id) throw new Error('la suscripción no trae su factura')
     return stripe.invoicePayments.list({ invoice: factura.id, expand: ['data.payment.payment_intent'] })
   })
-  const delPi = pagos.data.filter(p => p.payment.type === 'payment_intent')
-  const pago = delPi.find(p => p.is_default) ?? delPi[0]
-  const pi = typeof pago?.payment.payment_intent === 'object' ? pago.payment.payment_intent : null
+  const pi = piDeLosPagos(pagos)
 
   if (factura?.status === 'paid' || pi?.status === 'succeeded' || pi?.status === 'processing') {
     const fresca = await leer(() => stripe.subscriptions.retrieve(sub.id))
@@ -689,13 +1187,16 @@ async function resolverIntentoIncompleto(args: {
 
   const mismoIntento =
     idDe(sub.default_payment_method) === input.paymentMethodId &&
-    sub.metadata?.featureCode === (input.tier === 'PREMIUM' ? 'PLAN_PREMIUM' : 'PLAN_PRO') &&
+    sub.metadata?.featureCode === planPedido &&
     (sub.metadata?.launchCampaignId ?? '') === (campaign?.id ?? '') &&
     // 🔴 Ruling 8: también la VERSIÓN de la oferta. Si la campaña cambió a media autorización, reanudar cobraría lo de la
     // versión vieja y el PASO 7 respondería OFFER_CHANGED (cobrado y sin acceso); así se anula y se estrena intento, y el
     // avance libera el lugar de la versión vieja con la misma regla.
     (sub.metadata?.launchOfferVersion ?? '') === (campaign ? String(campaign.offerVersion) : '') &&
-    input.payNow
+    // Codex b2-code #2 (r4, la regla corregida): la versión de la oferta estándar y la periodicidad (ver arriba).
+    (comparadoCon === null ||
+      ((sub.metadata?.planOfferVersion ?? '') === comparadoCon.version && periodicidadDeLaSuscripcion(sub) === comparadoCon.interval)) &&
+    pagaHoy
 
   if (mismoIntento && (pi?.status === 'requires_action' || pi?.status === 'requires_confirmation')) {
     // REANUDAR: volver a confirmar un PI que espera al banco se acepta (medido), así sirve también tras una recarga.
@@ -743,6 +1244,51 @@ async function resolverIntentoIncompleto(args: {
   })
   const lpe = pi?.last_payment_error
   throw rechazado(lpe?.message || 'Tu banco no autorizó el pago', lpe?.decline_code ?? lpe?.code)
+}
+
+/** `pruebaSinTarjetaTerminada` para el PASO 6: «no pude ver» nunca es «terminó» (`false`: sigue el 503 de hoy). */
+async function esPruebaSinTarjetaTerminada(sub: Stripe.Subscription, organizationId: string): Promise<boolean> {
+  try {
+    return await pruebaSinTarjetaTerminada(sub)
+  } catch (error) {
+    logger.warn('activate-plan: no se pudo revisar si la prueba sin tarjeta terminó — se responde como hoy', {
+      organizationId,
+      subscriptionId: sub.id,
+      error: error instanceof Error ? error.message : String(error),
+    })
+    return false
+  }
+}
+
+/**
+ * B2 Task 6 (b2-r9 #4): el negocio guarda el id de un cliente que Stripe ya borró. Se suelta con un CAS sobre ESE id (si otro lo
+ * cambió en medio, no se toca) y `getOrCreateStripeCustomer` crea uno nuevo por el camino de hoy. «Borrado» lo decide
+ * `clienteDeStripeVivo` (`deleted: true` o «no existe»); cualquier otro error de Stripe sube y no se cobra.
+ */
+async function soltarClienteBorrado(venueId: string, organizationId: string, staffId: string): Promise<void> {
+  const negocio = await prisma.venue.findUnique({ where: { id: venueId }, select: { stripeCustomerId: true } })
+  const guardado = negocio?.stripeCustomerId
+  // 🔴 Fix round 2 (C2): esta lectura es la puerta antes de cobrar, así que va con las opciones del cliente de siempre (`{}`, con
+  // sus reintentos), no con el tope de 5 s de las lecturas que sólo informan.
+  if (!guardado || (await clienteDeStripeVivo(guardado, {})) !== null) return
+  const { count } = await prisma.venue.updateMany({ where: { id: venueId, stripeCustomerId: guardado }, data: { stripeCustomerId: null } })
+  logger.warn('activate-plan: el cliente de Stripe del negocio ya no existe — se suelta y se crea otro', {
+    organizationId,
+    venueId,
+    customerId: guardado,
+    soltado: count === 1,
+  })
+  if (count === 1) {
+    await logAction({
+      staffId,
+      venueId,
+      organizationId,
+      action: 'STRIPE_CUSTOMER_RELEASED_DELETED',
+      entity: 'Venue',
+      entityId: venueId,
+      data: { customerId: guardado },
+    })
+  }
 }
 
 export async function activatePlan(
@@ -833,13 +1379,17 @@ export async function activatePlan(
     }
 
     if (!progress.planStripeSubscriptionId) throw pendiente('no hay suscripción registrada')
+    // 🔴 Codex b2-code r5 C: el cierre va ANTES de la lectura de Stripe. El paso del plan ya está ACTIVE y esa lectura sólo arma la
+    // respuesta: si Stripe tarda o falla, el alta igual queda cerrada (y la respuesta es el mismo error de hoy).
+    await terminarElAlta()
     // 🔴 Los dos importes salen de la suscripción REAL, nunca de la cotización.
     const sub = await stripe.subscriptions.retrieve(progress.planStripeSubscriptionId, { expand: ['latest_invoice'] })
     const redencion = await prisma.launchCampaignRedemption.findFirst({
       where: { organizationId, status: REDEMPTION_STATUS.APPLIED },
       include: { campaign: { select: { code: true } } },
     })
-    await terminarElAlta()
+    // La modalidad de lo que YA existe: un reintento con otra elección no la cambia (nadie toca cancel_at_period_end).
+    const modalidadActiva = modalidadDePrueba(sub)
     return {
       status: 'ACTIVE',
       alreadyActive: true,
@@ -847,8 +1397,9 @@ export async function activatePlan(
       interval: input.interval,
       firstChargeCents: primerCobroDe(sub, redencion?.advertisedPriceCents ?? 0),
       nextChargeAt: siguienteCobro(sub),
-      // La modalidad de lo que YA existe: un reintento con otra elección no la cambia (nadie toca cancel_at_period_end).
-      ...modalidadDePrueba(sub),
+      ...modalidadActiva,
+      // B2 Task 6 (b2-r8 #9, b2-r9 #7): tras perder el primer 200, la tarjeta que Stripe cobraría y si habrá cobro, de AHORA.
+      ...(modalidadActiva.sinTarjeta ? await avisoDeLaPruebaSinTarjeta(sub) : {}),
       ...(redencion
         ? {
             launchOffer: {
@@ -863,15 +1414,54 @@ export async function activatePlan(
   }
 
   // ---- PASO 3: cotización del servidor ----
-  const { expected, campaign, listPriceCents } = await cotizar(input, progress, now)
+  // 🔴 B2 Task 5 (b2-r9 #3): leído ANTES del PASO 3. Un intento anterior IN_PROGRESS pudo cobrar, y recuperarlo no depende de
+  // leer la oferta: si esa lectura lanza, el error se difiere (`lecturaFallida`) y lo decide el PASO 6.
+  const hayIntentoAnterior = progress.planActivationStatus === PLAN_ACTIVATION_STATUS.IN_PROGRESS
+  const { expected, campaign, listPriceCents, estandar, lecturaFallida } = await cotizar(input, progress, now, {
+    diferirLectura: hayIntentoAnterior,
+  })
+  /** Planes editables (B2): el comprobante con el que se cobra este intento (sólo STANDARD con versión del editor). */
+  const conComprobante = estandar?.comprobante ?? null
+  /** B2 Task 6: la prueba SIN tarjeta (sólo llega con una versión del editor; `cotizar` ya la frenó sin ella). */
+  const sinTarjetaPedido = input.offer.kind === 'STANDARD_SIN_TARJETA'
 
   // ---- PASO 4: verificación contra Stripe (sólo lecturas) ----
-  await verificarPrecioDeStripe(input.tier, input.interval, listPriceCents)
+  // 🔴 B2 Task 5 (Codex B1 #1, b2-r1 #1): con una versión del editor (o sin poder leer la oferta) y un intento anterior
+  // IN_PROGRESS, el comprobante y el precio NO se revisan aquí. Recuperar no depende del comprobante ni del plan pedido: el
+  // rechazo se guarda (`rechazoDiferido`), el precio queda pendiente y el PASO 6 decide. Si recupera una suscripción cobrada o
+  // en prueba, el alta cierra con ELLA; si termina en un intento nuevo, ahí se lanza el rechazo o se verifica el precio de la
+  // vigente. Sin versión del editor, B0/B1 literal. Esto reemplaza la excepción angosta del revisor (Ruling T4-1).
+  const recuperacionDiferida = hayIntentoAnterior && (estandar !== undefined || lecturaFallida !== undefined)
+  const rechazoDiferido: { error: unknown } | null = !recuperacionDiferida
+    ? null
+    : lecturaFallida
+      ? lecturaFallida
+      : estandar?.rechazo
+        ? { error: estandar.rechazo }
+        : null
+  // Planes editables (B2): un comprobante que no sirve para un intento NUEVO se rechaza AQUÍ, antes de Stripe y del lease.
+  if (!recuperacionDiferida && estandar?.rechazo) throw estandar.rechazo
+  // Una campaña cobra con el precio de su lugar apartado, de su intento, de la llave o de la versión (`precioDeLaCampana`).
+  // STANDARD: con un comprobante, su precio (`precioCents`) contra la ranura de SU versión (origen `VERSION`).
+  let precioVerificado: PrecioVerificado | null = recuperacionDiferida
+    ? null
+    : campaign
+      ? await precioDeLaCampana(campaign, organizationId, progress)
+      : await verificarPrecioDeStripe(estandar?.version ?? null, input.tier, input.interval, listPriceCents)
+  /** El precio verificado de un intento NUEVO: nunca falta (PASO 4, o después del PASO 6 si la recuperación se difirió). */
+  const precioDelIntentoNuevo = (): PrecioVerificado => {
+    if (!precioVerificado) throw new Error('activate-plan: un intento nuevo llegó sin su precio verificado — no se cobra')
+    return precioVerificado
+  }
   await verificarPlanConfigurado(input.tier)
   const venueRecord = await prisma.venue.findUnique({
     where: { id: venue.id },
     select: { id: true, name: true, slug: true, email: true, timezone: true, organization: { select: { email: true, name: true } } },
   })
+  // 🔴 B2 Task 6 (b2-r9 #4): con comprobante, un cliente que Stripe ya borró se suelta ANTES de reusarlo (con un CAS) y el camino de
+  // hoy crea otro. Con tarjeta, un método del cliente borrado no es del nuevo: el 400 de hoy de abajo, sin cobrar. Sin versión del
+  // editor, ninguna lectura nueva.
+  if (conComprobante) await soltarClienteBorrado(venue.id, organizationId, staffId)
   const customerId = await getOrCreateStripeCustomer(
     venue.id,
     venueRecord?.email || venueRecord?.organization?.email || '',
@@ -881,9 +1471,11 @@ export async function activatePlan(
   )
   // 🔴 R2 (Codex plan r1 #1): el revisor no cobra con esta tarjeta —sólo recupera lo ya pagado—, así que no se le exige.
   // Si el cliente la retiró después de pagar, exigirla dejaba lo cobrado sin acceso en cada pasada.
-  const { fingerprint } = opciones.soloRecuperar
-    ? { fingerprint: null }
-    : await assertPaymentMethodBelongsToCustomer(input.paymentMethodId, customerId)
+  // B2 Task 6: la prueba sin tarjeta no trae tarjeta que comprobar (el cliente de Stripe se crea igual: costo aceptado, §16).
+  const { fingerprint } =
+    opciones.soloRecuperar || sinTarjetaPedido
+      ? { fingerprint: null }
+      : await assertPaymentMethodBelongsToCustomer(input.paymentMethodId ?? '', customerId)
 
   // ---- PASO 5: lease con CAS ----
   const prev = {
@@ -922,6 +1514,11 @@ export async function activatePlan(
       // de ESTE intento, y se cobraría encima de la que este intento sí creó. Desde NONE no se toca (el único que deja NONE
       // con id es el carril viejo de `complete`, que usa ese rastro); al recuperar un IN_PROGRESS, el id es el suyo.
       ...(prev.status === PLAN_ACTIVATION_STATUS.DECLINED ? { planStripeSubscriptionId: null } : {}),
+      // Planes editables (B2): la INTENCIÓN queda en la base antes de cualquier llamada a Stripe. Sólo un intento nuevo seguro
+      // (desde NONE o DECLINED) con su comprobante; al recuperar un IN_PROGRESS no se toca (Task 5).
+      ...(conComprobante && (prev.status === PLAN_ACTIVATION_STATUS.NONE || prev.status === PLAN_ACTIVATION_STATUS.DECLINED)
+        ? { planOfferVersionNumber: conComprobante.versionNumber }
+        : {}),
     },
   })
   if (tomado.count === 0) throw new ConflictError('Tu pago se está confirmando. Espera unos segundos.', 'PLAN_ACTIVATION_IN_PROGRESS')
@@ -983,6 +1580,17 @@ export async function activatePlan(
     //     con el estado REAL en Stripe (`resolverIntentoIncompleto`), fuera de los try/catch de lectura de arriba para que
     //     su 409, su 402 y sus 503 salgan tal cual.
     // (Segunda auditoría de Codex, 18-sep; `incomplete`: D2, 18-oct.)
+    // 🔴 B2 Task 6 (b2-r3 #3): la prueba SIN tarjeta del intento que Stripe ya canceló al terminar sin tarjeta y sin cobrar. Antes de
+    // la guarda del revisor y de leer `canceled` como «no sé» (503): el alta se cierra en Gratis y se dice. Sólo lee Stripe si es
+    // `canceled` con la metadata `sinTarjeta` (sólo existe con versión del editor); si no se puede leer, sigue el 503 de hoy.
+    if (suscripcionRecuperada?.status === 'canceled' && (await esPruebaSinTarjetaTerminada(suscripcionRecuperada, organizationId))) {
+      await cerrarAltaEnGratis(organizationId, prev.attempt, suscripcionRecuperada, nuestroLease, {
+        via: opciones.via ?? 'navegador',
+        staffId,
+        venueId: venue.id,
+      })
+      throw pruebaTerminadaSinTarjeta()
+    }
     // 🔴 R2: el revisor sólo cierra lo que Stripe YA cobró. Cualquier otra cosa sale aquí, antes de clasificarla: nunca llega
     // a anular (resolverIntentoIncompleto), a estrenar intento ni a cobrar. Lo que expiró lo atiende R1, sin esta función.
     if (opciones.soloRecuperar && !(suscripcionRecuperada && esCobrada(suscripcionRecuperada.status))) {
@@ -1007,6 +1615,11 @@ export async function activatePlan(
           organizationId,
           attempt,
           lease: nuestroLease,
+          // Codex b2-code r3/r4: el comprobante decide, también si leer la oferta falló (`lecturaFallida`): su versión la dice el token,
+          // sin el puntero. Sin versión del editor (la lectura no la vio), el comprobante no se lee (B0/B1 literal). `delEditor`: la
+          // versión del editor se LEYÓ (sin comprobante válido, entonces sí se compara).
+          delEditor: estandar !== undefined,
+          comprobanteDelPedido: recuperacionDiferida ? loQueFirmaElComprobante(input.quoteToken, organizationId, now) : null,
         }))
       } else if (!SUSCRIPCION_COBRADA.includes(estado as (typeof SUSCRIPCION_COBRADA)[number])) {
         logger.warn('activate-plan: suscripción recuperada en estado no concluyente', {
@@ -1020,6 +1633,17 @@ export async function activatePlan(
     if (!suscripcionRecuperada) {
       // No existe de verdad: intento nuevo, llave nueva.
       attempt = prev.attempt + 1
+      // 🔴 B2 Task 5: un intento NUEVO sí exige el comprobante y el precio de la vigente. Con un comprobante válido se verifica
+      // su precio AQUÍ (lectura de Stripe, antes de la transacción del avance); si no sirve, no hubo cobro: el lease se suelta.
+      const porVerificar = recuperacionDiferida && !rechazoDiferido ? estandar : undefined
+      if (porVerificar) {
+        try {
+          precioVerificado = await verificarPrecioDeLaVersion(porVerificar.version, input.tier, input.interval, listPriceCents)
+        } catch (error) {
+          await soltarLease(organizationId, PLAN_ACTIVATION_STATUS.IN_PROGRESS, prev.attempt, nuestroLease)
+          throw error
+        }
+      }
       const lugar = lugarDescartado
       const avanzado = await prisma.$transaction(async tx => {
         const { count } = await tx.onboardingProgress.updateMany({
@@ -1031,7 +1655,13 @@ export async function activatePlan(
           },
           // 🔴 D2 (Codex r1 #1): el intento nuevo nace SIN el id del anterior. Si heredara el de la suscripción descartada, el
           // reintento la leería por id, la daría por muerta sin buscar por la llave de ESTE intento, y cobraría encima.
-          data: { planActivationAttempt: attempt, planStripeSubscriptionId: null },
+          // 🔴 B2 Task 5: y la INTENCIÓN del intento nuevo (la versión de su comprobante) queda en la base en esta misma
+          // transacción, antes de cualquier llamada a Stripe.
+          data: {
+            planActivationAttempt: attempt,
+            planStripeSubscriptionId: null,
+            ...(porVerificar && conComprobante ? { planOfferVersionNumber: conComprobante.versionNumber } : {}),
+          },
         })
         // 🔴 D2 (Codex r1 #3): el lugar del intento descartado se libera en la MISMA transacción que acredita que el intento es
         // nuestro, salvo que este pedido lo reuse (misma campaña y versión: `apartarLugar` lo toma de nuevo). `liberarLugarEn`
@@ -1047,24 +1677,30 @@ export async function activatePlan(
       })
       // Ya no es nuestro (el lease venció y otra petición lo tomó): no se cobra nada.
       if (avanzado === 0) throw new ConflictError('Tu pago se está confirmando. Espera unos segundos.', 'PLAN_ACTIVATION_IN_PROGRESS')
+      // 🔴 B2 Task 5: el intento anterior no cobró y lo que llegó no sirve para uno nuevo (un comprobante que no es de la
+      // vigente, o la oferta que no se pudo leer). No hubo cobro: queda IN_PROGRESS en el intento nuevo, sin lease ni id.
+      if (rechazoDiferido) {
+        await soltarLease(organizationId, PLAN_ACTIVATION_STATUS.IN_PROGRESS, attempt, nuestroLease)
+        throw rechazoDiferido.error
+      }
     }
   }
 
   // ---- PASO 7: apartar el lugar del cupo ----
-  let redemption: { id: string; reused: boolean } | null = null
+  let redemption: { id: string; reused: boolean; stripePriceId: string | null } | null = null
   if (campaign) {
     try {
-      redemption = await apartarLugar(campaign, organizationId, venue.id, staffId, now)
+      redemption = await apartarLugar(campaign, organizationId, venue.id, staffId, now, precioDelIntentoNuevo().priceId)
     } catch (error) {
       // No hubo cobro: el lease vuelve a como estaba.
       await soltarLease(organizationId, prev.status, attempt, nuestroLease)
       throw error
     }
   }
-
   // ---- PASOS 8-11: Stripe y cierre ----
   const planActivationKey = `plan-activation:${organizationId}:${attempt}`
-  const legacyIntro = !campaign && isLegacyIntroEligible(input.tier, input.interval, input.payNow)
+  // 🔴 Planes editables (B2, §12.2): con una versión del editor nunca va `INTRO_PRO_3M`; el precio es el de la versión.
+  const legacyIntro = !campaign && !estandar && isLegacyIntroEligible(input.tier, input.interval, input.payNow)
   const cuponEsperado = campaign ? (campaign.stripeCouponId as string) : legacyIntro ? LEGACY_INTRO_OFFER.couponId : null
 
   let subscriptionId: string
@@ -1093,15 +1729,73 @@ export async function activatePlan(
     /** 🔴 D2: el secreto del reto del banco. Se atiende DESPUÉS del try/catch (dentro, su catch lo haría un 503). */
     let secretoDelReto: string | undefined
     try {
+      // El precio verificado de este intento nuevo (B2 Task 5: si faltara, no se cobra y el catch suelta el lease).
+      const verificado = precioDelIntentoNuevo()
+      // 🔴 Codex B1 #2: un precio de la VERSIÓN que ya quedó guardado en el lugar apartado (nuevo o reusado, con ESE precio) se
+      // relee como `LUGAR`: el lugar ya consintió ese precio y Avoqado no archiva precios (§15). Releer el puntero respondía 409 si
+      // en medio se pausó la campaña y se publicó otra versión, y el 409 liberaba un lugar que la campaña pausada ya no deja
+      // recuperar. La `LLAVE` (sin versión del editor) se relee como B0, aunque el lugar la guarde: es la paridad con B0.
+      const origenDeLaRelectura: OrigenDelPrecio =
+        verificado.origen === 'VERSION' && redemption?.stripePriceId === verificado.priceId ? 'LUGAR' : verificado.origen
       // 🔴 D2 (Codex r1 #4): el fin del candado de la regla común, medido JUSTO antes de pedirlo (la transacción arranca
       // después, así que el plazo real es más largo, nunca más corto), con 10 s para confirmar la transacción. El 2.º
       // create no sale si no cabe: «no quedó tiempo» cae abajo como resultado desconocido (503, lugar RESERVED).
       const terminarAntesDe = Date.now() + TIMEOUT_DE_LA_TRANSACCION_MS - 10_000
+      const tierCode = input.tier === 'PREMIUM' ? ('PLAN_PREMIUM' as const) : ('PLAN_PRO' as const)
       const r = await autorizarObligacionNueva(
         venue.id,
         customerId,
         { tipo: 'PLAN', tier: input.tier },
-        () => {
+        async () => {
+          // 🔴 Codex B0 #1/#2: el precio se vuelve a leer JUSTO antes de cobrar (aún sin `intentoCobrar`). Si entre el PASO 4
+          // y aquí cambió, cobrar con el verificado dejaba al cliente cobrado sin acceso (la entrega ya no reconoce ese
+          // precio por su llave) o, si se archivó, un rechazo de Stripe clasificado como «pudo cobrarse». Se responde 409
+          // sin cobrar: el catch de abajo suelta el lease y libera el lugar como cualquier rechazo previo al cobro. Si
+          // coincide, se cobra con el priceId del PASO 4 (el que se comparó contra el monto consentido).
+          // Planes editables B1: se relee la MISMA fuente que dio el precio verificado. `VERSION` → el puntero (sólo la
+          // base, sin Stripe: otra versión publicada en medio es otro priceId); `LLAVE` → la llave, como B0. `LUGAR` y
+          // `SUSCRIPCION` no se releen: es el precio que ese lugar ya consintió y Avoqado no archiva precios (§15). Un precio
+          // de la versión que el PASO 7 guardó en el lugar ya es `LUGAR` (`origenDeLaRelectura`).
+          if (conComprobante) {
+            // Planes editables (B2): con comprobante se relee la vigente (sólo la base) y tiene que ser LA MISMA versión del
+            // comprobante con el MISMO precio en esta ranura: otra versión publicada en medio (aunque sólo cambien los días) es
+            // otra oferta. 409 por el mismo camino de hoy (suelta el lease y el lugar). Lo que se publique DESPUÉS de esta
+            // relectura es residuo aceptado: sale con la versión que la persona vio.
+            const releida = await versionQueCobra()
+            const priceIdReleido = releida ? precioDeLaOferta(releida.definition, input.tier, input.interval).stripePriceId : null
+            if (!releida || releida.number !== conComprobante.versionNumber || priceIdReleido !== verificado.priceId) {
+              logger.warn('activate-plan: otra versión de la oferta quedó vigente al momento de cobrar — NO se cobra', {
+                organizationId,
+                origen: 'VERSION',
+                comprobante: conComprobante.versionNumber,
+                vigenteNumber: releida?.number ?? null,
+                verificado: verificado.priceId,
+                vigente: priceIdReleido,
+              })
+              throw ofertaCambio('VERSION', releida?.number ?? 1)
+            }
+          }
+          const vigente = conComprobante
+            ? null
+            : origenDeLaRelectura === 'VERSION'
+              ? { priceId: await priceIdVigente(input.tier, input.interval), unitAmount: null }
+              : origenDeLaRelectura === 'LLAVE'
+                ? await resolverPrecioPorLlave(tierCode, input.interval)
+                : null
+          if (vigente && vigente.priceId !== verificado.priceId) {
+            // 🚨 a propósito: el precio del plan cambió a media alta.
+            logger.error('🚨 activate-plan: la versión vigente cambió al momento de cobrar — NO se cobra', {
+              organizationId,
+              origen: origenDeLaRelectura,
+              ...(origenDeLaRelectura === 'LLAVE' ? { lookupKey: planLookupKey(tierCode, input.interval) } : {}),
+              verificado: verificado.priceId,
+              vigente: vigente.priceId,
+            })
+            throw new ConflictError('El precio del plan cambió. Vuelve a cargar la página.', 'PLAN_PRICE_MISMATCH', {
+              esperado: verificado.unitAmount,
+              stripe: vigente.unitAmount,
+            })
+          }
           return createPlanSubscription({
             // «Pudo cobrarse» empieza justo antes del POST, no al entrar aquí (Codex C15).
             antesDeCobrar: () => {
@@ -1110,11 +1804,21 @@ export async function activatePlan(
             venueId: venue.id,
             customerId,
             paymentMethodId: input.paymentMethodId,
-            tierCode: input.tier === 'PREMIUM' ? 'PLAN_PREMIUM' : 'PLAN_PRO',
+            // B2 Task 6: la prueba sin tarjeta, sin método de pago y con el fin de su comprobante (metadata `sinTarjeta: 'true'`).
+            ...(sinTarjetaPedido ? { sinTarjeta: true } : {}),
+            tierCode,
             interval: input.interval,
+            priceId: verificado.priceId,
             // Con campaña SIEMPRE se paga el primer ciclo: la oferta no tiene prueba gratis.
-            trialPeriodDays: campaign || input.payNow ? 0 : TRIAL_DAYS,
+            // 🔴 B2: con comprobante, la prueba termina cuando dice el comprobante (`trial_end`), nunca 30 días desde ahora.
+            trialPeriodDays: conComprobante || campaign || input.payNow ? 0 : TRIAL_DAYS,
+            ...(conComprobante?.trialEndsAt ? { trialEnd: conComprobante.trialEndsAt } : {}),
             coupon: cuponEsperado ?? undefined,
+            // B2 (b2-r9 #1): con comprobante los descuentos van explícitos (aquí ninguno). 🔴 Ojo: según el SDK instalado
+            // (stripe 19, `SubscriptionsResource.d.ts`), un `discounts` vacío SÍ hereda el descuento del cliente. La protección
+            // real es el cierre del reto del banco (`primerCobroPagado.ts`): sólo acepta un total menor por los descuentos que la
+            // propia factura declara (y un descuento sólo baja el precio).
+            ...(conComprobante ? { descuentosExplicitos: true as const } : {}),
             idempotencyKey: planActivationKey,
             // Plan Básico: la prueba termina sola sin cobrar. Sólo en ESTE create; un reuso devuelve la suscripción tal cual.
             ...(input.basicPlan ? { cancelAtTrialEnd: true } : {}),
@@ -1134,6 +1838,13 @@ export async function activatePlan(
             extraMetadata: {
               organizationId,
               planActivationKey,
+              // B2: la versión del comprobante y la versión cuyo precio se cobra (hoy la misma).
+              ...(conComprobante
+                ? {
+                    planOfferVersion: String(conComprobante.versionNumber),
+                    planOfferPrecioDe: String(conComprobante.versionNumber),
+                  }
+                : {}),
               ...(campaign
                 ? {
                     launchCampaignId: campaign.id,
@@ -1183,6 +1894,22 @@ export async function activatePlan(
               : null,
         })
         throw error
+      }
+      if (rechazoElFinDePrueba(error)) {
+        // 🔴 Codex b2-mac r4 #1: Stripe rechazó el `trial_end` del comprobante porque ya pasó. Nada se creó: Stripe valida antes de
+        // crear, y un reintento con la misma llave devuelve la suscripción ya creada en vez de este error. Se suelta como el rechazo de
+        // la regla y se vuelve a cotizar, en vez del 503 «confirmando con el banco» que dejaba el alta trabada.
+        await cerrarIntentoYLiberarLugar({
+          organizationId,
+          attempt,
+          lease: nuestroLease,
+          estadoFinal: prev.status,
+          lugar:
+            redemption && campaign
+              ? { redemptionId: redemption.id, campaignId: campaign.id, motivo: 'PLAN_PURCHASE_NOT_AUTHORIZED' }
+              : null,
+        })
+        throw new ConflictError('La cotización ya venció. Vuelve a cotizar.', 'QUOTE_EXPIRED')
       }
       if (esErrorDeTarjeta(error)) {
         // ---- PASO 10: rechazo del banco ----
@@ -1325,18 +2052,59 @@ export async function activatePlan(
   // suscripción reusada o recuperada). Recuperar un pago YA hecho con `payNow:false` lo guardaba y lo anunciaba como
   // prueba gratis. En el camino normal manda el formulario, que es lo que de verdad se pidió.
   const yaCobrada = ((sub.latest_invoice as { amount_paid?: number } | null)?.amount_paid ?? 0) > 0
-  const payNowCobrado = noLaCreamosConElCupon ? yaCobrada : campaign ? true : input.payNow
-  const cobrado = { ...input, tier: tierConcedido, interval: intervalCobrado }
+  // 🔴 B2 Task 5 (b2-r7 #6, carry 2): la suscripción que recuperó una recuperación diferida (versión del editor, o la oferta
+  // ilegible) cierra con SU modalidad: pagó o no, sin tarjeta o con cuál, de qué versión y a qué precio. Nunca la del cuerpo
+  // ni la del comprobante: un reenvío que pide otra cosa (u otra versión) no cambia lo que Stripe ya cobró.
+  // B2 Task 6: también una suscripción REUSADA al pedir la prueba sin tarjeta: no es la que se pidió, así que cierra con lo suyo.
+  // 🔴 Codex b2-code r2 N2: y una recuperada que es de una versión del editor (su metadata `planOfferVersion`, que sólo ponen las
+  // compras con comprobante), sea cual sea el tipo del cuerpo: un reenvío de CAMPAÑA que recupera una compra estándar de la v2 cierra
+  // con la tarjeta, la versión y el pagar-hoy de esa suscripción. Sin esa metadata (B1), la del cuerpo, como hoy.
+  const recuperadaDelEditor = Boolean(suscripcionRecuperada?.metadata?.planOfferVersion)
+  const recuperada =
+    (recuperacionDiferida && suscripcionRecuperada) || recuperadaDelEditor || (sinTarjetaPedido && reused) ? modalidadCobrada(sub) : null
+  /** B2 Task 6: un intento NUEVO de prueba sin tarjeta (la recuperada cierra con su propia modalidad, b2-r7 #6). */
+  const sinTarjetaNuevo = recuperada === null && sinTarjetaPedido
+  const payNowCobrado = recuperada ? recuperada.pagada : noLaCreamosConElCupon ? yaCobrada : campaign ? true : input.payNow
+  // Su tarjeta. Sin tarjeta (su metadata) no hay ninguna; una suscripción con tarjeta que ya no trae su método conserva la del
+  // formulario, que el PASO 4 comprobó que es de este cliente (sin ninguna, «Terminar alta» se atoraría).
+  const tarjetaGuardada = recuperada
+    ? (recuperada.paymentMethodId ?? (recuperada.sinTarjeta ? null : input.paymentMethodId || null))
+    : sinTarjetaNuevo
+      ? null
+      : input.paymentMethodId
+  const cobrado = {
+    ...input,
+    tier: tierConcedido,
+    interval: intervalCobrado,
+    ...(recuperada ? { payNow: payNowCobrado, paymentMethodId: tarjetaGuardada ?? '' } : {}),
+  }
 
   await prisma.$transaction(async tx => {
     const planGuardado = {
       tier: cobrado.tier,
-      paymentMethodId: input.paymentMethodId,
+      paymentMethodId: tarjetaGuardada,
       interval: cobrado.interval,
       payNow: payNowCobrado,
       acceptedAt: now.toISOString(),
+      // B2 Task 6 (Ruling T3-1): el plan raíz dice `sinTarjeta`, que leen `parseV2Plan` y «Terminar alta».
+      ...(recuperada ? { sinTarjeta: recuperada.sinTarjeta } : sinTarjetaNuevo ? { sinTarjeta: true as const } : {}),
       // Lo guardado describe lo COBRADO: si la oferta no aplicó, no queda como alta con oferta.
-      offer: ofertaNoAplicada ? ({ kind: 'STANDARD', expectedFirstChargeCents: primerCobroDe(sub, expected) } as const) : input.offer,
+      // 🔴 B2: el comprobante NUNCA se guarda (lo devolvería `GET progress`): STANDARD se escribe campo por campo.
+      offer:
+        ofertaNoAplicada || recuperada
+          ? ({ kind: 'STANDARD', expectedFirstChargeCents: primerCobroDe(sub, expected) } as const)
+          : input.offer.kind === 'STANDARD' || input.offer.kind === 'STANDARD_SIN_TARJETA'
+            ? // B2 Task 6: lo guardado conserva el `kind` de hoy; la prueba sin tarjeta la dice `sinTarjeta`.
+              ({ kind: 'STANDARD', expectedFirstChargeCents: input.offer.expectedFirstChargeCents } as const)
+            : input.offer,
+      // La versión: la de la suscripción recuperada (su metadata) o, en un intento nuevo, la del comprobante con que se cobró.
+      ...(recuperada
+        ? recuperada.offerVersion !== null
+          ? { offerVersion: recuperada.offerVersion }
+          : {}
+        : conComprobante
+          ? { offerVersion: conComprobante.versionNumber }
+          : {}),
       ...(terminaSinCobro ? { basicPlan: true as const } : {}),
     }
     const cerrado = await tx.onboardingProgress.updateMany({
@@ -1378,6 +2146,37 @@ export async function activatePlan(
   })
 
   const firstChargeCents = primerCobroDe(sub, expected)
+  // Planes editables (B2, §10.5): con una versión del editor los correos dicen el precio de la SUSCRIPCIÓN (lo que Stripe va a
+  // cobrar), nunca una constante. Sin versión, las constantes de hoy.
+  // 🔴 B2 Task 5 (carry 2): una suscripción recuperada lo decide por SÍ misma: cobrada con una versión (su metadata), su precio;
+  // sin versión (un cobro de antes del editor), las constantes de hoy, como B0. Nunca el comprobante de la petición.
+  const montoDelPlanCents = recuperada
+    ? recuperada.offerVersion !== null
+      ? (recuperada.precioCents ?? undefined)
+      : undefined
+    : estandar
+      ? ((sub.items?.data?.[0]?.price as { unit_amount?: number | null } | undefined)?.unit_amount ?? listPriceCents)
+      : undefined
+  // B2 Task 5 (b2-r7 #6): la confirmación de pago sale si pagó o tiene tarjeta. Una prueba SIN tarjeta que no ha pagado no
+  // recibe una confirmación de cobro: recibe su bienvenida sin tarjeta (Task 6), igual si se abrió ahora o se recuperó.
+  const pruebaSinTarjeta =
+    recuperada !== null ? recuperada.sinTarjeta && !recuperada.pagada && !recuperada.paymentMethodId : sinTarjetaNuevo
+  // B2 Task 6 (§18, b2-r8 #9): la tarjeta que Stripe cobraría al terminar y si habrá cobro, leídos AHORA; sólo para decirlo
+  // (respuesta, pantalla final y bienvenida): nada lo compara con lo que enseñó la ventana. 🔴 Es informativa: la lectura arranca
+  // aquí SIN esperarla, así que ni lenta ni fallida retrasa o frena el cierre del alta (`terminarElAlta`, abajo). Nunca rechaza
+  // (`avisoDeLaPruebaSinTarjeta` se degrada a «no se sabe qué tarjeta»); la esperan sólo la bienvenida y la respuesta.
+  // 🔴 Fix round 2: el manejador del rechazo se pone AL CREAR la promesa (no al final, tras otras esperas): un rechazo sin manejar
+  // apaga el servidor (`unhandledRejection`, server.ts). Rechazada, es «no se sabe qué tarjeta», igual que si fallara la lectura.
+  const avisoSinTarjeta = modalidad.sinTarjeta
+    ? avisoDeLaPruebaSinTarjeta(sub, customerId).catch(error => {
+        logger.warn('activate-plan: no se pudo leer la tarjeta de la prueba sin tarjeta; se omite', {
+          organizationId,
+          subscriptionId,
+          error: error instanceof Error ? error.message : String(error),
+        })
+        return null
+      })
+    : null
 
   if (ofertaNoAplicada) {
     await logAction({
@@ -1440,26 +2239,52 @@ export async function activatePlan(
       firstChargeCents,
       subscriptionId,
       ...(modalidad.trialModality ? { trialModality: modalidad.trialModality } : {}),
+      ...(pruebaSinTarjeta ? { sinTarjeta: true } : {}),
       ...(campaign ? { code: campaign.code, offerVersion: campaign.offerVersion, redemptionId: redemption?.id ?? null } : {}),
     },
   })
 
   // El correo no bloquea la respuesta: el dinero ya se movió.
-  void enviarConfirmacion({
-    venueId: venue.id,
-    venueSlug: venueRecord?.slug ?? venue.slug,
-    campaign,
-    input: cobrado,
-    expected,
-    nextChargeAt,
-    timeZone: venueRecord?.timezone,
-    terminaSinCobro,
-  }).catch(error =>
-    logger.warn('activate-plan: no se pudo enviar el correo de confirmación', {
-      organizationId,
-      error: error instanceof Error ? error.message : String(error),
-    }),
-  )
+  if (pruebaSinTarjeta) {
+    // B2 Task 6 (§18, b2-r8): en vez de la confirmación de pago, la bienvenida a la prueba sin tarjeta. El monto es el precio de
+    // la versión (el del comprobante, en un intento nuevo; el de su suscripción, al recuperarla), con la nota del saldo.
+    const bienvenida = {
+      venueId: venue.id,
+      venueSlug: venueRecord?.slug ?? venue.slug,
+      subscriptionId,
+      tier: cobrado.tier,
+      language: input.language,
+      timeZone: venueRecord?.timezone,
+      trialEnd: typeof sub.trial_end === 'number' ? new Date(sub.trial_end * 1000) : new Date(nextChargeAt),
+      montoAlTerminarCents: conComprobante && !recuperada ? conComprobante.precioCents : montoDelPlanCents,
+    }
+    void Promise.resolve(avisoSinTarjeta)
+      // Codex b2-code #6: también si habrá cobro (una cancelación programada: el correo no anuncia ni la tarjeta ni el monto).
+      .then(aviso => enviarBienvenidaSinTarjeta({ ...bienvenida, tarjeta: aviso?.tarjetaQueCobrara, noHabraCobro: aviso?.noHabraCobro }))
+      .catch(error =>
+        logger.warn('activate-plan: no se pudo enviar la bienvenida de la prueba sin tarjeta', {
+          organizationId,
+          error: error instanceof Error ? error.message : String(error),
+        }),
+      )
+  } else {
+    void enviarConfirmacion({
+      venueId: venue.id,
+      venueSlug: venueRecord?.slug ?? venue.slug,
+      campaign,
+      input: cobrado,
+      expected,
+      nextChargeAt,
+      timeZone: venueRecord?.timezone,
+      terminaSinCobro,
+      ...(montoDelPlanCents !== undefined ? { montoDelPlanCents } : {}),
+    }).catch(error =>
+      logger.warn('activate-plan: no se pudo enviar el correo de confirmación', {
+        organizationId,
+        error: error instanceof Error ? error.message : String(error),
+      }),
+    )
+  }
   // Y al equipo: el aviso de «empezó el alta» sale antes del plan; éste dice quién SÍ terminó.
   avisarActivacion({
     venueId: venue.id,
@@ -1472,6 +2297,8 @@ export async function activatePlan(
     nextChargeAt,
     campaign,
     terminaSinCobro,
+    ...(montoDelPlanCents !== undefined ? { montoDelPlanCents } : {}),
+    ...(pruebaSinTarjeta ? { sinTarjeta: true } : {}),
   })
 
   await terminarElAlta()
@@ -1483,6 +2310,8 @@ export async function activatePlan(
     firstChargeCents,
     nextChargeAt,
     ...modalidad,
+    // La lectura de la tarjeta corrió junto con el cierre; con su tope (5 s) la respuesta sólo la espera lo que le falte.
+    ...((avisoSinTarjeta ? await avisoSinTarjeta : null) ?? {}),
     ...(campaign
       ? {
           launchOffer: {
@@ -1508,6 +2337,13 @@ export async function activatePlan(
  *   que volviera, y el mes 2 se cobraba igual.
  * - cualquier otra cosa (esperando al banco, cancelada, cobro clásico sin la marca, suscripción de otro intento) ⇒ nada.
  *
+ * 🔴 B2 Task 5 (b2-r1 #1, b2-r2 #1), sólo para un intento de una versión del editor (`planOfferVersionNumber ≥ 2`; sin ella, lo
+ * de arriba literal):
+ * - sin id guardado (la respuesta del `create` se perdió), se busca su suscripción por la llave del intento entre los clientes
+ *   de sus negocios y su id se registra con un CAS (sólo si el alta sigue en ese intento y sin id); no encontrada ⇒ nada;
+ * - cobrada o en prueba se cierra también SIN la marca del reto (un Pro de 0 días cobrado en el PRIMER `create`): `payNow` es
+ *   la marca o lo que cobró su primera factura, y la tarjeta la suya, o ninguna si su metadata dice `sinTarjeta`.
+ *
  * 🔴 Nunca cobra, nunca anula ni crea nada en Stripe. Cada escritura es un CAS: si el cliente vuelve a la vez, gana uno.
  */
 export async function cerrarAltaSinNavegador(
@@ -1516,12 +2352,29 @@ export async function cerrarAltaSinNavegador(
 ): Promise<'CERRADA' | 'LIBERADA' | 'NADA'> {
   const p = await prisma.onboardingProgress.findUnique({ where: { organizationId } })
   const leaseVivo = p?.planActivationLeaseUntil != null && p.planActivationLeaseUntil > new Date()
-  if (!p || p.completedAt || p.planActivationStatus !== PLAN_ACTIVATION_STATUS.IN_PROGRESS || !p.planStripeSubscriptionId || leaseVivo)
-    return 'NADA'
+  if (!p || p.completedAt || p.planActivationStatus !== PLAN_ACTIVATION_STATUS.IN_PROGRESS || leaseVivo) return 'NADA'
+  const conVersion = (p.planOfferVersionNumber ?? 0) >= 2
+  const llave = `plan-activation:${organizationId}:${p.planActivationAttempt}`
 
-  const sub = await stripe.subscriptions.retrieve(p.planStripeSubscriptionId)
+  let subscriptionId = p.planStripeSubscriptionId
+  if (!subscriptionId) {
+    if (!conVersion) return 'NADA'
+    const encontrada = await suscripcionDelIntentoEnSusNegocios(organizationId, llave)
+    if (!encontrada) return 'NADA'
+    if (!(await registrarSuscripcionDelIntento(organizationId, p.planActivationAttempt, encontrada.id))) return 'NADA'
+    logger.info('altas-a-medio-pago: se encontró por su llave la suscripción del intento y se registró su id', {
+      organizationId,
+      subscriptionId: encontrada.id,
+    })
+    subscriptionId = encontrada.id
+  }
+
+  // Con versión se lee su primera factura (lo que cobró: el cierre sin la marca la necesita); sin versión, la lectura de hoy.
+  const sub = conVersion
+    ? await stripe.subscriptions.retrieve(subscriptionId, { expand: ['latest_invoice'] })
+    : await stripe.subscriptions.retrieve(subscriptionId)
   // Sólo la suscripción de ESTE intento: la de uno anterior (o la del carril viejo, con otra llave) no es de este revisor.
-  if (sub.metadata?.planActivationKey !== `plan-activation:${organizationId}:${p.planActivationAttempt}`) return 'NADA'
+  if (sub.metadata?.planActivationKey !== llave) return 'NADA'
 
   if (sub.status === 'incomplete_expired') {
     const lugar = lugarDeLaMetadata(sub)
@@ -1550,14 +2403,36 @@ export async function cerrarAltaSinNavegador(
     return 'LIBERADA'
   }
 
-  const esperado = sub.metadata?.primerCobroEsperadoCents
-  if (!esCobrada(sub.status) || esperado == null) return 'NADA'
+  // 🔴 B2 Task 6 (b2-r3 #3): la prueba SIN tarjeta que Stripe canceló al terminar sin tarjeta y sin cobrar: el alta se cierra en
+  // Gratis (antes quedaba esperando un cobro que nunca llegaría). Sólo con versión del editor; lee Stripe sólo si es `canceled`
+  // con su metadata.
+  if (conVersion && sub.status === 'canceled' && (await pruebaSinTarjetaTerminada(sub))) {
+    const enGratis = await cerrarAltaEnGratis(organizationId, p.planActivationAttempt, sub, null, { via })
+    return enGratis ? 'CERRADA' : 'NADA'
+  }
+
+  const marca = sub.metadata?.primerCobroEsperadoCents
+  if (!esCobrada(sub.status)) return 'NADA'
+  // Sin versión, sólo lo que trae la marca del reto (R2), como hoy. Con versión, también un cobro clásico o una prueba.
+  if (marca == null && !conVersion) return 'NADA'
 
   // 🔴 Codex r1 #1: sin tarjeta en la suscripción no se cierra aquí. El plan se guardaría sin tarjeta y «Terminar alta» lo
   // rechaza (`completeV2Onboarding` la exige); queda el camino de hoy: el cliente vuelve con otra tarjeta y la recuperación
-  // del navegador entrega lo ya pagado sin cobrar otra vez. Una persona lo ve por el 🚨.
+  // del navegador entrega lo ya pagado sin cobrar otra vez. Una persona lo ve por el 🚨. B2: salvo una prueba SIN tarjeta (su
+  // metadata), que nunca la tuvo y no la necesita.
+  // 🔴 Codex b2-code #4: y, con versión del editor, salvo lo que Stripe YA cobró (`esCobrada`, arriba): una vez cobrado la tarjeta
+  // ya no importa, y negarse dejaba el pago sin alta en el aviso, el barrido y «Confirmar mi pago». Cierra con
+  // `paymentMethodId: null` en el plan guardado (el cierre lo hace la entrega; sin la marca de la organización, el barrido lo
+  // repara). Sin versión del editor, lo de hoy.
+  const sinTarjeta = conVersion && sub.metadata?.sinTarjeta === 'true'
   const paymentMethodId = idDe(sub.default_payment_method)
-  if (!paymentMethodId) {
+  if (!paymentMethodId && !sinTarjeta && conVersion) {
+    logger.warn('altas-a-medio-pago: el cobro está hecho y la suscripción ya no trae tarjeta — se cierra sin tarjeta guardada', {
+      organizationId,
+      subscriptionId: sub.id,
+    })
+  }
+  if (!paymentMethodId && !sinTarjeta && !conVersion) {
     logger.error('🚨 altas-a-medio-pago: pagado pero la suscripción ya no trae tarjeta — no se cierra sin el navegador', {
       organizationId,
       subscriptionId: sub.id,
@@ -1572,28 +2447,104 @@ export async function cerrarAltaSinNavegador(
   if (!duena) throw new Error('la organización no tiene dueña')
 
   const m = sub.metadata
-  const cents = Number(esperado)
+  // Lo que cobró su primera factura (sólo se lee con versión; 0 en prueba).
+  const pagado = typeof sub.latest_invoice === 'object' ? ((sub.latest_invoice as { amount_paid?: number } | null)?.amount_paid ?? 0) : 0
+  const cents = marca != null ? Number(marca) : pagado
   await activatePlan(
     {
       organizationId,
       staffId: duena.staffId,
       tier: m.featureCode === 'PLAN_PREMIUM' ? 'PREMIUM' : 'PRO',
       interval: sub.items?.data?.[0]?.price?.recurring?.interval === 'year' ? 'annual' : 'monthly',
-      // La marca sólo la pone el 2.º create, que nunca lleva prueba gratis: se pagó hoy.
-      payNow: true,
+      // La marca sólo la pone el 2.º create, que nunca lleva prueba gratis: se pagó hoy. Sin ella (B2), si cobró algo.
+      payNow: marca != null || pagado > 0,
       // Sólo queda como dato (con `soloRecuperar` no se cobra ni se comprueba): la tarjeta pudo retirarse después de pagar.
-      paymentMethodId,
+      paymentMethodId: paymentMethodId ?? '',
       offer: m.launchCampaignId
         ? { kind: 'LAUNCH', code: m.launchCampaignCode ?? '', offerVersion: Number(m.launchOfferVersion), expectedFirstChargeCents: cents }
         : { kind: 'STANDARD', expectedFirstChargeCents: cents },
     },
     { soloRecuperar: sub.id, via },
   )
-  logger.info('altas-a-medio-pago: el cliente autorizó y cerró la pestaña — el alta se cerró sin el navegador', {
-    organizationId,
-    subscriptionId: sub.id,
-  })
+  // Sin versión del editor, el texto de hoy (paridad con el interruptor apagado); con ella, el cierre también cubre el cobro
+  // sin la marca del reto, y lo dice.
+  logger.info(
+    conVersion
+      ? 'altas-a-medio-pago: el cobro del alta estaba hecho y nadie lo cerró — el alta se cerró sin el navegador'
+      : 'altas-a-medio-pago: el cliente autorizó y cerró la pestaña — el alta se cerró sin el navegador',
+    { organizationId, subscriptionId: sub.id },
+  )
   return 'CERRADA'
+}
+
+export type RetomaDelPago = { estado: 'RETO'; clientSecret: string } | { estado: 'CERRADA' } | { estado: 'NADA' }
+
+/**
+ * 🔴 B2 Task 5 (b2-r9 #2): «Confirmar mi pago» retoma el reto del banco del intento a medio pago, aunque la oferta vigente ya
+ * no tenga opciones (un comprobante nuevo sería imposible). Decide la suscripción del intento, nunca la oferta ni un comprobante:
+ * - la del id guardado o, si falta y el intento es de una versión del editor, la de su llave (como `cerrarAltaSinNavegador`);
+ *   sin intento `IN_PROGRESS`, con el lease vivo, sin suscripción o de otra llave ⇒ `NADA`;
+ * - `incomplete` con el pago esperando al banco (`requires_action`/`requires_confirmation`, leído como en
+ *   `resolverIntentoIncompleto`) ⇒ `RETO` con el secreto de SU factura: el mismo reto, sin pedir otra tarjeta;
+ * - cobrada o en prueba ⇒ `cerrarAltaSinNavegador(…, 'navegador')`: `CERRADA` si cerró, si no `NADA`;
+ * - cualquier otro estado ⇒ `NADA` (el aviso «sin confirmar» de hoy).
+ *
+ * 🔴 Nunca cobra, nunca anula y nunca crea nada en Stripe. El secreto sólo va a la dueña (la ruta), nunca a un log.
+ */
+export async function retomarPagoDelAlta(organizationId: string): Promise<RetomaDelPago> {
+  const nada: RetomaDelPago = { estado: 'NADA' }
+  const p = await prisma.onboardingProgress.findUnique({ where: { organizationId } })
+  const leaseVivo = p?.planActivationLeaseUntil != null && p.planActivationLeaseUntil > new Date()
+  if (!p || p.completedAt || p.planActivationStatus !== PLAN_ACTIVATION_STATUS.IN_PROGRESS || leaseVivo) return nada
+  const llave = `plan-activation:${organizationId}:${p.planActivationAttempt}`
+
+  // «No pude ver» nunca se lee como «no hay nada»: un fallo de Stripe es el 503 de «estamos confirmando tu pago».
+  const leer = async <T>(lectura: () => Promise<T>): Promise<T> => {
+    try {
+      return await lectura()
+    } catch (error) {
+      logger.warn('retomar-pago: no se pudo leer en Stripe el intento a medio pago', {
+        organizationId,
+        error: error instanceof Error ? error.message : String(error),
+      })
+      throw pendiente('no se pudo consultar Stripe')
+    }
+  }
+
+  let subscriptionId = p.planStripeSubscriptionId
+  if (!subscriptionId) {
+    if ((p.planOfferVersionNumber ?? 0) < 2) return nada
+    const encontrada = await leer(() => suscripcionDelIntentoEnSusNegocios(organizationId, llave))
+    if (!encontrada) return nada
+    subscriptionId = encontrada.id
+  }
+  const id = subscriptionId
+  const sub = await leer(() => stripe.subscriptions.retrieve(id, { expand: ['latest_invoice.confirmation_secret'] }))
+  if (sub.metadata?.planActivationKey !== llave) return nada
+
+  if (esCobrada(sub.status)) {
+    try {
+      return (await cerrarAltaSinNavegador(organizationId, 'navegador')) === 'CERRADA' ? { estado: 'CERRADA' } : nada
+    } catch (error) {
+      logger.warn('retomar-pago: el pago está hecho pero el alta todavía no se pudo cerrar (la cierra el barrido)', {
+        organizationId,
+        subscriptionId: sub.id,
+        error: error instanceof Error ? error.message : String(error),
+      })
+      return nada
+    }
+  }
+  if (sub.status !== 'incomplete') return nada
+
+  const factura = typeof sub.latest_invoice === 'object' ? sub.latest_invoice : null
+  if (!factura?.id) return nada
+  const facturaId = factura.id
+  const pi = piDeLosPagos(await leer(() => stripe.invoicePayments.list({ invoice: facturaId, expand: ['data.payment.payment_intent'] })))
+  if (pi?.status !== 'requires_action' && pi?.status !== 'requires_confirmation') return nada
+  const secreto = factura.confirmation_secret?.client_secret
+  if (!secreto) return nada
+  logger.info('retomar-pago: el banco sigue esperando la autorización; se retoma el mismo reto', { organizationId, subscriptionId: sub.id })
+  return { estado: 'RETO', clientSecret: secreto }
 }
 
 /**
@@ -1614,6 +2565,10 @@ function avisarActivacion(a: {
   campaign: LaunchCampaignRow | null
   /** Plan Básico (`ENDS_FREE`): la prueba termina sin cobrar, así que no hay «primer cobro» que calcular ni anunciar. */
   terminaSinCobro?: boolean
+  /** Planes editables (B2): con una versión del editor, el precio de la suscripción. Sin él, las constantes de hoy. */
+  montoDelPlanCents?: number
+  /** B2 Task 6: la prueba empezó sin tarjeta (el aviso lo dice). */
+  sinTarjeta?: boolean
 }): void {
   const primerCobro = a.terminaSinCobro
     ? 0
@@ -1621,7 +2576,7 @@ function avisarActivacion(a: {
       ? a.firstChargeCents
       : a.campaign
         ? (a.campaign.listPriceCentsSnapshot as number)
-        : STANDARD_PLAN_GROSS_CENTS[a.tier][a.interval]
+        : (a.montoDelPlanCents ?? STANDARD_PLAN_GROSS_CENTS[a.tier][a.interval])
   void resolvePlanNotificationTarget(a.venueId)
     .then(target =>
       resendService.sendPlanActivatedNotice({
@@ -1634,6 +2589,7 @@ function avisarActivacion(a: {
         nextChargeAt: a.nextChargeAt,
         campaignCode: a.campaign?.code ?? null,
         ...(a.terminaSinCobro ? { trialEndsFree: true } : {}),
+        ...(a.sinTarjeta ? { sinTarjeta: true } : {}),
       }),
     )
     .catch(error =>
@@ -1660,12 +2616,17 @@ async function enviarConfirmacion(args: {
   timeZone?: string
   /** Plan Básico: la suscripción REAL termina sin cobrar. El correo no anuncia el cobro de Pro. */
   terminaSinCobro?: boolean
+  /**
+   * Planes editables (B2, §10.5): con una versión del editor, el precio de la suscripción leída en el PASO 9. Con él nunca hay
+   * introducción legacy (esa compra no lleva `INTRO_PRO_3M`). Sin él, las constantes de hoy.
+   */
+  montoDelPlanCents?: number
 }): Promise<void> {
   const target = await resolvePlanNotificationTarget(args.venueId)
   if (!target.email) return
 
   const { campaign, input } = args
-  const legacyIntro = !campaign && isLegacyIntroEligible(input.tier, input.interval, input.payNow)
+  const legacyIntro = !campaign && args.montoDelPlanCents === undefined && isLegacyIntroEligible(input.tier, input.interval, input.payNow)
 
   await emailService.sendPlanConfirmationEmail(target.email, {
     locale: input.language ?? target.locale,
@@ -1677,7 +2638,9 @@ async function enviarConfirmacion(args: {
     // decía un mes, no un año; deuda de la campaña 3DS, 20-oct).
     firstChargeDate: new Date(args.nextChargeAt),
     timeZone: args.timeZone,
-    firstChargeAmountCents: campaign ? (campaign.listPriceCentsSnapshot as number) : STANDARD_PLAN_GROSS_CENTS[input.tier][input.interval],
+    firstChargeAmountCents: campaign
+      ? (campaign.listPriceCentsSnapshot as number)
+      : (args.montoDelPlanCents ?? STANDARD_PLAN_GROSS_CENTS[input.tier][input.interval]),
     ...(campaign
       ? {
           introAmountCents: campaign.advertisedPriceCents,
@@ -1687,27 +2650,47 @@ async function enviarConfirmacion(args: {
       : legacyIntro
         ? { introAmountCents: LEGACY_INTRO_OFFER.introMonthlyCents, nextChargeAmountCents: LEGACY_INTRO_OFFER.introMonthlyCents }
         : {}),
-    ...(args.terminaSinCobro ? { trialEndsFree: true, basicPlanPriceWithoutTaxCents: await precioDelBasicoSinIvaCents() } : {}),
+    // B2 Task 9: el Básico pasa por `basicoDeLaBienvenida` (con una versión del editor ya no se ofrece; sin ella, lo de hoy).
+    ...(args.terminaSinCobro ? { trialEndsFree: true, ...(await basicoDeLaBienvenida()) } : {}),
     billingPortalUrl: billingPageUrl(args.venueSlug),
   })
 }
 
 /**
- * Plan Básico: su precio sin IVA en CENTAVOS sólo para escribirlo en el correo (el precio vive en la publicación del
- * SUPERADMIN, editable). `undefined` si no hay Básico vigente o no se pudo leer: el correo lo dice sin precio.
+ * B2 Task 6 (§18, b2-r8): la bienvenida a la prueba SIN tarjeta. Dice cuándo termina, cuánto se cobrará al terminar (el precio de la
+ * versión, con la nota del saldo) y en qué tarjeta lo cobraría Stripe o, sin ninguna, que la ponga en «Tu plan» o se queda en
+ * Gratis. Una por suscripción (`plan-trial-no-card-start:<subId>`): un reintento o una recuperación no la repiten. Best effort,
+ * como los correos de hoy del alta.
  */
-export async function precioDelBasicoSinIvaCents(): Promise<number | undefined> {
-  try {
-    // Import diferido: el catálogo híbrido no tiene por qué cargarse en cada alta.
-    const { getPublicBasicPlan } = await import('../launchCampaigns/hybridCampaign.service')
-    const basico = await getPublicBasicPlan()
-    return basico ? Math.round(Number(basico.priceWithoutTax) * 100) : undefined
-  } catch (error) {
-    logger.warn('activate-plan: no se pudo leer el precio del Plan Básico para el correo', {
-      error: error instanceof Error ? error.message : String(error),
-    })
-    return undefined
-  }
+async function enviarBienvenidaSinTarjeta(args: {
+  venueId: string
+  venueSlug: string
+  subscriptionId: string
+  tier: PaidPlanTier
+  language?: 'es' | 'en'
+  timeZone?: string
+  trialEnd: Date
+  montoAlTerminarCents?: number
+  /** `undefined` = no se pudo leer en Stripe: el correo no dice ninguna tarjeta. */
+  tarjeta?: TarjetaVisible | null
+  /** Codex b2-code #6: al terminar Stripe no cobrará (cancelación programada). `undefined` = no se leyó: el correo de hoy. */
+  noHabraCobro?: boolean
+}): Promise<void> {
+  const target = await resolvePlanNotificationTarget(args.venueId)
+  if (!target.email) return
+  await emailService.sendPlanFreeTrialEndingEmail(target.email, {
+    locale: args.language ?? target.locale,
+    venueName: target.venueName,
+    endDate: args.trialEnd,
+    planName: args.tier === 'PREMIUM' ? 'Premium' : 'Pro',
+    timeZone: args.timeZone,
+    idempotencyKey: `plan-trial-no-card-start:${args.subscriptionId}`,
+    billingUrl: billingPageUrl(args.venueSlug),
+    empezo: true,
+    ...(args.montoAlTerminarCents !== undefined ? { montoAlTerminarCents: args.montoAlTerminarCents } : {}),
+    ...(args.tarjeta !== undefined ? { tarjeta: args.tarjeta } : {}),
+    ...(args.noHabraCobro !== undefined ? { noHabraCobro: args.noHabraCobro } : {}),
+  })
 }
 
 export { BadRequestError }

@@ -7,6 +7,8 @@ paths:
   - 'src/services/sdk/**/*.ts'
   - 'src/services/stripe*'
   - 'src/services/pricing/**/*.ts'
+  - 'scripts/seed-plan-*.ts'
+  - 'src/services/billing/**'
 ---
 
 # Payment & Inventory Rules
@@ -45,6 +47,10 @@ Webhooks → Update VenueFeature → checkFeatureAccess middleware validates
 ```
 
 Triple-layer protection: `authenticateTokenMiddleware` → `checkPermission()` → `checkFeatureAccess()`
+
+🔴 Precios de los planes (Pro y Premium): desde que existe la versión 1 de la oferta, nunca se mueven llaves `plan_*` ni se archivan sus
+precios a mano, en el panel de Stripe o con scripts. El precio de un plan sólo cambia publicando una versión desde el SUPERADMIN o el MCP;
+`seed-plan-pro`, `seed-plan-premium`, `seed-plan-list-prices` y `recomposePlanList` se niegan. Diseño: «Planes editables», §15.
 
 ## Cost Structure
 

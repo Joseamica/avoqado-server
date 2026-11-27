@@ -17,7 +17,6 @@ const base = {
   photos: ['a'],
   isExternalSale: false,
   linkingDuplicate: false,
-  portedDuplicate: false,
 }
 
 describe('linkingNumber.rules', () => {
@@ -68,11 +67,15 @@ describe('linkingNumber.rules', () => {
     expect(computeNumberAlerts({ ...base, isPortabilidad: true, portedNumber: null, photos: ['a', 'b'] })).toContain('PORTED_MISSING')
     expect(computeNumberAlerts({ ...base, isPortabilidad: true, portedNumber: null, photos: ['a', ''] })).not.toContain('PORTED_MISSING')
     expect(computeNumberAlerts({ ...base, isPortabilidad: true, portedNumber: null, photos: ['', 'url'] })).toContain('PORTED_MISSING')
-    expect(computeNumberAlerts({ ...base, isPortabilidad: true, portedNumber: null, photos: [], isExternalSale: true })).toContain('PORTED_MISSING')
+    expect(computeNumberAlerts({ ...base, isPortabilidad: true, portedNumber: null, photos: [], isExternalSale: true })).toContain(
+      'PORTED_MISSING',
+    )
     expect(computeNumberAlerts({ ...base, linkingNumber: '551234567', linkingNumberSource: 'EXTERNAL_SALE' })).toContain('NOT_10_DIGITS')
-    expect(computeNumberAlerts({ ...base, linkingNumber: '5512345678', linkingNumberSource: 'EXTERNAL_SALE' })).not.toContain('NOT_10_DIGITS')
+    expect(computeNumberAlerts({ ...base, linkingNumber: '5512345678', linkingNumberSource: 'EXTERNAL_SALE' })).not.toContain(
+      'NOT_10_DIGITS',
+    )
     expect(computeNumberAlerts({ ...base, linkingNumber: '' })).not.toContain('NOT_10_DIGITS')
     expect(isNewerCapture({ LINKING: {} }, 'LINKING', 'constructor', 1)).toBe(true)
-    expect(computeNumberAlerts({ ...base, linkingDuplicate: true, portedDuplicate: true })).toEqual(['LINKING_DUPLICATE', 'PORTED_DUPLICATE'])
+    expect(computeNumberAlerts({ ...base, linkingDuplicate: true })).toEqual(['LINKING_DUPLICATE'])
   })
 })

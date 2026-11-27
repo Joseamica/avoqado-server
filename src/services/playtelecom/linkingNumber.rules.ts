@@ -3,7 +3,8 @@ import type { SaleVerificationNumberSource } from '@prisma/client'
 export type CaptureDestination = 'PHOTO_VINCULACION' | 'PHOTO_PORTABILIDAD' | 'LINKING' | 'PORTED'
 /** Por destino, la última captura aplicada de cada aparato (captureDeviceId -> captureSeq). */
 export type AppliedCaptureSeqs = Partial<Record<CaptureDestination, Record<string, number>>>
-export type NumberAlertCode = 'LINKING_DUPLICATE' | 'PORTED_DUPLICATE' | 'NOT_10_DIGITS' | 'LINKING_MISSING' | 'PORTED_MISSING'
+/** Sin repetido de portado: puede repetirse (back-office, 26-nov). El DASHBOARD aún conoce `PORTED_DUPLICATE` de antes. */
+export type NumberAlertCode = 'LINKING_DUPLICATE' | 'NOT_10_DIGITS' | 'LINKING_MISSING' | 'PORTED_MISSING'
 
 /** Quita sólo espacios, guiones, puntos y paréntesis; cualquier otro carácter (una letra, "+") se queda y el número no valida. */
 export const normalizeLinkingNumber = (raw: string): string => raw.replace(/[\s\-.()]/g, '')
@@ -36,11 +37,9 @@ export function computeNumberAlerts(s: {
   photos: string[]
   isExternalSale: boolean
   linkingDuplicate: boolean
-  portedDuplicate: boolean
 }): NumberAlertCode[] {
   const out: NumberAlertCode[] = []
   if (s.linkingDuplicate) out.push('LINKING_DUPLICATE')
-  if (s.portedDuplicate) out.push('PORTED_DUPLICATE')
   // 9 dígitos sólo es normal si el back-office lo confirmó a propósito.
   const not10 = (n: string | null, src: SaleVerificationNumberSource | null) => n !== null && n.length === 9 && src !== 'BACKOFFICE'
   if (not10(s.linkingNumber, s.linkingNumberSource) || not10(s.portedNumber, s.portedNumberSource)) out.push('NOT_10_DIGITS')

@@ -10,6 +10,10 @@ jest.mock('@/services/stripe.service', () => ({
   createPlanCheckoutSession: (...a: unknown[]) => mockCheckout(...a),
   getOrCreateStripeCustomer: jest.fn(),
 }))
+const mockResolverPrecio = jest.fn()
+jest.mock('@/services/billing/precioDelPlan', () => ({
+  resolverPrecioDelPlan: (...a: unknown[]) => mockResolverPrecio(...a),
+}))
 jest.mock('@/services/access/autorizarObligacionNueva', () => ({
   autorizarObligacionNueva: (...a: unknown[]) => mockAutorizar(...a),
 }))
@@ -22,13 +26,21 @@ jest.mock('@/utils/prismaClient', () => ({
         .mockResolvedValue({ id: 'venue-1', name: 'Cafe', slug: 'cafe', stripeCustomerId: 'cus_1', organizationId: 'org-1' }),
     },
     venueFeature: { findMany: (...a: unknown[]) => mockFilasDelPlan(...a) },
+    // Planes editables (B1, Task 8): sin versiones de la oferta, la puerta del nombre no lee Stripe ni frena.
+    planOfferPointer: { findUnique: jest.fn().mockResolvedValue(null) },
   },
 }))
 const mockFilasDelPlan = jest.fn()
 
+import { STANDARD_PLAN_GROSS_CENTS } from '@/services/access/planPricing.constants'
 import { createVenuePlanCheckoutSession } from '@/services/dashboard/venue.dashboard.service'
 
 beforeEach(() => {
+  // Por defecto Stripe coincide con las constantes que muestra el dashboard, para el plan y ciclo pedidos.
+  mockResolverPrecio.mockReset().mockImplementation(async (tierCode: string, interval: 'monthly' | 'annual') => ({
+    priceId: 'price_verificado',
+    unitAmount: STANDARD_PLAN_GROSS_CENTS[tierCode === 'PLAN_PREMIUM' ? 'PREMIUM' : 'PRO'][interval],
+  }))
   mockFilasDelPlan.mockReset().mockResolvedValue([])
   mockCheckout.mockReset().mockResolvedValue('https://checkout.stripe.test/x')
   // Por defecto la regla común autoriza y ejecuta lo que se le pide crear.
@@ -43,6 +55,36 @@ describe('createVenuePlanCheckoutSession — pasa por la regla común de compra'
     expect(mockCheckout).toHaveBeenCalledWith(
       expect.objectContaining({ venueId: 'venue-1', customerId: 'cus_1', tierCode: 'PLAN_PREMIUM' }),
     )
+  })
+
+  it('precio de Stripe distinto al de las constantes → 409 PLAN_PRICE_MISMATCH y no abre sesión', async () => {
+    mockResolverPrecio.mockResolvedValue({ priceId: 'price_otro', unitAmount: 92684 })
+    await expect(createVenuePlanCheckoutSession('org-1', 'venue-1', 'monthly', 'PRO')).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'PLAN_PRICE_MISMATCH',
+      details: { esperado: 115884, stripe: 92684 },
+    })
+    expect(mockCheckout).not.toHaveBeenCalled()
+  })
+
+  it('🔴 Codex B0 #3: con precio distinto, 409 y NO se vence ningún checkout abierto (la regla común ni se llama)', async () => {
+    // La regla común es la que vence las sesiones abiertas del cliente: si corriera antes del 409, el enlace de pago
+    // válido de otra pestaña quedaba vencido y el cliente sin uno nuevo.
+    mockResolverPrecio.mockResolvedValue({ priceId: 'price_otro', unitAmount: 92684 })
+    await expect(createVenuePlanCheckoutSession('org-1', 'venue-1', 'monthly', 'PREMIUM')).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'PLAN_PRICE_MISMATCH',
+    })
+    expect(mockAutorizar).not.toHaveBeenCalled()
+    expect(mockCheckout).not.toHaveBeenCalled()
+  })
+
+  it('precio igual → la sesión lleva el priceId verificado ANTES de la regla común, sin volver a leerlo dentro', async () => {
+    await createVenuePlanCheckoutSession('org-1', 'venue-1', 'monthly', 'PRO')
+    expect(mockResolverPrecio).toHaveBeenCalledWith('PLAN_PRO', 'monthly', { soloSinVersionDelEditor: true })
+    expect(mockResolverPrecio).toHaveBeenCalledTimes(1)
+    expect(mockResolverPrecio.mock.invocationCallOrder[0]).toBeLessThan(mockAutorizar.mock.invocationCallOrder[0])
+    expect(mockCheckout).toHaveBeenCalledWith(expect.objectContaining({ priceId: 'price_verificado' }))
   })
 
   it('🔴 si la regla común rechaza (plan vivo, suelta absorbida, compra abierta…): no se crea ninguna sesión', async () => {

@@ -560,6 +560,8 @@ export interface OrderSummaryResponse {
   pagosCompletados?: number
   /** D12, aditivo: la cuenta es de vales por área (`areaDeliveryCode` o `areaTicketCode`). */
   esDeVales?: boolean
+  /** D39 (aditivo): `Order.payLater`, el mismo del detalle. La copia sin red de Pedidos lo guarda; null = no se sabe. */
+  payLater?: boolean | null
 }
 
 export interface OrderDetailResponse {
@@ -691,6 +693,8 @@ export interface OrderDetailResponse {
   esCuentaDeTarjetas?: boolean
   cobrosConSaldo?: number
   esDeMesa?: boolean
+  /** D39 (aditivo): `Order.payLater` — la cuenta se mandó a «Pagar después» a propósito; null = no se sabe. */
+  payLater?: boolean | null
 }
 
 /**
@@ -824,6 +828,8 @@ export async function listOrders(venueId: string, input: ListOrdersInput) {
       saldoPendienteCents: saldoPorCobrarCents(order, order.payments ?? []),
       pagosCompletados: (order.payments ?? []).length, // la consulta sólo trae los COMPLETED
       esDeVales: order.areaDeliveryCode != null || order.areaTicketCode != null || (order.items ?? []).some((i: any) => esRenglonDeVale(i)),
+      // D39 (Codex r2 #5): sin red, Pedidos arma la cuenta con esta fila; con `payLater` enseña «Recompensas» en gris con su texto.
+      payLater: order.payLater ?? null,
     }
   })
 
@@ -3090,6 +3096,9 @@ export async function getOrder(venueId: string, orderId: string): Promise<OrderD
     esCuentaDeTarjetas: tieneRenglonDeTarjeta(flattenedOrder.items),
     cobrosConSaldo: cobrosConSaldoVivos(flattenedOrder, flattenedOrder.payments || []),
     esDeMesa: flattenedOrder.tableId != null,
+    // D39 (Codex r1 #1): «Pagar después» elegido a propósito (`Order.payLater`). Sin mesa no basta: una importada o de plataforma tampoco
+    // tiene. El POS ofrece «Recompensas» en Pedidos sólo con `true`. Aditivo: una app vieja lo ignora; null = no se sabe.
+    payLater: flattenedOrder.payLater ?? null,
   }
 }
 
