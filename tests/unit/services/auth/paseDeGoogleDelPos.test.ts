@@ -121,6 +121,17 @@ describe('registro de rechazos', () => {
     expect(logged).not.toContain('TOKEN-SECRETO-123')
     expect(logged).not.toContain('desk-secret')
   })
+  it.each([
+    ['Wrong number of segments in token: SECRETO', 'SECRETO', 'Wrong number of segments in token'],
+    ['Token used too late, 1 > 2: {"email":"x@y.com"}', 'x@y.com', 'Token used too late, 1 > 2'],
+  ])('mensaje de la librería %s se recorta antes de ":"', async (msg, secreto, esperado) => {
+    verifyIdToken.mockRejectedValue(new Error(msg))
+    ;(logger.warn as jest.Mock).mockClear()
+    await leerPaseDeAndroid('t').catch(() => {})
+    const logged = JSON.stringify((logger.warn as jest.Mock).mock.calls)
+    expect(logged).toContain(esperado)
+    expect(logged).not.toContain(secreto)
+  })
   it('nonce desconocido y canje fallido también quedan en el log', async () => {
     ;(logger.warn as jest.Mock).mockClear()
     verifyIdToken.mockResolvedValue(payload('ajeno'))

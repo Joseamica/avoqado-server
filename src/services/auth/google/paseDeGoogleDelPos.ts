@@ -26,8 +26,10 @@ export function vaciarNoncesSoloPruebas(): void {
 }
 
 // Sólo `error.message` (string): nunca el objeto de error (su `config` trae `client_secret`), ni token, code o verifier.
+// La librería de Google a veces pega el token o el payload decodificado tras el primer ':': sólo va lo anterior.
+const resumen = (m: string) => String(m).split(':')[0].trim().slice(0, 80)
 const rechazo = (via: 'android' | 'escritorio', motivo: string, e?: unknown) => {
-  logger.warn('Pase de Google del POS rechazado', { via, motivo, error: e instanceof Error ? e.message : undefined })
+  logger.warn('Pase de Google del POS rechazado', { via, motivo, error: e instanceof Error ? resumen(e.message) : undefined })
   return invalido()
 }
 const invalido = () => new UnauthorizedError('No pudimos confirmar tu cuenta de Google. Vuelve a intentarlo.', 'GOOGLE_TOKEN_INVALID')
