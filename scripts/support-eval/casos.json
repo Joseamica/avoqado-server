@@ -146,7 +146,7 @@
       ],
       "debeDecir": [
         {
-          "texto": "$999 / mes"
+          "texto": "El precio vigente de tu plan está en «Tu plan», en Facturación."
         }
       ],
       "noDebeDecir": [
@@ -154,7 +154,7 @@
         "$799"
       ]
     },
-    "nota": "Dueño de tienda. El resumen general trae el precio de referencia sin IVA y pide confirmar el vigente en avoqado.io/pricing. [T-F4, 17-nov] Se quitó la debeDecir «avoqado.io/pricing»: la redacción tiene «No escribas enlaces, correos, teléfonos ni números largos» y el revisor rechaza un dominio suelto (CONTACT), así que nunca puede salir."
+    "nota": "Dueño de tienda. [B4, 27-nov] El resumen general ya no escribe precios de planes (pueden cambiar con el editor): remite a «Tu plan», en Facturación. [T-F4, 17-nov] Se quitó la debeDecir «avoqado.io/pricing»: la redacción tiene «No escribas enlaces, correos, teléfonos ni números largos» y el revisor rechaza un dominio suelto (CONTACT), así que nunca puede salir."
   },
   {
     "id": "c07",

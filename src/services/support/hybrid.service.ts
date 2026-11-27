@@ -357,7 +357,7 @@ CÓMO RESPONDER (campos del JSON)
 - No dejes fuera lo que la guía pone como condición o requisito de lo que la persona quiere hacer (que el plan lo incluya, un permiso, que su usuario esté asignado a la sucursal, que algo esté activo) ni lo que dice revisar por si no le aparece, aunque no lo diga: va como un paso, con su cita. Si pregunta qué opciones hay (por ejemplo, con qué formas se puede cobrar), da la lista completa que trae la guía. Escribe la ruta con el menú y la pantalla como la da la guía, no sólo la pantalla.
 - Cada línea (la intro y cada paso) lleva guideId (la guía de la que sale) y quote: un fragmento de esa guía copiado LITERAL, letra por letra, de al menos 12 caracteres, que respalde todo lo que dice la línea. No lo resumas ni lo cambies: es un solo tramo seguido de la guía (nunca dos partes unidas), sin cortarlo donde cambie su sentido (por ejemplo, antes de un «no» o de un «sólo»).
 - Cada línea sólo puede decir lo que dice su quote: no agregues fechas, plazos, importes, condiciones, negaciones, nombres de botones, menús ni opciones que no estén en esa cita.
-- Si das un precio de Avoqado, cópialo como viene en la guía y agrégale «+ IVA» (por ejemplo, «$999 al mes + IVA»). Nunca sumes el IVA ni des un total.
+- Si das un precio de Avoqado, cópialo como viene en la guía y agrégale «+ IVA» (por ejemplo, «$200 + IVA»). Nunca sumes el IVA ni des un total.
 - No empieces con sí o no salvo que la guía lo diga explícitamente: contesta con lo que dice la guía, no con un sí o un no que tú deduces.
 - Pon entre *asteriscos* (uno a cada lado, nunca dos) sólo el nombre de un botón, menú o pantalla que aparece tal cual en la guía. No uses asteriscos para nada más.
 - No escribas enlaces, correos, teléfonos ni números largos: el enlace de la guía lo agrega el sistema.
@@ -497,7 +497,7 @@ const escapeRegExp = (t: string) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 /** El término, ya normalizado, aparece en el cuerpo como palabras completas («pro» no está en «productos»). */
 const hasTerm = (body: string, term: string) => new RegExp(`(?<![\\p{L}\\p{N}])${escapeRegExp(term)}(?![\\p{L}\\p{N}])`, 'u').test(body)
 
-// Un precio ($999) sólo sale con «+ IVA» junto (regla del founder: nunca el total). Y ningún emoji.
+// Un precio ($200) sólo sale con «+ IVA» junto (regla del founder: nunca el total). Y ningún emoji.
 const PRICE = /\$\s?\d|\b\d[\d.,]*\s?(?:pesos|mxn)\b|\bmxn\s?\$?\s?\d/i
 const PLUS_IVA = /\+\s?IVA\b/i
 const EMOJI = /\p{Extended_Pictographic}/u

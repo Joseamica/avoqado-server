@@ -1,8 +1,8 @@
 {
   "version": 1,
-  "approvedBy": "Jose Antonio Amieva",
-  "approvedAt": "2026-11-27T01:21:56.072Z",
-  "approvedHash": "2e9221edbdda526cf90baad519a0818bd4552ddda87abcf7f59797aefb74fcaf",
+  "approvedBy": null,
+  "approvedAt": null,
+  "approvedHash": null,
   "retired": {},
   "guides": {
     "android/ayuda/ver-version-de-la-app": {
@@ -517,7 +517,7 @@
       ]
     },
     "dashboard/configuracion/comprar-addons-suscripciones": {
-      "sha256": "536cf4cd869beb14c8a2b3591530c091b07c656ea409d9d310c75b4494c3e2fe",
+      "sha256": "09b03cbaa80b1426a0060b363ecc36ae19542d844701fdca723ec2cd69a624f8",
       "requiredPermissions": [
         "billing:read"
       ]
@@ -1082,7 +1082,7 @@
       "gateKind": "FEATURE"
     },
     "general/overview": {
-      "sha256": "0801f8bbaf76634e29482a43f012e177fbd7b8fa399a90392a92ff98ca6ced16",
+      "sha256": "551fee1092e685c8a55fe90223d906f68a7bf58a710073ca600c6ef36b1ad909",
       "requiredPermissions": []
     },
     "tpv/asistencia/registrar-entrada-y-salida": {
