@@ -70,8 +70,17 @@ describe('limiteDelTurno con la hora de corte de la sucursal', () => {
     expect(limiteDelTurno(mx('2026-11-03T22:30:00'), MX, null, '22:00')).toEqual(mx('2026-11-04T22:00:00'))
   })
 
-  it('con horario que termina después del corte, manda una hora después de su salida (como hoy)', () => {
-    expect(limiteDelTurno(mx('2026-11-03T14:00:00'), MX, mx('2026-11-03T22:00:00'), '22:00')).toEqual(mx('2026-11-03T23:00:00'))
+  it('su horario sólo alarga el corte si termina DESPUÉS de él: entonces manda una hora después de su salida', () => {
+    expect(limiteDelTurno(mx('2026-11-03T14:00:00'), MX, mx('2026-11-03T23:00:00'), '22:00')).toEqual(mx('2026-11-04T00:00:00'))
+    // Codex r1 #7: un horario que termina a las 21:30 o a las 22:00 no corre el corte de la sucursal.
+    expect(limiteDelTurno(mx('2026-11-03T14:00:00'), MX, mx('2026-11-03T21:30:00'), '22:00')).toEqual(mx('2026-11-03T22:00:00'))
+    expect(limiteDelTurno(mx('2026-11-03T14:00:00'), MX, mx('2026-11-03T22:00:00'), '22:00')).toEqual(mx('2026-11-03T22:00:00'))
+  })
+
+  it('Codex r1 #5: el día del cambio de horario no corre el corte del día siguiente (Tijuana, 8-mar-2026)', () => {
+    // 01:40 PST + 1 h = 03:40 PDT (las 02:xx no existen ese día): el primer corte de las 02:30 que cumple es el del 9-mar.
+    const entrada = new Date('2026-03-08T01:40:00-08:00')
+    expect(limiteDelTurno(entrada, 'America/Tijuana', null, '02:30')).toEqual(new Date('2026-03-09T02:30:00-07:00'))
   })
 
   it('un corte de madrugada (02:30) cruza la medianoche y usa la zona de la sucursal', () => {
@@ -196,7 +205,18 @@ describe('cerrarSalidasOlvidadasPendientes (el job)', () => {
     const args = prismaMock.timeEntry.findMany.mock.calls[0][0] as any
     expect(args.take).toBe(500)
     expect(args.where.venue).toEqual({ OR: [{ settings: null }, { settings: { salidaOlvidadaEnabled: true } }] })
-    expect(args.where.clockInTime.lt).toEqual(new Date(ahora.getTime() - 1 * 3_600_000))
+    // Codex r1 #9 y #6: las de fábrica desde 12 h; sólo las sucursales con hora propia desde 1 h; con `lte` (justo en el límite).
+    expect(args.where.AND).toEqual([
+      {
+        OR: [
+          { clockInTime: { lte: new Date(ahora.getTime() - 12 * 3_600_000) } },
+          {
+            clockInTime: { lte: new Date(ahora.getTime() - 1 * 3_600_000) },
+            venue: { settings: { salidaOlvidadaCorte: { not: null } } },
+          },
+        ],
+      },
+    ])
     expect(args.select.venue.select.settings.select).toMatchObject({ salidaOlvidadaCorte: true })
   })
 
@@ -207,12 +227,29 @@ describe('cerrarSalidasOlvidadasPendientes (el job)', () => {
     })
     prismaMock.timeEntry.findMany.mockResolvedValue([e] as any)
     prismaMock.staffVenue.findFirst.mockResolvedValue(null)
+    prismaMock.venueSettings.findUnique.mockResolvedValue({ salidaOlvidadaEnabled: true, salidaOlvidadaCorte: '22:00' } as any)
     prismaMock.timeEntry.updateMany.mockResolvedValue({ count: 1 })
 
     await expect(cerrarSalidasOlvidadasPendientes(mx('2026-11-03T22:05:00'))).resolves.toEqual({ cerradas: 1, errores: 0 })
+    // El límite con el que cerró queda guardado (Codex r1 #1): cambiar el corte después no lo mueve.
     expect(prismaMock.timeEntry.updateMany).toHaveBeenCalledWith(
-      expect.objectContaining({ data: expect.objectContaining({ totalHours: 0, salidaOlvidada: true }) }),
+      expect.objectContaining({
+        data: expect.objectContaining({ totalHours: 0, salidaOlvidada: true, limiteOlvidada: mx('2026-11-03T22:00:00') }),
+      }),
     )
+  })
+
+  it('Codex r1 #2: si el gerente movió el corte a las 23:00 después de leer la página, a las 22:05 no se cierra', async () => {
+    const e = abierta({
+      clockInTime: mx('2026-11-03T14:00:00'),
+      venue: { timezone: MX, settings: { salidaOlvidadaEnabled: true, rotatingShiftsEnabled: false, salidaOlvidadaCorte: '22:00' } },
+    })
+    prismaMock.timeEntry.findMany.mockResolvedValue([e] as any)
+    prismaMock.staffVenue.findFirst.mockResolvedValue(null)
+    prismaMock.venueSettings.findUnique.mockResolvedValue({ salidaOlvidadaEnabled: true, salidaOlvidadaCorte: '23:00' } as any)
+
+    await expect(cerrarSalidasOlvidadasPendientes(mx('2026-11-03T22:05:00'))).resolves.toEqual({ cerradas: 0, errores: 0 })
+    expect(prismaMock.timeEntry.updateMany).not.toHaveBeenCalled()
   })
 
   it('con corte de las 22:00, a las 21:50 todavía no toca la entrada de las 14:00', async () => {
