@@ -13,6 +13,8 @@ import { ligarCuentaConGoogle, type CuentaParaLigar } from '../../../../src/serv
 
 const cuenta = (o: Partial<CuentaParaLigar> = {}): CuentaParaLigar => ({
   id: 'staff-1',
+  email: 'ana@gmail.com',
+  active: true,
   googleId: null,
   photoUrl: null,
   emailVerified: true,
@@ -52,7 +54,7 @@ describe('ligarCuentaConGoogle', () => {
     const r = await ligarCuentaConGoogle(cuenta({ emailVerified: false, password: 'hash-intruso' }), { sub: 'g-1' }, 'org-1')
     expect(r).toEqual({ aplicada: true, contrasenaAnulada: true })
     expect(updateMany).toHaveBeenCalledWith({
-      where: { id: 'staff-1', googleId: null, emailVerified: false, password: 'hash-intruso' },
+      where: { id: 'staff-1', googleId: null, emailVerified: false, password: 'hash-intruso', email: 'ana@gmail.com', active: true },
       data: expect.objectContaining({ googleId: 'g-1', emailVerified: true, password: null, lastLoginAt: expect.any(Date) }),
     })
     expect(logAction).toHaveBeenCalledWith(
@@ -91,5 +93,27 @@ describe('ligarCuentaConGoogle', () => {
     expect(r).toEqual({ aplicada: false, contrasenaAnulada: false })
     expect(logAction).not.toHaveBeenCalled()
     expect(warn).not.toHaveBeenCalled()
+  })
+
+  it('el correo cambió entre la lectura y la escritura: la escritura condiciona el correo leído y que siga activa', async () => {
+    updateMany.mockResolvedValue({ count: 0 })
+    const r = await ligarCuentaConGoogle(cuenta({ emailVerified: false }), { sub: 'g-1' }, 'org-1')
+    expect(updateMany.mock.calls[0][0].where).toEqual(expect.objectContaining({ email: 'ana@gmail.com', active: true }))
+    expect(r).toEqual({ aplicada: false, contrasenaAnulada: false })
+  })
+
+  it('siempreEscribir: ya ligada y verificada igual pasa por el candado (sólo lastLoginAt)', async () => {
+    const r = await ligarCuentaConGoogle(cuenta({ googleId: 'g-1' }), { sub: 'g-1' }, 'org-1', { siempreEscribir: true })
+    expect(r).toEqual({ aplicada: true, contrasenaAnulada: false })
+    expect(updateMany).toHaveBeenCalledWith({
+      where: { id: 'staff-1', googleId: 'g-1', emailVerified: true, password: 'hash', email: 'ana@gmail.com', active: true },
+      data: { lastLoginAt: expect.any(Date) },
+    })
+
+    updateMany.mockResolvedValue({ count: 0 })
+    await expect(ligarCuentaConGoogle(cuenta({ googleId: 'g-1' }), { sub: 'g-1' }, 'org-1', { siempreEscribir: true })).resolves.toEqual({
+      aplicada: false,
+      contrasenaAnulada: false,
+    })
   })
 })

@@ -60,7 +60,9 @@ describe('entrarAlPosConGoogle', () => {
 
   it('con contraseña, sin googleId y gmail: se liga y entra', async () => {
     await entrarAlPosConGoogle(pase, undefined, undefined)
-    expect(ligar).toHaveBeenCalledWith(expect.objectContaining({ id: 's1' }), { sub: 'sub-A', picture: 'p.png' }, 'org_1')
+    expect(ligar).toHaveBeenCalledWith(expect.objectContaining({ id: 's1' }), { sub: 'sub-A', picture: 'p.png' }, 'org_1', {
+      siempreEscribir: true,
+    })
     expect(emitir).toHaveBeenCalled()
   })
 
@@ -100,7 +102,7 @@ describe('entrarAlPosConGoogle', () => {
     const abierta = { venue: { ...OK_VENUE.venue, id: 'v2', organizationId: 'org_2' } }
     prismaMock.staff.findUnique.mockResolvedValue(cuenta({ venues: [cerrada, abierta] }))
     await entrarAlPosConGoogle(pase, false, 'd')
-    expect(ligar).toHaveBeenCalledWith(expect.anything(), expect.anything(), 'org_2')
+    expect(ligar).toHaveBeenCalledWith(expect.anything(), expect.anything(), 'org_2', { siempreEscribir: true })
   })
 
   it('sin googleId con hd ⇒ se liga', async () => {
@@ -113,7 +115,9 @@ describe('entrarAlPosConGoogle', () => {
     prismaMock.staff.findUnique.mockResolvedValue(cuenta({ emailVerified: false }))
     ligar.mockResolvedValue({ aplicada: true, contrasenaAnulada: true })
     await entrarAlPosConGoogle(pase, false, 'd')
-    expect(ligar).toHaveBeenCalledWith(expect.objectContaining({ emailVerified: false, password: 'hash' }), expect.anything(), 'org_1')
+    expect(ligar).toHaveBeenCalledWith(expect.objectContaining({ emailVerified: false, password: 'hash' }), expect.anything(), 'org_1', {
+      siempreEscribir: true,
+    })
     expect(emitir).toHaveBeenCalled()
   })
 
@@ -168,5 +172,27 @@ describe('entrarAlPosConGoogle', () => {
     await entrarAlPosConGoogle(p, false, 'd')
     expect(escritorio).toHaveBeenCalledWith(p)
     expect(android).not.toHaveBeenCalled()
+  })
+
+  it('cuenta ya ligada y verificada también pasa por el candado (siempreEscribir)', async () => {
+    prismaMock.staff.findUnique.mockResolvedValue(cuenta({ googleId: 'sub-A' }))
+    await entrarAlPosConGoogle(pase, false, 'd')
+    expect(ligar).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 's1', email: 'ana@gmail.com', active: true }),
+      { sub: 'sub-A', picture: 'p.png' },
+      'org_1',
+      { siempreEscribir: true },
+    )
+  })
+
+  it('correo cambiado entre la lectura y la escritura (count 0) ⇒ 409 y sin sesión, con la regla real', async () => {
+    ligar.mockImplementation(jest.requireActual('@/services/auth/google/ligarCuentaConGoogle').ligarCuentaConGoogle)
+    prismaMock.staff.updateMany = jest.fn().mockResolvedValue({ count: 0 })
+    prismaMock.staff.findUnique.mockResolvedValue(cuenta({ googleId: 'sub-A' }))
+    await expect(entrarAlPosConGoogle(pase, false, 'd')).rejects.toMatchObject({ statusCode: 409, code: 'GOOGLE_ACCOUNT_CHANGED' })
+    expect(prismaMock.staff.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: expect.objectContaining({ id: 's1', email: 'ana@gmail.com', active: true }) }),
+    )
+    expect(emitir).not.toHaveBeenCalled()
   })
 })

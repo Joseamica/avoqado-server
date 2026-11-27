@@ -17,4 +17,11 @@ describe('loginWithGoogle — audiencia', () => {
     await expect(loginWithGoogle('token-con-aud-del-pos', false)).rejects.toThrow()
     expect(verifyIdToken).toHaveBeenCalledWith(expect.objectContaining({ audience: 'cliente-del-panel' }))
   })
+
+  it('sin GOOGLE_CLIENT_ID el panel rechaza sin llamar a Google (la librería omitiría la audiencia)', async () => {
+    delete process.env.GOOGLE_CLIENT_ID
+    verifyIdToken.mockClear()
+    await expect(loginWithGoogle('cualquier-token', false)).rejects.toThrow('Failed to verify Google token')
+    expect(verifyIdToken).not.toHaveBeenCalled()
+  })
 })

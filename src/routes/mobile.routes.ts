@@ -127,6 +127,8 @@ import {
 import { capturarVenueDeLaRuta, registerDeviceMiddleware } from '../middlewares/registerDevice.middleware'
 import { validateRequest } from '../middlewares/validation'
 import { googleLoginSchema } from '../schemas/mobile/googleLogin.mobile.schema'
+import rateLimit from 'express-rate-limit'
+import { ipDelCliente } from '../utils/clientIp'
 import { recordFastPaymentParamsSchema, recordPaymentBodySchema } from '../schemas/tpv.schema'
 import {
   gatewayHeartbeatSchema,
@@ -151,6 +153,19 @@ import {
 import { parseCourtesyReviewPublicInput } from '../services/mobile/cortesia-pendiente.public'
 
 const router = Router()
+
+// Entrar con Google (hz:6bfcd3a1:D1): rutas sin sesión, con tope propio por la IP REAL del visitante (como `public.routes.ts`).
+const limiteDeGoogle = (max: number) =>
+  rateLimit({
+    windowMs: 60_000,
+    max,
+    keyGenerator: req => ipDelCliente(req) || 'desconocida',
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { success: false, code: 'RATE_LIMIT_EXCEEDED', message: 'Demasiados intentos. Espera un minuto y vuelve a intentarlo.' },
+  })
+const limiteDeGoogleConfig = limiteDeGoogle(60)
+const limiteDeGoogleLogin = limiteDeGoogle(20)
 
 // Registro pasivo de dispositivos (estilo Square Device Management).
 //
@@ -269,7 +284,7 @@ router.post('/auth/login', authMobileController.login)
  *       503:
  *         description: Entrar con Google no está disponible
  */
-router.get('/auth/google/config', authMobileController.googleConfig)
+router.get('/auth/google/config', limiteDeGoogleConfig, authMobileController.googleConfig)
 
 /**
  * @openapi
@@ -292,7 +307,7 @@ router.get('/auth/google/config', authMobileController.googleConfig)
  *       503:
  *         description: Entrar con Google no está disponible
  */
-router.post('/auth/google', validateRequest(googleLoginSchema), authMobileController.googleLogin)
+router.post('/auth/google', limiteDeGoogleLogin, validateRequest(googleLoginSchema), authMobileController.googleLogin)
 
 /**
  * @openapi

@@ -84,6 +84,9 @@ jest.mock('../../../src/services/staffOrganization.service', () => ({ getPrimary
 
 import { loginWithGoogle } from '../../../src/services/dashboard/googleOAuth.service'
 
+// Un servidor con Google configurado: sin GOOGLE_CLIENT_ID el panel rechaza todo token (hz:6bfcd3a1:D1).
+process.env.GOOGLE_CLIENT_ID = 'cliente-del-panel'
+
 const SOBRE = { legalVersion: 'v1-2026-09-17', launchCampaignCode: 'pos-22-mx', utm: { utm_source: 'google', gclid: 'abc' } }
 const ATRIBUCION = { campanaId: 'lc-1', utm: SOBRE.utm, legalVersion: SOBRE.legalVersion }
 
@@ -218,5 +221,12 @@ describe('loginWithGoogle — cuenta existente sin verificar', () => {
     state.existingStaff = { ...duenoNuevo(), active: false, emailVerified: false, password: 'x', googleId: null }
     await expect(loginWithGoogle('code-1', true)).rejects.toThrow()
     expect(prismaMock.staff.updateMany).not.toHaveBeenCalled()
+  })
+
+  it('🔴 la cuenta cambió entre la lectura y la vinculación (count 0) ⇒ 409 y sin sesión', async () => {
+    state.existingStaff = { ...duenoNuevo(), emailVerified: false, password: 'hash', googleId: null }
+    prismaMock.staff.updateMany.mockResolvedValueOnce({ count: 0 })
+    await expect(loginWithGoogle('code-1', true)).rejects.toMatchObject({ statusCode: 409, code: 'GOOGLE_ACCOUNT_CHANGED' })
+    expect(generateAccessToken).not.toHaveBeenCalled()
   })
 })

@@ -768,7 +768,7 @@ export async function emitirSesionDelPos(
       }),
   }
 
-  logger.info(`🔐 [MOBILE AUTH] Login successful (${metodo}) for: ${staff.email}`)
+  logger.info(`🔐 [MOBILE AUTH] Login successful (${metodo})`, { staffId: staff.id })
 
   return {
     accessToken,

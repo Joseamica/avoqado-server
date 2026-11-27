@@ -29,6 +29,7 @@ beforeEach(() => {
   getToken.mockReset()
   ctor.mockReset()
   process.env.GOOGLE_POS_ANDROID_AUDIENCE = AUD
+  process.env.GOOGLE_CLIENT_ID = 'panel-id'
   process.env.GOOGLE_POS_DESKTOP_CLIENT_ID = 'desk-id'
   process.env.GOOGLE_POS_DESKTOP_CLIENT_SECRET = 'desk-secret'
 })
@@ -79,6 +80,23 @@ describe('leerPaseDeAndroid', () => {
   it('sin audiencia => 503', async () => {
     delete process.env.GOOGLE_POS_ANDROID_AUDIENCE
     await expect(leerPaseDeAndroid('tok')).rejects.toMatchObject({ code: 'GOOGLE_ANDROID_NOT_CONFIGURED', statusCode: 503 })
+  })
+  it.each([
+    ['sin GOOGLE_CLIENT_ID del panel', undefined],
+    ['con la misma audiencia que el panel', AUD],
+  ])('%s => 503 sin hablar con Google', async (_caso, panel) => {
+    if (panel === undefined) delete process.env.GOOGLE_CLIENT_ID
+    else process.env.GOOGLE_CLIENT_ID = panel
+    await expect(leerPaseDeAndroid('tok')).rejects.toMatchObject({ code: 'GOOGLE_ANDROID_NOT_CONFIGURED', statusCode: 503 })
+    expect(verifyIdToken).not.toHaveBeenCalled()
+  })
+  it('reusa un solo cliente de Google entre peticiones (caché de certificados)', async () => {
+    const n1 = configDeGoogleParaElPos().nonce!
+    const n2 = configDeGoogleParaElPos().nonce!
+    verifyIdToken.mockResolvedValueOnce(payload(n1)).mockResolvedValueOnce(payload(n2))
+    await leerPaseDeAndroid('tok')
+    await leerPaseDeAndroid('tok')
+    expect(ctor).not.toHaveBeenCalled()
   })
 })
 
@@ -160,6 +178,14 @@ describe('configDeGoogleParaElPos', () => {
     expect(a).toMatchObject({ android: true, windows: true, androidAudience: AUD, desktopClientId: 'desk-id' })
     expect(a.nonce).toMatch(/^[A-Za-z0-9_-]{43}$/)
     expect(a.nonce).not.toBe(b.nonce)
+  })
+  it.each([
+    ['sin GOOGLE_CLIENT_ID del panel', undefined],
+    ['con la misma audiencia que el panel', AUD],
+  ])('android apagado %s', (_caso, panel) => {
+    if (panel === undefined) delete process.env.GOOGLE_CLIENT_ID
+    else process.env.GOOGLE_CLIENT_ID = panel
+    expect(configDeGoogleParaElPos()).toMatchObject({ android: false, nonce: null, androidAudience: null, windows: true })
   })
   it('nonce sólo con android', () => {
     delete process.env.GOOGLE_POS_ANDROID_AUDIENCE

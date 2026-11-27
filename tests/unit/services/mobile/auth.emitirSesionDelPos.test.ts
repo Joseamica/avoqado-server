@@ -5,6 +5,7 @@
  */
 import * as sessionService from '@/services/auth/session.service'
 import * as jwtService from '../../../../src/jwt.service'
+import logger from '@/config/logger'
 import prisma from '../../../../src/utils/prismaClient'
 import { logAction } from '../../../../src/services/dashboard/activity-log.service'
 import { emitirSesionDelPos } from '../../../../src/services/mobile/auth.mobile.service'
@@ -87,5 +88,13 @@ describe('emitirSesionDelPos', () => {
     expect(createSessionMock).toHaveBeenCalledWith(expect.objectContaining({ deviceId: 'dev-1' }))
     expect(jwtService.generateAccessToken).toHaveBeenCalledWith('staff_1', 'org_1', 'venue_1', 'WAITER', true, { sid: 'sess-1', pos: true })
     expect(jwtService.generateRefreshToken).toHaveBeenCalledWith('staff_1', 'org_1', true, 'venue_1', { sid: 'sess-1' })
+  })
+
+  it.each(['password', 'google'] as const)('%s: el log de éxito lleva el id, nunca el correo', async metodo => {
+    ;(logger.info as jest.Mock).mockClear()
+    await emitirSesionDelPos(staff, metodo, undefined, undefined)
+    const logged = JSON.stringify((logger.info as jest.Mock).mock.calls)
+    expect(logged).toContain('staff_1')
+    expect(logged).not.toContain('a@b.com')
   })
 })

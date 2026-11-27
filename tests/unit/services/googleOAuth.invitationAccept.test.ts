@@ -126,6 +126,9 @@ jest.mock('../../../src/services/staffOrganization.service', () => ({
 
 import { loginWithGoogle } from '../../../src/services/dashboard/googleOAuth.service'
 
+// Un servidor con Google configurado: sin GOOGLE_CLIENT_ID el panel rechaza todo token (hz:6bfcd3a1:D1).
+process.env.GOOGLE_CLIENT_ID = 'cliente-del-panel'
+
 // --- Fixture builders -----------------------------------------------------------------------
 const ORG_VENUE = {
   id: 'venue-1',

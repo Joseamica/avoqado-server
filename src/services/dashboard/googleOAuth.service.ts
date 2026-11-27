@@ -73,6 +73,8 @@ export function getGoogleAuthUrl(state: string): string {
  * Verify Google OAuth token and get user info
  */
 async function verifyGoogleToken(token: string): Promise<GoogleUserInfo> {
+  // Sin audiencia, la librería no la revisa: un token de cualquier cliente (el del POS incluido) pasaría (hz:6bfcd3a1:D1).
+  if (!process.env.GOOGLE_CLIENT_ID) throw new AuthenticationError('Failed to verify Google token')
   try {
     const ticket = await client.verifyIdToken({
       idToken: token,
@@ -487,8 +489,13 @@ export async function loginWithGoogle(
       throw new AuthenticationError('Account is inactive')
     }
 
-    // Una sola regla para ligar Google (la comparte el POS); aquí se ignora si otra entrada cambió la cuenta primero.
-    await ligarCuentaConGoogle(staff, { sub: googleUser.id, picture: googleUser.picture }, staff.organizations[0]?.organizationId ?? null)
+    // Una sola regla para ligar Google (la comparte el POS). Si otra entrada cambió la cuenta primero, no hay sesión.
+    const { aplicada } = await ligarCuentaConGoogle(
+      staff,
+      { sub: googleUser.id, picture: googleUser.picture },
+      staff.organizations[0]?.organizationId ?? null,
+    )
+    if (!aplicada) throw new ConflictError('Vuelve a intentarlo.', 'GOOGLE_ACCOUNT_CHANGED')
   }
 
   if (!staff || !staff.active) {

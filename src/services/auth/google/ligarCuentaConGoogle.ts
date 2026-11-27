@@ -5,10 +5,12 @@ import { logAction } from '@/services/dashboard/activity-log.service'
 
 /**
  * Una sola regla para ligar una cuenta de Avoqado con Google (panel y POS; hz:6bfcd3a1:D1).
- * No revisa `active`: quien llama ya decidió si la cuenta puede entrar.
+ * Quien llama ya decidió si la cuenta puede entrar; la escritura sólo confirma que sigue igual (correo y activa incluidos).
  */
 export interface CuentaParaLigar {
   id: string
+  email: string
+  active: boolean
   googleId: string | null
   photoUrl: string | null
   emailVerified: boolean
@@ -19,6 +21,8 @@ export async function ligarCuentaConGoogle(
   cuenta: CuentaParaLigar,
   google: { sub: string; picture?: string | null },
   organizationId: string | null,
+  // true: escribe aunque sólo cambie `lastLoginAt`, para que sirva de candado antes de emitir la sesión (POS).
+  opciones: { siempreEscribir?: boolean } = {},
 ): Promise<{ aplicada: boolean; contrasenaAnulada: boolean }> {
   const data: Prisma.StaffUpdateManyMutationInput = { lastLoginAt: new Date() }
   if (!cuenta.googleId) data.googleId = google.sub
@@ -30,10 +34,18 @@ export async function ligarCuentaConGoogle(
     if (cuenta.password) data.password = null
   }
 
-  if (Object.keys(data).length > 1) {
-    // Condicionada a lo que leyó quien llama: si la cuenta cambió entre la lectura y la escritura, no pisa nada.
+  if (opciones.siempreEscribir || Object.keys(data).length > 1) {
+    // Condicionada a lo que leyó quien llama: si la cuenta cambió entre la lectura y la escritura (otro correo, dada de
+    // baja, otra contraseña), no pisa nada.
     const { count } = await prisma.staff.updateMany({
-      where: { id: cuenta.id, googleId: cuenta.googleId, emailVerified: cuenta.emailVerified, password: cuenta.password },
+      where: {
+        id: cuenta.id,
+        googleId: cuenta.googleId,
+        emailVerified: cuenta.emailVerified,
+        password: cuenta.password,
+        email: cuenta.email,
+        active: true,
+      },
       data,
     })
     if (count === 0) return { aplicada: false, contrasenaAnulada: false }

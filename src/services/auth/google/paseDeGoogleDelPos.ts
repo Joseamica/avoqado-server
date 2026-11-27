@@ -54,8 +54,21 @@ function gastarNonce(nonce: unknown): string | null {
   return vence > Date.now() ? null : 'nonce-vencido'
 }
 
+/**
+ * La audiencia de ANDROID, sólo si la del panel también está puesta y es OTRA: sin `GOOGLE_CLIENT_ID` el panel no
+ * revisaría la audiencia, y con la misma un pase del POS abriría el panel (y al revés).
+ */
+function audienciaDeAndroid(): string | null {
+  const pos = process.env.GOOGLE_POS_ANDROID_AUDIENCE
+  const panel = process.env.GOOGLE_CLIENT_ID
+  return pos && panel && pos !== panel ? pos : null
+}
+
+// Un solo cliente para todas las peticiones: guarda en memoria los certificados de Google.
+const clienteDeAndroid = new OAuth2Client()
+
 export function configDeGoogleParaElPos() {
-  const androidAudience = process.env.GOOGLE_POS_ANDROID_AUDIENCE || null
+  const androidAudience = audienciaDeAndroid()
   const desktopClientId = process.env.GOOGLE_POS_DESKTOP_CLIENT_ID || null
   const windows = !!desktopClientId && !!process.env.GOOGLE_POS_DESKTOP_CLIENT_SECRET
   const android = !!androidAudience
@@ -74,11 +87,11 @@ function aUsuario(payload: any, via: 'android' | 'escritorio'): UsuarioDeGoogle 
 }
 
 export async function leerPaseDeAndroid(idToken: string): Promise<UsuarioDeGoogle> {
-  const audience = process.env.GOOGLE_POS_ANDROID_AUDIENCE
+  const audience = audienciaDeAndroid()
   if (!audience) throw noDisponible('GOOGLE_ANDROID_NOT_CONFIGURED')
   let payload: any
   try {
-    payload = (await new OAuth2Client().verifyIdToken({ idToken, audience })).getPayload()
+    payload = (await clienteDeAndroid.verifyIdToken({ idToken, audience })).getPayload()
   } catch (e) {
     throw rechazo('android', 'verificacion-fallida', e)
   }

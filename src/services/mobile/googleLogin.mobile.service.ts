@@ -46,11 +46,12 @@ export async function entrarAlPosConGoogle(pase: PaseDelPos, rememberMe: boolean
   // Sólo revisa (lanza lo mismo que la contraseña): si no puede entrar, no se liga ni se anula nada.
   const sucursal = pickOperationalVenueForLogin(staff.venues, 'NO_VENUE_ACCESS')
 
-  // 6. Primera escritura.
+  // 6. Primera escritura, siempre: es el candado (mismo correo, activa, misma contraseña) antes de emitir la sesión.
   const { aplicada } = await ligarCuentaConGoogle(
     staff,
     { sub: google.sub, picture: google.picture },
     sucursal.venue.organizationId ?? null,
+    { siempreEscribir: true },
   )
   if (!aplicada) throw new ConflictError('Vuelve a intentarlo.', 'GOOGLE_ACCOUNT_CHANGED')
 
