@@ -352,6 +352,10 @@ const envSchema = z.object({
   GOOGLE_REDIRECT_URI: z.string().url().optional(),
   GOOGLE_API_KEY: z.string().optional(),
   GOOGLE_BP_REDIRECT_URI: z.string().url().optional(),
+  // Entrar con Google en el POS (hz:6bfcd3a1:D1): audiencia propia, distinta de GOOGLE_CLIENT_ID del panel.
+  GOOGLE_POS_ANDROID_AUDIENCE: z.string().optional(),
+  GOOGLE_POS_DESKTOP_CLIENT_ID: z.string().optional(),
+  GOOGLE_POS_DESKTOP_CLIENT_SECRET: z.string().optional(),
 
   // Firebase
   FIREBASE_SERVICE_ACCOUNT_BASE64: z.string().optional(),
