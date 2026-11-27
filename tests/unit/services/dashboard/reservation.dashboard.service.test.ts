@@ -3534,6 +3534,73 @@ describe('Reservation Dashboard Service', () => {
       )
     })
 
+    // Regresión del mapa «dado»: el panel guarda las casillas apagadas con `label: ''`. Su id nunca es un lugar
+    // reservable, y una casilla prendida del mismo mapa sí pasa la validación de lugares.
+    describe('mapa «dado» con casillas apagadas sin etiqueta', () => {
+      const dado = {
+        iconType: 'reformer',
+        rows: 3,
+        cols: 3,
+        spots: [
+          { id: '0-0', row: 0, col: 0, label: '1', enabled: true },
+          { id: '0-1', row: 0, col: 1, label: '', enabled: false },
+          { id: '0-2', row: 0, col: 2, label: '2', enabled: true },
+          { id: '1-0', row: 1, col: 0, label: '', enabled: false },
+          { id: '1-1', row: 1, col: 1, label: '3', enabled: true },
+          { id: '1-2', row: 1, col: 2, label: '', enabled: false },
+          { id: '2-0', row: 2, col: 0, label: '4', enabled: true },
+          { id: '2-1', row: 2, col: 1, label: '', enabled: false },
+          { id: '2-2', row: 2, col: 2, label: '5', enabled: true },
+        ],
+      }
+
+      function prepararDado() {
+        prismaMock.reservation.findFirst.mockResolvedValueOnce(makeClassReservation({ partySize: 1, spotIds: ['0-0'] }))
+        prismaMock.$queryRaw.mockResolvedValueOnce(mockNewSession()).mockResolvedValueOnce([{ total: 0n }])
+        prismaMock.product.findFirst.mockResolvedValueOnce({ layoutConfig: dado } as any)
+        prismaMock.reservation.findMany.mockResolvedValue([])
+      }
+
+      it('el id de una casilla apagada no es reservable', async () => {
+        const reservationService = await import('@/services/dashboard/reservation.dashboard.service')
+        prepararDado()
+
+        const err = await reservationService
+          .rescheduleClassReservation({
+            venueId: VENUE_ID,
+            reservationId: 'res-class-1',
+            newClassSessionId: 'new-session',
+            newSpotIds: ['0-1'],
+            rescheduledBy: 'CUSTOMER',
+          })
+          .catch(e => e)
+
+        expect(err).toBeInstanceOf(BadRequestError)
+        expect(err.message).toBe('Lugar "0-1" no es valido')
+        expect(prismaMock.reservation.updateMany).not.toHaveBeenCalled()
+      })
+
+      it('una casilla prendida del mismo mapa pasa la validación de lugares', async () => {
+        const reservationService = await import('@/services/dashboard/reservation.dashboard.service')
+        prepararDado()
+
+        await reservationService
+          .rescheduleClassReservation({
+            venueId: VENUE_ID,
+            reservationId: 'res-class-1',
+            newClassSessionId: 'new-session',
+            newSpotIds: ['1-1'],
+            rescheduledBy: 'CUSTOMER',
+          })
+          .catch(() => undefined)
+
+        // Llegó a buscar si el lugar está tomado: la casilla prendida sí es un lugar válido.
+        expect(prismaMock.reservation.findMany).toHaveBeenCalledWith(
+          expect.objectContaining({ where: expect.objectContaining({ spotIds: { hasSome: ['1-1'] } }) }),
+        )
+      })
+    })
+
     // nuevo — Codex F6: mover aquí a un socio de pase deja su lugar del agregador en la clase vieja (dos horarios
     // distintos). Como el resto del mercado, el socio cambia su reserva desde la app del agregador.
     it.each([
