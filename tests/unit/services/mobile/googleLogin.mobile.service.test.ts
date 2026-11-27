@@ -1,4 +1,5 @@
 /** Entrar al POS con Google: el orden de las revisiones es el contrato (hz:6bfcd3a1:D1). */
+import logger from '@/config/logger'
 import prisma from '../../../../src/utils/prismaClient'
 import { ligarCuentaConGoogle } from '@/services/auth/google/ligarCuentaConGoogle'
 import { leerPaseDeAndroid, leerPaseDeEscritorio } from '@/services/auth/google/paseDeGoogleDelPos'
@@ -71,9 +72,35 @@ describe('entrarAlPosConGoogle', () => {
   })
 
   it('sin googleId, correo de otro proveedor y sin hd ⇒ NOT_LINKED', async () => {
-    android.mockResolvedValue(google({ email: 'ana@outlook.com' }))
+    android.mockResolvedValue(google({ email: 'persona@empresa.mx' }))
     await expect(entrarAlPosConGoogle(pase, false, 'd')).rejects.toMatchObject({ code: 'GOOGLE_ACCOUNT_NOT_LINKED', statusCode: 401 })
     expect(ligar).not.toHaveBeenCalled()
+  })
+
+  it('correo x@gmail.com.evil.mx sin googleId y sin hd ⇒ NOT_LINKED', async () => {
+    android.mockResolvedValue(google({ email: 'x@gmail.com.evil.mx' }))
+    await expect(entrarAlPosConGoogle(pase, false, 'd')).rejects.toMatchObject({ code: 'GOOGLE_ACCOUNT_NOT_LINKED' })
+    expect(ligar).not.toHaveBeenCalled()
+  })
+
+  it('MISMATCH registra el rechazo sin correo ni sub', async () => {
+    const warn = jest.spyOn(logger, 'warn').mockImplementation((() => logger) as any)
+    prismaMock.staff.findUnique.mockResolvedValue(cuenta({ googleId: 'sub-B' }))
+    await expect(entrarAlPosConGoogle(pase, false, 'd')).rejects.toMatchObject({ code: 'GOOGLE_ACCOUNT_MISMATCH' })
+    expect(warn).toHaveBeenCalledTimes(1)
+    const logged = JSON.stringify(warn.mock.calls[0])
+    expect(logged).toContain('sub-distinto')
+    expect(logged).toContain('s1')
+    for (const secreto of ['sub-A', 'sub-B', 'gmail.com']) expect(logged).not.toContain(secreto)
+    warn.mockRestore()
+  })
+
+  it('con dos sucursales, liga con la organización de la que abre (la operativa)', async () => {
+    const cerrada = { venue: { ...OK_VENUE.venue, id: 'v0', status: 'CLOSED', organizationId: 'org_0' } }
+    const abierta = { venue: { ...OK_VENUE.venue, id: 'v2', organizationId: 'org_2' } }
+    prismaMock.staff.findUnique.mockResolvedValue(cuenta({ venues: [cerrada, abierta] }))
+    await entrarAlPosConGoogle(pase, false, 'd')
+    expect(ligar).toHaveBeenCalledWith(expect.anything(), expect.anything(), 'org_2')
   })
 
   it('sin googleId con hd ⇒ se liga', async () => {

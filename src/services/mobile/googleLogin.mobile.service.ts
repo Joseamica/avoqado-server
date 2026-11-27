@@ -1,3 +1,4 @@
+import logger from '@/config/logger'
 import prisma from '../../utils/prismaClient'
 import { AuthenticationError, ConflictError, NotFoundError, UnauthorizedError } from '../../errors/AppError'
 import { ligarCuentaConGoogle } from '../auth/google/ligarCuentaConGoogle'
@@ -32,6 +33,8 @@ export async function entrarAlPosConGoogle(pase: PaseDelPos, rememberMe: boolean
   // es el dueño del buzón (gmail.com o Workspace); el resto prueba con contraseña.
   if (staff.googleId) {
     if (staff.googleId !== google.sub) {
+      // Sin correo, token ni sub en el registro: sólo quién y por qué.
+      logger.warn('Google POS: cuenta ligada a otra cuenta de Google', { staffId: staff.id, reason: 'sub-distinto' })
       throw new UnauthorizedError('Esta cuenta está ligada a otra cuenta de Google.', 'GOOGLE_ACCOUNT_MISMATCH')
     }
   } else if (!email.endsWith('@gmail.com') && !google.hd) {
@@ -41,13 +44,13 @@ export async function entrarAlPosConGoogle(pase: PaseDelPos, rememberMe: boolean
     )
   }
   // Sólo revisa (lanza lo mismo que la contraseña): si no puede entrar, no se liga ni se anula nada.
-  pickOperationalVenueForLogin(staff.venues, 'NO_VENUE_ACCESS')
+  const sucursal = pickOperationalVenueForLogin(staff.venues, 'NO_VENUE_ACCESS')
 
   // 6. Primera escritura.
   const { aplicada } = await ligarCuentaConGoogle(
     staff,
     { sub: google.sub, picture: google.picture },
-    staff.venues[0]?.venue.organizationId ?? null,
+    sucursal.venue.organizationId ?? null,
   )
   if (!aplicada) throw new ConflictError('Vuelve a intentarlo.', 'GOOGLE_ACCOUNT_CHANGED')
 
