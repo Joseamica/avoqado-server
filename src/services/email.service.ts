@@ -284,6 +284,8 @@ export interface PlanTrialEndsFreeEmailData {
   venueName: string
   trialEndsAt: Date
   timeZone?: string
+  /** B4 (final, S1): nombre del plan de la prueba (el del editor). Sin él, «Pro» como hoy. */
+  planName?: string
   /** «Tu plan» del negocio: los dos botones llevan ahí. */
   billingUrl: string
   /** Precio del Básico vigente sin IVA, en centavos sólo para escribirlo. Sin él (no hay Básico publicado), sin el bloque. */
@@ -300,6 +302,8 @@ export interface PlanEndedEmailData {
   billingUrl: string
   /** B4 Task 2: nombre del plan (el del editor). Sin él, «Pro» como hoy. */
   planName?: string
+  /** B4 (final, S2): nombre del plan Gratis (el del editor). Sin él, «Gratis» / «Free» como hoy. */
+  freeName?: string
   basicPlanPriceWithoutTaxCents?: number
   unsubscribe?: PlanNoticeUnsubscribe
   idempotencyKey?: string
@@ -353,6 +357,8 @@ export interface PlanFreeTrialEndingEmailData {
   endDate: Date
   /** Por defecto `'Pro'`. */
   planName?: string
+  /** B4 (final, S2): nombre del plan Gratis (el del editor). Sin él, «Gratis» / «Free» como hoy. */
+  freeName?: string
   /** Zona del negocio para escribir la fecha. Por defecto Ciudad de México. */
   timeZone?: string
   /** Clave de Resend: la misma prueba y fecha mandan UN correo aunque el job reintente. */
@@ -5433,20 +5439,26 @@ ${boton}: ${data.billingPortalUrl}`
       timeZone: zonaValida(data.timeZone),
     })
     const precio = data.basicPlanPriceWithoutTaxCents != null ? precioSinIva(data.basicPlanPriceWithoutTaxCents) : null
-    const subject = en ? `Your Avoqado Pro trial ends on ${fecha}` : `Tu prueba de Avoqado Pro termina el ${fecha}`
-    const frase = precio
-      ? en
-        ? `Your Pro trial ends on <strong>${fecha}</strong> and you won't be charged anything. That day you can get Básico (${precio} + VAT) with one click, or stay on Pro starting today.`
-        : `Tu prueba de Pro termina el <strong>${fecha}</strong> y no se te cobrará nada. Ese día podrás contratar el Básico (${precio} + IVA) con un clic, o quedarte en Pro desde hoy.`
-      : en
-        ? `Your Pro trial ends on <strong>${fecha}</strong> and you won't be charged anything. If you want to stay on Pro, you can do it from «Your plan».`
-        : `Tu prueba de Pro termina el <strong>${fecha}</strong> y no se te cobrará nada. Si quieres quedarte en Pro, puedes hacerlo desde «Tu plan».`
+    // B4 (final, S1): el nombre del plan sigue a la versión del editor; sin él, «Pro» como hoy.
+    const planName = data.planName ?? 'Pro'
+    const subject = en ? `Your Avoqado ${planName} trial ends on ${fecha}` : `Tu prueba de Avoqado ${planName} termina el ${fecha}`
+    const fraseDe = (p: string) =>
+      precio
+        ? en
+          ? `Your ${p} trial ends on <strong>${fecha}</strong> and you won't be charged anything. That day you can get Básico (${precio} + VAT) with one click, or stay on ${p} starting today.`
+          : `Tu prueba de ${p} termina el <strong>${fecha}</strong> y no se te cobrará nada. Ese día podrás contratar el Básico (${precio} + IVA) con un clic, o quedarte en ${p} desde hoy.`
+        : en
+          ? `Your ${p} trial ends on <strong>${fecha}</strong> and you won't be charged anything. If you want to stay on ${p}, you can do it from «Your plan».`
+          : `Tu prueba de ${p} termina el <strong>${fecha}</strong> y no se te cobrará nada. Si quieres quedarte en ${p}, puedes hacerlo desde «Tu plan».`
+    const frase = fraseDe(planName)
+    const fraseHtml = fraseDe(escapeHtml(planName))
     const greeting = en ? 'Hi,' : 'Hola,'
     const ctaLabel = en ? 'View my plan' : 'Ver mi plan'
-    const quedarme = en ? 'Stay on Pro' : 'Quedarme en Pro'
+    const quedarme = en ? `Stay on ${planName}` : `Quedarme en ${planName}`
+    const quedarmeHtml = en ? `Stay on ${escapeHtml(planName)}` : `Quedarme en ${escapeHtml(planName)}`
     const bodyHtml = `
       <p style="font-size: 16px; margin: 0 0 16px 0; color: #000;">${greeting}</p>
-      <p style="font-size: 16px; margin: 0 0 24px 0; color: #000;">${frase}</p>`
+      <p style="font-size: 16px; margin: 0 0 24px 0; color: #000;">${fraseHtml}</p>`
     const text = `${greeting}
 
 ${frase.replace(/<\/?strong>/g, '')}
@@ -5462,7 +5474,7 @@ ${en ? 'Avoqado Team' : 'Equipo de Avoqado'}`
       bodyHtml,
       ctaLabel,
       ctaUrl: data.billingUrl,
-      secondaryCta: { label: quedarme, url: data.billingUrl },
+      secondaryCta: { label: quedarmeHtml, url: data.billingUrl },
       unsubscribe: data.unsubscribe,
     })
     return this.sendEmail({
@@ -5495,20 +5507,21 @@ ${en ? 'Avoqado Team' : 'Equipo de Avoqado'}`
         : `Tu plan Avoqado ${planName} terminó`
     // «No se te cobró nada» sólo es verdad de la PRUEBA: a quien pagó su Pro no se le dice (revisión de Task 6, hallazgo 3).
     // `parrafosDe(nombre)`: el mismo texto para el HTML (con el nombre escapado) y para el texto plano.
-    const parrafosDe = (p: string) =>
+    const parrafosDe = (p: string, libre: string) =>
       en
         ? [
-            `${prueba ? `Your ${p} trial ended and we didn't charge you anything.` : `Your ${p} plan ended.`} Your business keeps working on the Free plan and your data stays as it is.`,
+            `${prueba ? `Your ${p} trial ended and we didn't charge you anything.` : `Your ${p} plan ended.`} Your business keeps working on the ${libre} plan and your data stays as it is.`,
             precio
               ? `You can get Básico (${precio} + VAT) with one click, or go back to ${p}.`
               : `You can go back to ${p} whenever you want.`,
           ]
         : [
-            `${prueba ? `Tu prueba de ${p} terminó y no se te cobró nada.` : `Tu plan ${p} terminó.`} Tu negocio sigue funcionando con el plan Gratis y tus datos se quedan igual.`,
+            `${prueba ? `Tu prueba de ${p} terminó y no se te cobró nada.` : `Tu plan ${p} terminó.`} Tu negocio sigue funcionando con el plan ${libre} y tus datos se quedan igual.`,
             precio ? `Puedes contratar el Básico (${precio} + IVA) con un clic, o volver a ${p}.` : `Puedes volver a ${p} cuando quieras.`,
           ]
-    const parrafos = parrafosDe(planName)
-    const parrafosHtml = parrafosDe(escapeHtml(planName))
+    const libre = data.freeName ?? (en ? 'Free' : 'Gratis')
+    const parrafos = parrafosDe(planName, libre)
+    const parrafosHtml = parrafosDe(escapeHtml(planName), escapeHtml(libre))
     const greeting = en ? 'Hi,' : 'Hola,'
     const contratarBasico = en ? 'Get Básico' : 'Contratar Básico'
     const contratarPro = en ? `Get ${planName}` : `Contratar ${planName}`
@@ -5555,6 +5568,7 @@ ${en ? 'Avoqado Team' : 'Equipo de Avoqado'}`
     }
     const en = data.locale === 'en'
     const planName = data.planName ?? 'Pro'
+    const libre = escapeHtml(data.freeName ?? (en ? 'Free' : 'Gratis'))
     const fecha = data.endDate.toLocaleDateString(en ? 'en-US' : 'es-MX', {
       year: 'numeric',
       month: 'long',
@@ -5578,14 +5592,14 @@ ${en ? 'Avoqado Team' : 'Equipo de Avoqado'}`
       ? [
           `Your free Avoqado ${planName} trial ends on <strong>${fecha}</strong>. We won't charge you anything for this trial.`,
           quedarse
-            ? `After that date your business keeps working on the Free plan and your data stays as it is. To keep ${planName}, add your card in Billing: you pay nothing today and the first charge is on the day your trial ends. Questions? Write to ${correo}.`
-            : `After that date your business keeps working on the Free plan and your data stays as it is. To keep ${planName}, write to us at ${correo} and we'll help you sign up.`,
+            ? `After that date your business keeps working on the ${libre} plan and your data stays as it is. To keep ${planName}, add your card in Billing: you pay nothing today and the first charge is on the day your trial ends. Questions? Write to ${correo}.`
+            : `After that date your business keeps working on the ${libre} plan and your data stays as it is. To keep ${planName}, write to us at ${correo} and we'll help you sign up.`,
         ]
       : [
           `Tu prueba gratis de Avoqado ${planName} termina el <strong>${fecha}</strong>. Por esta prueba no te cobraremos nada.`,
           quedarse
-            ? `Después de esa fecha tu negocio sigue funcionando con el plan Gratis y tus datos se quedan igual. Si quieres seguir con ${planName}, pon tu tarjeta en Facturación: hoy no pagas nada y el primer cobro es el día que termina tu prueba. ¿Dudas? Escríbenos a ${correo}.`
-            : `Después de esa fecha tu negocio sigue funcionando con el plan Gratis y tus datos se quedan igual. Si quieres seguir con ${planName}, escríbenos a ${correo} y te ayudamos a contratarlo.`,
+            ? `Después de esa fecha tu negocio sigue funcionando con el plan ${libre} y tus datos se quedan igual. Si quieres seguir con ${planName}, pon tu tarjeta en Facturación: hoy no pagas nada y el primer cobro es el día que termina tu prueba. ¿Dudas? Escríbenos a ${correo}.`
+            : `Después de esa fecha tu negocio sigue funcionando con el plan ${libre} y tus datos se quedan igual. Si quieres seguir con ${planName}, escríbenos a ${correo} y te ayudamos a contratarlo.`,
         ]
     const greeting = en ? 'Hi,' : 'Hola,'
     const bodyHtml = `
@@ -5619,6 +5633,7 @@ ${en ? 'Avoqado Team' : 'Equipo de Avoqado'}`
   private async sendPlanNoCardTrialEmail(email: string, data: PlanFreeTrialEndingEmailData): Promise<boolean> {
     const en = data.locale === 'en'
     const planName = data.planName ?? 'Pro'
+    const libre = escapeHtml(data.freeName ?? (en ? 'Free' : 'Gratis'))
     const fecha = data.endDate.toLocaleDateString(en ? 'en-US' : 'es-MX', {
       year: 'numeric',
       month: 'long',
@@ -5655,12 +5670,12 @@ ${en ? 'Avoqado Team' : 'Equipo de Avoqado'}`
         ? tarjeta
           ? `If you do nothing, when it ends we'll charge ${monto ?? 'your plan'} to your ${marca}; you can remove it or cancel in «Your plan».`
           : tarjeta === null
-            ? `To keep ${planName}, add your card in «Your plan»; otherwise you stay on Free.${monto ? ` With your card, we'll charge ${monto} when it ends.` : ''}`
+            ? `To keep ${planName}, add your card in «Your plan»; otherwise you stay on ${libre}.${monto ? ` With your card, we'll charge ${monto} when it ends.` : ''}`
             : `In «Your plan» you can see which card will be charged when it ends, or cancel.`
         : tarjeta
           ? `Si no haces nada, al terminar ${monto ? `se cobrarán ${monto}` : 'se cobrará tu plan'} en tu tarjeta ${marca}; puedes quitarla o cancelar en «Tu plan».`
           : tarjeta === null
-            ? `Para seguir con ${planName}, pon tu tarjeta en «Tu plan»; si no, sigues en Gratis.${monto ? ` Con tu tarjeta, al terminar se cobrarán ${monto}.` : ''}`
+            ? `Para seguir con ${planName}, pon tu tarjeta en «Tu plan»; si no, sigues en ${libre}.${monto ? ` Con tu tarjeta, al terminar se cobrarán ${monto}.` : ''}`
             : `En «Tu plan» ves qué tarjeta se cobrará al terminar, o puedes cancelar.`
     const nota =
       monto && !sinCobro

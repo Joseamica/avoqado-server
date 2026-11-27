@@ -242,8 +242,11 @@ export class PlanRenewalReminderJob {
     }
     if (!(await avisoDelPlanApagado(target.staffId, vf.venueId))) {
       const basico = await basicoPublicado()
+      const nombres = await nombresDeLosPlanes()
       const sent = await emailService.sendPlanTrialEndsFreeEmail(target.email, {
         locale: target.locale,
+        // B4 (final, S1): el nombre del plan de la prueba sigue a la versión del editor; sin ella, «Pro» como hoy.
+        planName: nombres.PRO,
         venueName: target.venueName,
         trialEndsAt: new Date(periodEndMs),
         timeZone,
@@ -336,11 +339,13 @@ export class PlanRenewalReminderJob {
             continue
           }
 
+          const nombres = await nombresDeLosPlanes()
           const sent = await emailService.sendPlanFreeTrialEndingEmail(target.email, {
             locale: target.locale,
             venueName: target.venueName,
             endDate: fin,
-            planName: (await nombresDeLosPlanes())[vf.feature?.code === 'PLAN_PREMIUM' ? 'PREMIUM' : 'PRO'],
+            planName: nombres[vf.feature?.code === 'PLAN_PREMIUM' ? 'PREMIUM' : 'PRO'],
+            freeName: nombres.FREE,
             timeZone: zonaValida(vf.venue?.timezone),
             // Same row and date → one email at the provider even if the stamp below is lost (its window is 24 h).
             idempotencyKey: `prueba-regalada:${vf.id}:${fin.toISOString()}`,
@@ -491,11 +496,13 @@ export class PlanRenewalReminderJob {
             continue
           }
           // El correo de Task 6. Sin monto también sale (no promete un cobro), sin la frase del monto. Sin llave, como el de hoy.
+          const nombres = await nombresDeLosPlanes()
           sent = await emailService.sendPlanFreeTrialEndingEmail(target.email, {
             locale: target.locale,
             venueName: target.venueName,
             endDate: new Date(periodEndMs),
-            planName: (await nombresDeLosPlanes())[vf.feature?.code === 'PLAN_PREMIUM' ? 'PREMIUM' : 'PRO'],
+            planName: nombres[vf.feature?.code === 'PLAN_PREMIUM' ? 'PREMIUM' : 'PRO'],
+            freeName: nombres.FREE,
             timeZone: zonaValida(vf.venue?.timezone),
             billingUrl: billingPageUrl(vf.venue?.slug),
             ...(amountCents !== null ? { montoAlTerminarCents: amountCents } : {}),

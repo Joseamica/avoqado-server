@@ -403,7 +403,7 @@ async function cotizar(
 
   if (input.offer.offerVersion !== campaign.offerVersion || campaign.advertisedPriceCents !== input.offer.expectedFirstChargeCents) {
     throw new ConflictError('La oferta cambió. Revísala antes de pagar.', 'OFFER_CHANGED', {
-      launchOffer: buildLaunchOfferView(toOfferRow(campaign), now),
+      launchOffer: buildLaunchOfferView(toOfferRow(campaign), now, await nombresDeLosPlanes()),
     })
   }
 
@@ -837,7 +837,7 @@ async function apartarLugar(
       // snapshot es lo que el cliente consintió y NUNCA se reescribe.
       if (vivo.campaignId !== campaign.id || vivo.offerVersion !== campaign.offerVersion) {
         throw new ConflictError('La oferta cambió. Revísala antes de pagar.', 'OFFER_CHANGED', {
-          launchOffer: buildLaunchOfferView(toOfferRow(campaign), now),
+          launchOffer: buildLaunchOfferView(toOfferRow(campaign), now, await nombresDeLosPlanes()),
         })
       }
       return { id: vivo.id, reused: true, stripePriceId: vivo.stripePriceId ?? null }
@@ -2710,11 +2710,13 @@ async function enviarBienvenidaSinTarjeta(args: {
 }): Promise<void> {
   const target = await resolvePlanNotificationTarget(args.venueId)
   if (!target.email) return
+  const nombres = await nombresDeLosPlanes()
   await emailService.sendPlanFreeTrialEndingEmail(target.email, {
     locale: args.language ?? target.locale,
     venueName: target.venueName,
     endDate: args.trialEnd,
-    planName: args.nombreDelPlan ?? (await nombresDeLosPlanes())[args.tier],
+    planName: args.nombreDelPlan ?? nombres[args.tier],
+    freeName: nombres.FREE,
     timeZone: args.timeZone,
     idempotencyKey: `plan-trial-no-card-start:${args.subscriptionId}`,
     billingUrl: billingPageUrl(args.venueSlug),

@@ -30,10 +30,13 @@ export const planStatus: DataCapability<Record<string, never>, PlanData> = {
   permissions: ['billing:read', 'billing:subscriptions:read'],
   roles: ['ADMIN', 'OWNER'],
   params: () => ({ ok: true, value: {} }),
-  read: async scope => ({
-    ...(await getPlanState(scope.venueId, { skipPauseOffer: true, stripeTimeoutMs: STRIPE_TIMEOUT_MS })),
-    // B4: el nombre de cada plan es el de la versión vigente (nunca falla: sin versión, el de hoy)
-    nombres: await nombresDeLosPlanesDeTuPlan(),
-  }),
+  read: async scope => {
+    // B4 (final, S3): el estado y los nombres se leen en paralelo (el nombre nunca falla: sin versión, el de hoy).
+    const [state, nombres] = await Promise.all([
+      getPlanState(scope.venueId, { skipPauseOffer: true, stripeTimeoutMs: STRIPE_TIMEOUT_MS }),
+      nombresDeLosPlanesDeTuPlan(),
+    ])
+    return { ...state, nombres }
+  },
   render: (scope, _params, state) => renderPlan(scope, state),
 }

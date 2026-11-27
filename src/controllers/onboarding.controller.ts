@@ -339,7 +339,7 @@ export async function getOnboardingProgress(req: Request, res: Response, next: N
     // cliente: el `expectedFirstChargeCents` que el dashboard manda al pagar es evidencia de lo
     // que la persona vio, no el precio con el que se cobra.
     const campaign = progress.launchCampaignId ? await prisma.launchCampaign.findUnique({ where: { id: progress.launchCampaignId } }) : null
-    const launchOffer = campaign ? buildLaunchOfferView(toOfferRow(campaign as never), new Date()) : null
+    const launchOffer = campaign ? buildLaunchOfferView(toOfferRow(campaign as never), new Date(), await nombresDeLosPlanes()) : null
     const quote = standardPlanQuote()
     // Planes editables (B2): con una versión del editor, la cotización sale de ella y trae un comprobante por plan y periodicidad.
     // 🔴 Leer la oferta nunca tumba una lectura de hoy: si falla (p. ej. una definición que no pasa el esquema), `planQuote` es el de hoy.
@@ -2173,7 +2173,7 @@ export async function attachLaunchCampaign(req: Request, res: Response, next: Ne
       : await launchCampaignService.findByCode(req.body.code)
     if (!campaign) throw new NotFoundError('Esa oferta no existe', 'LAUNCH_OFFER_NOT_FOUND')
 
-    const vista = buildLaunchOfferView(toOfferRow(campaign), new Date())
+    const vista = buildLaunchOfferView(toOfferRow(campaign), new Date(), await nombresDeLosPlanes())
     if (!vista.available) {
       throw new ConflictError('La oferta ya no está disponible', 'LAUNCH_OFFER_UNAVAILABLE', { reason: vista.unavailableReason })
     }

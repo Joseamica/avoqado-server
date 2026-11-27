@@ -722,6 +722,7 @@ describe('PlanRenewalReminderJob.runNow — pruebas regaladas sin tarjeta', () =
       venueName: 'Taqueria El Patio',
       endDate: FIN,
       planName: 'Pro',
+      freeName: 'Gratis',
       timeZone: 'America/Mexico_City',
       idempotencyKey: `prueba-regalada:vf9:${FIN.toISOString()}`,
       // D3: con ≥ 72 h todavía puede quedarse con su plan desde Facturación.

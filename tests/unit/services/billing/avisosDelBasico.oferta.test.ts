@@ -144,6 +144,55 @@ describe('«Tu prueba termina» de la prueba ENDS_FREE (el job)', () => {
   })
 })
 
+describe('B4 (final, S1): «Tu prueba termina» lleva el nombre del plan del editor', () => {
+  const nowS = () => Math.floor(Date.now() / 1000)
+  const fila = {
+    id: 'vf1',
+    venueId: 'venue-1',
+    stripeSubscriptionId: 'sub_1',
+    renewalReminderSentAt: null,
+    freeTrialNoticeFor: null,
+    feature: { code: 'PLAN_PRO' },
+    venue: { slug: 'negocio-de-prueba', timezone: 'America/Mexico_City' },
+  }
+  beforeEach(() => {
+    prismaMock.venueFeature.findMany.mockImplementation((async (args: { where: { active?: boolean; stripeSubscriptionId: unknown } }) =>
+      args.where.active === true && args.where.stripeSubscriptionId !== null ? [fila] : []) as never)
+    stripeMock.__retrieve.mockResolvedValue({
+      id: 'sub_1',
+      status: 'trialing',
+      customer: 'cus_1',
+      cancel_at_period_end: true,
+      cancel_at: null,
+      current_period_start: nowS() - 22 * 86_400,
+      current_period_end: nowS() + 8 * 86_400,
+      trial_end: nowS() + 8 * 86_400,
+      items: { data: [{ price: { recurring: { interval: 'month' } } }] },
+      metadata: {},
+    })
+  })
+
+  it('con la v2 «Plus» (Gratis = «Inicial») el correo dice Plus en asunto, cuerpo y botón; sin versión, «Pro»', async () => {
+    prismaMock.planOfferPointer.findUnique.mockResolvedValue(
+      punteroA('cv2', 2, definicionDePrueba({ ids: idsDeLaVersion('v2'), nombres: { PRO: 'Plus', FREE: 'Inicial' } })) as never,
+    )
+    await new PlanRenewalReminderJob().runNow()
+    expect(pruebaTermina).toHaveBeenCalledTimes(1)
+    expect(pruebaTermina.mock.calls[0][1]).toMatchObject({ planName: 'Plus' })
+    const correo = enviar.mock.calls[0][0] as { subject: string; text: string; html: string }
+    expect(correo.subject).toMatch(/^Tu prueba de Avoqado Plus termina el /)
+    expect(correo.text).toContain('quedarte en Plus')
+    expect(correo.html).toContain('Quedarme en Plus')
+
+    pruebaTermina.mockClear()
+    enviar.mockClear()
+    sinVersiones()
+    await new PlanRenewalReminderJob().runNow()
+    expect(pruebaTermina.mock.calls[0][1]).toMatchObject({ planName: 'Pro' })
+    expect((enviar.mock.calls[0][0] as { subject: string }).subject).toMatch(/^Tu prueba de Avoqado Pro termina el /)
+  })
+})
+
 describe('«Tu Pro terminó» / «Tu prueba terminó» (avisarPlanTerminado)', () => {
   const FIN_S = Math.floor((Date.now() - 2 * DIA) / 1000)
   /** Un Pro pagado que terminó al fin de su periodo con la cancelación programada (sin cobro). */

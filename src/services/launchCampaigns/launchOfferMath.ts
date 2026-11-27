@@ -259,7 +259,8 @@ export interface LaunchOfferView {
   offerVersion: number
   vertical: LaunchOfferVertical
   planTier: LaunchOfferPlanTier
-  planName: 'Pro' | 'Premium'
+  /** `Pro` / `Premium` de hoy; con una versión del editor (≥ 2), el nombre de ESA versión (B4 final, I3). */
+  planName: string
   available: true
   currency: 'MXN'
   ivaIncluded: true
@@ -290,10 +291,18 @@ export interface LaunchOfferUnavailableView {
   unavailableReason: LaunchOfferUnavailableReasonWire
 }
 
-const PLAN_NAME: Record<LaunchOfferPlanTier, 'Pro' | 'Premium'> = { PRO: 'Pro', PREMIUM: 'Premium' }
+const PLAN_NAME: Record<LaunchOfferPlanTier, string> = { PRO: 'Pro', PREMIUM: 'Premium' }
+
+/** Los nombres de los planes pagados que el llamador ya leyó (`nombresDeLosPlanes()`): este módulo es puro y no los lee. */
+export type NombresDelPlanPagado = Record<LaunchOfferPlanTier, string>
 
 /** Exactamente lo que ven la landing y el dashboard. Nunca expone el cupo ni el conteo (D10). */
-export function buildLaunchOfferView(c: LaunchOfferCampaignRow, now: Date): LaunchOfferView | LaunchOfferUnavailableView {
+export function buildLaunchOfferView(
+  c: LaunchOfferCampaignRow,
+  now: Date,
+  /** B4 (final, I3): el nombre del plan de la versión vigente del editor. Sin él, «Pro» / «Premium» como hoy. */
+  nombres?: NombresDelPlanPagado,
+): LaunchOfferView | LaunchOfferUnavailableView {
   const disponible = launchOfferAvailability(c, now)
   if (!disponible.available) {
     return { code: c.code, slug: c.landingSlug, available: false, unavailableReason: disponible.reason }
@@ -310,7 +319,7 @@ export function buildLaunchOfferView(c: LaunchOfferCampaignRow, now: Date): Laun
     offerVersion: c.offerVersion,
     vertical: c.vertical,
     planTier: c.planTier,
-    planName: PLAN_NAME[c.planTier],
+    planName: nombres?.[c.planTier] ?? PLAN_NAME[c.planTier],
     available: true,
     currency: 'MXN',
     ivaIncluded: true,

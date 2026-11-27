@@ -7,6 +7,7 @@
 import prisma from '@/utils/prismaClient'
 import { UTM_KEYS } from '@/schemas/acquisition.schema'
 import { buildLaunchOfferView } from '@/services/launchCampaigns/launchOfferMath'
+import { nombresDeLosPlanes } from '@/services/billing/nombresDeLosPlanes'
 import { LAUNCH_CAMPAIGN_SELECT, toOfferRow } from '@/services/launchCampaigns/launchCampaign.service'
 import { getPrimaryOrganizationId } from '@/services/staffOrganization.service'
 
@@ -25,7 +26,7 @@ export async function ofertaReclamadaEnTexto(organizationId: string): Promise<st
   const campana = progreso?.launchCampaign
   if (!campana) return null
 
-  const vista = buildLaunchOfferView(toOfferRow(campana), new Date())
+  const vista = buildLaunchOfferView(toOfferRow(campana), new Date(), await nombresDeLosPlanes())
   if (!vista.available) return null
 
   const meses = vista.promo.months === 1 ? '1 mes' : `${vista.promo.months} meses`

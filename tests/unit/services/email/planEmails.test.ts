@@ -257,6 +257,70 @@ describe('Subscription lifecycle plan emails', () => {
       expect(arg.idempotencyKey).toBe('k1')
     })
 
+    it('B4 (final, S1): con una versión del editor («Plus») el asunto, el cuerpo y el botón dicen Plus, escapado en el HTML', async () => {
+      await emailService.sendPlanTrialEndsFreeEmail('a@x.com', {
+        locale: 'es',
+        venueName: 'Bar',
+        trialEndsAt: new Date('2026-12-17T18:00:00Z'),
+        timeZone: 'America/Mexico_City',
+        billingUrl: 'u',
+        basicPlanPriceWithoutTaxCents: 49900,
+        planName: 'Plus',
+      })
+      const arg = spy.mock.calls[0][0]
+      expect(arg.subject).toBe('Tu prueba de Avoqado Plus termina el 17 de diciembre de 2026')
+      expect(arg.html).toContain('Tu prueba de Plus termina')
+      expect(arg.html).toContain('quedarte en Plus desde hoy')
+      expect(arg.html).toContain('Quedarme en Plus')
+      expect(arg.text).toContain('Quedarme en Plus: u')
+      expect(`${arg.subject}${arg.html}${arg.text}`).not.toMatch(/\bPro\b/)
+    })
+
+    it('B4 (final, S1): el nombre del plan va escapado en el HTML y crudo en el texto', async () => {
+      await emailService.sendPlanTrialEndsFreeEmail('a@x.com', {
+        locale: 'en',
+        venueName: 'Bar',
+        trialEndsAt: new Date('2026-12-17T18:00:00Z'),
+        billingUrl: 'u',
+        planName: 'A&B <x>',
+      })
+      const arg = spy.mock.calls[0][0]
+      expect(arg.html).toContain('A&amp;B &lt;x&gt;')
+      expect(arg.html).not.toContain('<x>')
+      expect(arg.text).toContain('Stay on A&B <x>: u')
+    })
+
+    it('B4 (final, S1): sin planName, el correo de hoy («Pro»), asunto y botón idénticos', async () => {
+      await emailService.sendPlanTrialEndsFreeEmail('a@x.com', {
+        locale: 'en',
+        venueName: 'Bar',
+        trialEndsAt: new Date('2026-12-17T18:00:00Z'),
+        timeZone: 'America/Mexico_City',
+        billingUrl: 'u',
+      })
+      const arg = spy.mock.calls[0][0]
+      expect(arg.subject).toBe('Your Avoqado Pro trial ends on December 17, 2026')
+      expect(arg.html).toContain('Stay on Pro')
+      expect(arg.text).toContain('If you want to stay on Pro, you can do it from «Your plan».')
+    })
+
+    it('B4 (final, S2): el plan Gratis renombrado («Inicial») sale en «Tu prueba terminó» y en la prueba regalada; sin él, «Gratis» / «Free»', async () => {
+      const base = { venueName: 'Bar', billingUrl: 'u' }
+      await emailService.sendPlanEndedEmail('a@x.com', { ...base, locale: 'es', kind: 'PRO', freeName: 'Inicial' })
+      expect(spy.mock.calls[0][0].text).toContain('sigue funcionando con el plan Inicial')
+      await emailService.sendPlanEndedEmail('a@x.com', { ...base, locale: 'es', kind: 'PRO' })
+      expect(spy.mock.calls[1][0].text).toContain('sigue funcionando con el plan Gratis')
+      await emailService.sendPlanEndedEmail('a@x.com', { ...base, locale: 'en', kind: 'TRIAL' })
+      expect(spy.mock.calls[2][0].text).toContain('keeps working on the Free plan')
+      const fin = { ...base, endDate: new Date('2026-12-17T18:00:00Z') }
+      await emailService.sendPlanFreeTrialEndingEmail('a@x.com', { ...fin, locale: 'es', freeName: 'Inicial' })
+      expect(spy.mock.calls[3][0].text).toContain('con el plan Inicial')
+      await emailService.sendPlanFreeTrialEndingEmail('a@x.com', { ...fin, locale: 'es' })
+      expect(spy.mock.calls[4][0].text).toContain('con el plan Gratis')
+      await emailService.sendPlanFreeTrialEndingEmail('a@x.com', { ...fin, locale: 'es', tarjeta: null, freeName: 'Inicial' })
+      expect(spy.mock.calls[5][0].text).toContain('sigues en Inicial.')
+    })
+
     it('sin Básico publicado: sin el bloque del Básico, y nunca un precio inventado', async () => {
       await emailService.sendPlanTrialEndsFreeEmail('a@x.com', {
         locale: 'es',

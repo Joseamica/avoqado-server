@@ -68,4 +68,32 @@ describe('planesPublicos', () => {
     pointer.mockResolvedValue(punteroA('ver_v1', 1, { schemaVersion: 1 }))
     await expect(planesPublicos()).rejects.toMatchObject({ code: 'PLAN_NOT_CONFIGURED' })
   })
+
+  describe('B4 (final, S4): una v2 dañada', () => {
+    const v2 = (ids: Record<string, string>, planes: Record<string, object> = {}) =>
+      pointer.mockResolvedValue(punteroA('ver_v2', 2, definicionDePrueba({ ids, planes })))
+
+    it('v2 con un plan EN VENTA sin el precio de una periodicidad → 503 PLAN_NOT_CONFIGURED', async () => {
+      const sinUno: Record<string, string> = { ...idsDeLaVersion('v2') }
+      delete sinUno['PRO:annual']
+      v2(sinUno)
+      await expect(planesPublicos()).rejects.toMatchObject({ code: 'PLAN_NOT_CONFIGURED', statusCode: 503 })
+    })
+
+    it('v2 con el plan FUERA de venta y sin ids → 200 (es una versión válida)', async () => {
+      const sinPremium: Record<string, string> = { ...idsDeLaVersion('v2') }
+      delete sinPremium['PREMIUM:monthly']
+      delete sinPremium['PREMIUM:annual']
+      v2(sinPremium, { PREMIUM: { onSale: false } })
+      const r = await planesPublicos()
+      expect(r.offerVersion).toBe(2)
+      expect(r.PREMIUM.onSale).toBe(false)
+    })
+
+    it('v1 con ids en null → 200, como hoy', async () => {
+      pointer.mockResolvedValue(punteroA('ver_v1', 1, definicionDePrueba()))
+      const r = await planesPublicos()
+      expect(r.offerVersion).toBeNull()
+    })
+  })
 })

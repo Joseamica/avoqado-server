@@ -1201,7 +1201,8 @@ async function sendPlanTrialEndingNotifications(
     // B4 Task 2: el nombre del plan sigue a la versión del editor; sin ella, «Premium» / «Pro» como hoy.
     // M7: UNA lectura de la versión por aviso (no una por cada persona del equipo).
     const nombreDeLaFeature = await nombreDeLaFeatureParaAvisos(venueFeature.feature)
-    const planName = (await nombresDeLosPlanes())[venueFeature.feature.code === 'PLAN_PREMIUM' ? 'PREMIUM' : 'PRO']
+    const nombres = await nombresDeLosPlanes()
+    const planName = nombres[venueFeature.feature.code === 'PLAN_PREMIUM' ? 'PREMIUM' : 'PRO']
     // An empty or non-IANA zone makes toLocaleDateString throw, and `fecha` is computed before BOTH notices.
     const timeZone = zonaValida(venue.timezone)
     const billingPortalUrl = billingPageUrl(venue.slug)
@@ -1249,6 +1250,7 @@ async function sendPlanTrialEndingNotifications(
         venueName: venue.name,
         endDate: trialEnd,
         planName,
+        freeName: nombres.FREE,
         timeZone,
         billingUrl: billingPortalUrl,
         ...(amountCents !== null ? { montoAlTerminarCents: amountCents } : {}),

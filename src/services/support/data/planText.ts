@@ -20,7 +20,7 @@ type Nombre = () => string
  * La frase de «Tu plan», en el orden del panel: lo que frena el plan (sólo el clásico: pausado o con el cobro fallido; un contrato con
  * un problema de pago) antes que sus fechas. null cuando el panel no dice nada (p. ej. Stripe no contestó: no hay fecha).
  */
-function planSentence(t: ReturnType<typeof template>, state: PlanState, origin: PlanOrigin, tier: Nombre): string | null {
+function planSentence(t: ReturnType<typeof template>, state: PlanState, origin: PlanOrigin, tier: Nombre, free: Nombre): string | null {
   const until = origin.cancelAt ?? origin.currentPeriodEnd
   if (origin.kind === 'CLASSIC' && state.state === 'suspended')
     return 'Tu pago está pendiente y el acceso de pago está en pausa. Actualiza tu método de pago para recuperarlo.'
@@ -43,7 +43,7 @@ function planSentence(t: ReturnType<typeof template>, state: PlanState, origin: 
   if (origin.cancelAt)
     return origin.kind === 'CONTRACT'
       ? `Tu plan ${tier()} deja de renovarse el ${t.date(origin.cancelAt)}.`
-      : `Tu plan ${tier()} sigue activo hasta el ${t.date(origin.cancelAt)}; después pasas a Gratis.`
+      : `Tu plan ${tier()} sigue activo hasta el ${t.date(origin.cancelAt)}; después pasas a ${free()}.`
   // En una prueba con tarjeta esa fecha es el PRIMER cobro, no una renovación (D3)
   if (until) return state.state === 'trial' ? `Tu primer cobro será el ${t.date(until)}.` : `Se renueva el ${t.date(until)}.`
   return null
@@ -90,8 +90,9 @@ function planText(scope: DataScope, state: PlanData): Rendered {
     )
   }
   const tier: Nombre = () => t.text(nombres[origin.tier as 'PRO' | 'PREMIUM'])
+  const free: Nombre = () => t.text(nombres.FREE)
   const line = `Plan de ${t.text(scope.venueName)} (corte ${t.time(scope.now)}): ${tier()}.`
-  const sentence = planSentence(t, state, origin, tier)
+  const sentence = planSentence(t, state, origin, tier, free)
   return t.done(sentence ? `${line} ${sentence}` : line)
 }
 

@@ -302,7 +302,7 @@ export interface OfertaVigente {
 const MENSAJE_OFERTA_ROTA =
   'Los planes no están disponibles por un problema nuestro de configuración. No se cobró nada. Escríbenos y lo resolvemos.'
 
-function ofertaRota(versionId: string, motivo: string): AppError {
+export function ofertaRota(versionId: string, motivo: string): AppError {
   // 🚨 a propósito: la oferta guardada no se puede leer y nadie puede comprar un plan hasta corregirla.
   logger.error('🚨 planOffer: la versión de la oferta guardada no es válida — NO se vende con ella', { versionId, motivo })
   return new AppError(MENSAJE_OFERTA_ROTA, 503, true, 'PLAN_NOT_CONFIGURED', { versionId })
