@@ -35,6 +35,7 @@ import { precioConDescuentoCents } from '../billing/descuentoDelPlan'
 import { isLastDiscountedPeriod } from '../billing/ultimoPeriodoConDescuento'
 import { BASIC_PLAN_DEFINITION_WHERE, isBasicPlanDefinition } from '@/services/launchCampaigns/basicPlanAccess'
 import { activeGrantWhere } from '@/services/access/capabilityGrants.service'
+import { numeroDeLaVigente } from '../billing/planOffer'
 import { exigirCompraNuevaPermitida } from '../billing/cotizacionDeLaOferta'
 
 /** Win-back coupon offered in the cancellation confirmation email (see scripts/seed-retention-coupon.ts). */
@@ -319,6 +320,33 @@ export async function basicPlanActive(venueId: string): Promise<boolean> {
   }
 }
 
+/** Tope de la lectura del puntero en `basicOfferOf` (por debajo del plazo del bot, `supportWhatsapp.ts`). */
+const TOPE_LECTURA_PUNTERO_MS = 1500
+
+/**
+ * ¿Rige una versión del editor (2 o más)? Lee sólo el puntero, con tope. Si falla, se vence o no tiene número válido, se contesta
+ * `true`: nunca se promete un Básico que podría estar retirado (r3 #3).
+ */
+async function hayVersionDelEditorOSeIgnora(): Promise<boolean> {
+  let timer: NodeJS.Timeout | undefined
+  try {
+    const numero = await Promise.race([
+      numeroDeLaVigente(),
+      new Promise<never>((_, rechazar) => {
+        timer = setTimeout(() => rechazar(new Error(`tiempo agotado (${TOPE_LECTURA_PUNTERO_MS} ms)`)), TOPE_LECTURA_PUNTERO_MS)
+      }),
+    ])
+    return numero === null || numero >= 2
+  } catch (error) {
+    logger.warn('getPlanState: no se pudo leer la versión de la oferta; sin oferta del Básico', {
+      error: error instanceof Error ? error.message : 'Unknown error',
+    })
+    return true
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
+}
+
 /** Plan Básico: la oferta del Básico publicado para este negocio (ver `PlanState.basicOffer`). Tolerante: nunca lanza. */
 async function basicOfferOf(
   basicPlan: PlanState['basicPlan'],
@@ -326,8 +354,13 @@ async function basicOfferOf(
   origin: PlanOrigin,
   stripeSub: ResumenDeLaSuscripcionDelPlan | null,
   now: Date,
+  conVersionDelEditor?: boolean,
 ): Promise<PlanState['basicOffer']> {
   if (grandfathered || basicPlan) return null
+  // Planes editables (B4): con una versión del editor el Básico ya no se vende. El controlador de «Tu plan» ya la leyó y pasa su
+  // decisión; el bot no la pasa: aquí se decide, sólo después de las salidas tempranas, leyendo únicamente el puntero con tope.
+  if (conVersionDelEditor === undefined) conVersionDelEditor = await hayVersionDelEditorOSeIgnora()
+  if (conVersionDelEditor) return null
   let basico: { priceWithTax: string; priceWithoutTax: string } | null = null
   try {
     // Import diferido: el catálogo híbrido no se carga en cada lectura de «Tu plan» que no lo necesita.
@@ -407,10 +440,15 @@ async function findPlanProFeature(venueId: string) {
  */
 export async function getPlanState(
   venueId: string,
-  options: { skipPauseOffer?: boolean; stripeTimeoutMs?: number } = {},
+  options: { skipPauseOffer?: boolean; stripeTimeoutMs?: number; conVersionDelEditor?: boolean } = {},
 ): Promise<PlanState> {
-  return (await getPlanStateYSuscripcion(venueId, { skipPauseOffer: options.skipPauseOffer, stripeTimeoutMs: options.stripeTimeoutMs }))
-    .planState
+  return (
+    await getPlanStateYSuscripcion(venueId, {
+      skipPauseOffer: options.skipPauseOffer,
+      stripeTimeoutMs: options.stripeTimeoutMs,
+      conVersionDelEditor: options.conVersionDelEditor,
+    })
+  ).planState
 }
 
 /**
@@ -424,7 +462,10 @@ export async function getPlanStateYSuscripcion(
    * `conTarjeta` (fix round 1): con una prueba SIN tarjeta, leer también qué tarjeta cobraría Stripe (`origin.faltaTarjeta`). Sólo
    * `GET /plan`; `getPlanState` nunca lo pide.
    */
-  options: { skipPauseOffer?: boolean; stripeTimeoutMs?: number; conTarjeta?: boolean } = {},
+  /**
+   * `conVersionDelEditor` (B4): `true` → sin oferta del Básico, sin leer nada; `false` → la de hoy; sin ella, la calcula el servicio.
+   */
+  options: { skipPauseOffer?: boolean; stripeTimeoutMs?: number; conTarjeta?: boolean; conVersionDelEditor?: boolean } = {},
 ): Promise<{ planState: PlanState; suscripcion: ResumenDeLaSuscripcionDelPlan | null }> {
   const venue = await prisma.venue.findUnique({
     where: { id: venueId },
@@ -462,7 +503,7 @@ export async function getPlanStateYSuscripcion(
       origin,
       pauseOfferEligible: false,
       basicPlan,
-      basicOffer: await basicOfferOf(basicPlan, grandfathered, origin, null, new Date()),
+      basicOffer: await basicOfferOf(basicPlan, grandfathered, origin, null, new Date(), options.conVersionDelEditor),
     }
     return { planState, suscripcion: null }
   }
@@ -544,7 +585,7 @@ export async function getPlanStateYSuscripcion(
         (await pauseBlocker(venueId, stripeSub)) === null,
     )
   const basicPlan = await basicPlanOf(venueId, now)
-  const basicOffer = await basicOfferOf(basicPlan, grandfathered, origin, stripeSub, now)
+  const basicOffer = await basicOfferOf(basicPlan, grandfathered, origin, stripeSub, now, options.conVersionDelEditor)
 
   const planState: PlanState = {
     hasPlan,
