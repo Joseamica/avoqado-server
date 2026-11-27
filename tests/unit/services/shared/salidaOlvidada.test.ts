@@ -254,6 +254,23 @@ describe('cerrarSalidasOlvidadasPendientes (el job)', () => {
     )
   })
 
+  it('Codex r3 #9: el cierre toma el candado de la regla de su sucursal antes de releer el corte', async () => {
+    const e = abierta({ clockInTime: mx('2026-11-03T14:00:00'), venue: { timezone: MX, settings: null } })
+    prismaMock.timeEntry.findMany.mockResolvedValue([e] as any)
+    prismaMock.staffVenue.findFirst.mockResolvedValue(null)
+    prismaMock.venueSettings.findUnique.mockResolvedValue({ salidaOlvidadaEnabled: true, salidaOlvidadaCorte: '22:00' } as any)
+    prismaMock.timeEntry.updateMany.mockResolvedValue({ count: 1 })
+
+    await cerrarSalidasOlvidadasPendientes(mx('2026-11-04T10:00:00'))
+
+    const candado = prismaMock.$queryRaw.mock.calls.find(c => String(c[1]) === 'salida-olvidada:venue-1')
+    expect(candado).toBeDefined()
+    expect((candado![0] as unknown as string[]).join('?')).toContain('pg_advisory_xact_lock')
+    expect(prismaMock.$queryRaw.mock.invocationCallOrder[prismaMock.$queryRaw.mock.calls.indexOf(candado!)]).toBeLessThan(
+      prismaMock.venueSettings.findUnique.mock.invocationCallOrder[0],
+    )
+  })
+
   it('Codex r1 #2: si el gerente movió el corte a las 23:00 después de leer la página, a las 22:05 no se cierra', async () => {
     const e = abierta({
       clockInTime: mx('2026-11-03T14:00:00'),

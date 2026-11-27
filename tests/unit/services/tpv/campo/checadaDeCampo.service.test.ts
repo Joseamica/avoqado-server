@@ -152,8 +152,8 @@ function armarBase() {
         ...db,
         $queryRaw: jest.fn(async (...args: unknown[]) => {
           db.$queryRaw(...args)
-          // Sólo el candado de la persona hace fila; el FOR SHARE de los ajustes (Codex 26-nov r2 #2) no.
-          if (!(args[0] as string[]).join('?').includes('pg_advisory_xact_lock')) return
+          // Sólo el candado de la persona hace fila; el de la regla de la sucursal (Codex 26-nov r3 #9) no.
+          if (!String(args[1] ?? '').startsWith('checada:')) return
           const antes = cola
           cola = new Promise<void>(listo => (soltar = listo))
           await antes

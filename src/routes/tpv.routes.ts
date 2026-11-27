@@ -6924,7 +6924,7 @@ router.get('/modules', async (req: Request, res: Response, next: NextFunction) =
     // Validate that the venue exists (basic security check)
     const venue = await prisma.venue.findUnique({
       where: { id: venueId },
-      select: { id: true, status: true, settings: { select: { salidaOlvidadaEnabled: true, salidaOlvidadaCorte: true } } },
+      select: { id: true, status: true, timezone: true, settings: { select: { salidaOlvidadaEnabled: true, salidaOlvidadaCorte: true } } },
     })
 
     if (!venue) {
@@ -6954,6 +6954,8 @@ router.get('/modules', async (req: Request, res: Response, next: NextFunction) =
     const asistencia = {
       salidaOlvidadaEnabled: venue.settings?.salidaOlvidadaEnabled ?? true,
       salidaOlvidadaCorte: leerCorte(venue.settings?.salidaOlvidadaCorte) ? venue.settings!.salidaOlvidadaCorte : null,
+      // La zona de la sucursal: el celular calcula el corte en ella, no en la suya (Codex 26-nov r3 #3).
+      timezone: venue.timezone,
     }
 
     return res.status(200).json({ modules, asistencia })

@@ -80,6 +80,14 @@ const zonaDe = (tz: string | null | undefined) => (tz && isValidTimezone(tz) ? t
 /** Después de la salida de su horario, una hora de margen antes de darla por olvidada (Codex r1 #1: nocturnos largos). */
 const MARGEN_TRAS_SU_HORARIO_MS = 60 * 60_000
 
+/**
+ * Pone en fila, por sucursal, el cierre de una salida olvidada y el cambio de su regla (interruptor u hora de corte): uno
+ * espera a que el otro termine. Va dentro de la transacción de quien lo toma (se suelta al terminarla).
+ */
+export async function candadoDeLaRegla(db: Db, venueId: string): Promise<void> {
+  await db.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${`salida-olvidada:${venueId}`}))::text`
+}
+
 /** La hora de corte de la sucursal («HH:mm», 00:00–23:59) como [hora, minuto]; cualquier otra cosa es la de fábrica (null). */
 export function leerCorte(corte: string | null | undefined): [number, number] | null {
   const m = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(corte ?? '')
@@ -280,10 +288,10 @@ async function cerrarSiOlvidada(db: Db, e: EntradaAbierta, ahora: Date, disparad
   // Filtro barato con lo que se leyó en la página: el límite real nunca es menor que el base. La decisión, con lo releído.
   if (ahora < limiteDelTurno(e.clockInTime, e.venue.timezone, null, e.venue.settings?.salidaOlvidadaCorte)) return null
   // El interruptor y la hora de corte se releen dentro de la transacción (Codex r2 #11 y 26-nov r1 #2): el job leyó la página
-  // antes y el gerente pudo apagarla o mover el corte. Con FOR SHARE (26-nov r2 #2): un cambio del gerente espera a que este
-  // cierre termine, así nunca se confirma un corte nuevo mientras se cierra con el viejo. Si el gerente ADELANTA el corte, el
-  // filtro de arriba (con lo de la página) puede saltarla en esta pasada: la cierra la siguiente, a más tardar en 15 min.
-  await db.$queryRaw`SELECT 1 FROM "VenueSettings" WHERE "venueId" = ${e.venueId} FOR SHARE`
+  // antes y el gerente pudo apagarla o mover el corte. Con el candado de la regla de la sucursal (26-nov r2 #2 y r3 #9): el
+  // cambio del gerente y este cierre van en fila, también cuando la sucursal aún no tiene fila de ajustes. Si el gerente
+  // ADELANTA el corte, el filtro de arriba (con lo de la página) puede saltarla en esta pasada: la cierra la siguiente.
+  await candadoDeLaRegla(db, e.venueId)
   const ajuste = await db.venueSettings.findUnique({
     where: { venueId: e.venueId },
     select: { salidaOlvidadaEnabled: true, salidaOlvidadaCorte: true },

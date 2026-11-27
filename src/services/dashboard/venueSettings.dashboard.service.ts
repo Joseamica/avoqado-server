@@ -18,6 +18,7 @@ import { CASH_RECONCILIATION_FEATURE } from '../access/cashReconciliationAccess.
 import { venueHasFeatureAccess } from '../access/basePlan.service'
 import { withSerializableRetry } from '../../utils/serializableRetry'
 import { validarAjusteDeMotivos } from '../shared/motivoDelDescuento'
+import { candadoDeLaRegla } from '../shared/salidaOlvidada'
 
 /**
  * Default settings for new venues
@@ -145,6 +146,7 @@ export async function updateVenueSettings(
   // vuelve a validar con el candado del negocio en la misma transacción que escribe (`revalidarMotivosConCandado`): dos administradores a
   // la vez (uno prende, otro quita el último) ya no pueden dejarlo prendido sin lista.
   const tocaMotivos = 'discountReasonRequired' in updates || 'discountReasons' in updates
+  const tocaSalidaOlvidada = 'salidaOlvidadaCorte' in updates || 'salidaOlvidadaEnabled' in updates
   if (tocaMotivos) {
     const guardado = await prisma.venueSettings.findUnique({
       where: { venueId },
@@ -248,6 +250,7 @@ export async function updateVenueSettings(
         select: { id: true, cashReconciliationEnabled: true },
       })
       if (tocaMotivos) await revalidarMotivosConCandado(tx, venueId, updates)
+      if (tocaSalidaOlvidada) await candadoDeLaRegla(tx, venueId)
 
       const settings = await tx.venueSettings.upsert({
         where: { venueId },
@@ -278,16 +281,19 @@ export async function updateVenueSettings(
   const previous = (await prisma.venueSettings.findUnique({ where: { venueId } })) as Record<string, unknown> | null
 
   // Upsert settings (create if not exists, update if exists)
-  const settings = tocaMotivos
-    ? await prisma.$transaction(async tx => {
-        await revalidarMotivosConCandado(tx, venueId, updates)
-        return tx.venueSettings.upsert({ where: { venueId }, create: createData, update: updates })
-      })
-    : await prisma.venueSettings.upsert({
-        where: { venueId },
-        create: createData,
-        update: updates,
-      })
+  const settings =
+    tocaMotivos || tocaSalidaOlvidada
+      ? await prisma.$transaction(async tx => {
+          if (tocaMotivos) await revalidarMotivosConCandado(tx, venueId, updates)
+          // En fila con el cierre de una salida olvidada de esta sucursal (Codex 26-nov r2 #2 y r3 #9).
+          if (tocaSalidaOlvidada) await candadoDeLaRegla(tx, venueId)
+          return tx.venueSettings.upsert({ where: { venueId }, create: createData, update: updates })
+        })
+      : await prisma.venueSettings.upsert({
+          where: { venueId },
+          create: createData,
+          update: updates,
+        })
 
   const updatedFields = Object.keys(updates)
   logger.info(`Updated VenueSettings for venue: ${venueId}`, { updatedFields })
