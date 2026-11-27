@@ -5,7 +5,7 @@ import { ligarCuentaConGoogle } from '../auth/google/ligarCuentaConGoogle'
 import { leerPaseDeAndroid, leerPaseDeEscritorio } from '../auth/google/paseDeGoogleDelPos'
 import { STAFF_DEL_LOGIN_POS, emitirSesionDelPos, pickOperationalVenueForLogin } from './auth.mobile.service'
 
-export type PaseDelPos = { idToken: string } | { code: string; codeVerifier: string; redirectUri: string }
+export type PaseDelPos = { state: string; codeVerifier: string } | { code: string; codeVerifier: string; redirectUri: string }
 
 /**
  * Entrar al POS con Google (hz:6bfcd3a1:D1). 🔴 El orden es el contrato de seguridad:
@@ -13,7 +13,7 @@ export type PaseDelPos = { idToken: string } | { code: string; codeVerifier: str
  */
 export async function entrarAlPosConGoogle(pase: PaseDelPos, rememberMe: boolean | undefined, deviceId: string | undefined) {
   // 1-2. Leer el pase; el correo tiene que estar verificado en Google.
-  const google = 'idToken' in pase ? await leerPaseDeAndroid(pase.idToken) : await leerPaseDeEscritorio(pase)
+  const google = 'state' in pase ? await leerPaseDeAndroid(pase) : await leerPaseDeEscritorio(pase)
   if (!google.emailVerified) throw new UnauthorizedError('Tu correo no está verificado en Google.', 'GOOGLE_EMAIL_NOT_VERIFIED')
 
   // 3. La cuenta.

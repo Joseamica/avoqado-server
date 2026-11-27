@@ -165,6 +165,7 @@ const limiteDeGoogle = (max: number) =>
     message: { success: false, code: 'RATE_LIMIT_EXCEEDED', message: 'Demasiados intentos. Espera un minuto y vuelve a intentarlo.' },
   })
 const limiteDeGoogleConfig = limiteDeGoogle(60)
+const limiteDeGoogleVuelta = limiteDeGoogle(60) // contador aparte del de config
 const limiteDeGoogleLogin = limiteDeGoogle(20)
 
 // Registro pasivo de dispositivos (estilo Square Device Management).
@@ -277,14 +278,38 @@ router.post('/auth/login', authMobileController.login)
  *   get:
  *     tags: [Mobile - Authentication]
  *     summary: Datos públicos para entrar al POS con Google
- *     description: Audiencia de ANDROID, nonce de un solo uso y client id de escritorio. Nunca devuelve secretos.
+ *     description: |
+ *       `{ success, android, windows, webClientId, redirectUri, desktopClientId }`. ANDROID se prende sólo con el cliente
+ *       web completo (id, secreto y dirección de vuelta); lo apagado va en `null`. Nunca devuelve secretos.
  *     responses:
  *       200:
  *         description: Config de Google para el POS
- *       503:
- *         description: Entrar con Google no está disponible
  */
 router.get('/auth/google/config', limiteDeGoogleConfig, authMobileController.googleConfig)
+
+/**
+ * @openapi
+ * /api/v1/mobile/auth/google/vuelta:
+ *   get:
+ *     tags: [Mobile - Authentication]
+ *     summary: La vuelta de Google para ANDROID (la abre la pestaña de Google, no la app)
+ *     description: |
+ *       Guarda el `code` por `state` (5 minutos, un solo uso, el primero gana) y regresa a la app. Nunca registra `code`.
+ *     parameters:
+ *       - { in: query, name: state, required: true, schema: { type: string, pattern: '^[A-Za-z0-9_-]{43}$' } }
+ *       - { in: query, name: code, schema: { type: string } }
+ *       - { in: query, name: error, schema: { type: string } }
+ *     responses:
+ *       302:
+ *         description: |
+ *           A `avoqado-pos://google?state=…`, o con `&error=<el de Google>` (o `sin_codigo`) si no llegó un código.
+ *           Con `Cache-Control: no-store`.
+ *       400:
+ *         description: "`state` mal formado (texto plano: «Vuelve al POS y toca otra vez «Continuar con Google».»)"
+ *       429:
+ *         description: Más de 60 por minuto desde la misma IP
+ */
+router.get('/auth/google/vuelta', limiteDeGoogleVuelta, authMobileController.googleVuelta)
 
 /**
  * @openapi
@@ -293,8 +318,8 @@ router.get('/auth/google/config', limiteDeGoogleConfig, authMobileController.goo
  *     tags: [Mobile - Authentication]
  *     summary: Entrar al POS con Google
  *     description: |
- *       PUBLIC. Manda `idToken` (ANDROID) o `code` + `codeVerifier` + `redirectUri` (WINDOWS), nunca los dos.
- *       Misma respuesta que `/auth/login`.
+ *       PUBLIC. ANDROID manda `state` + `codeVerifier` (la vuelta ya llegó a `/auth/google/vuelta`); WINDOWS manda
+ *       `code` + `codeVerifier` + `redirectUri`. Nunca las dos. Misma respuesta que `/auth/login`.
  *     responses:
  *       200:
  *         description: Login exitoso (accessToken, refreshToken, user, selectedVenueId)

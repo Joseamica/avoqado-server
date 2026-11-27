@@ -1,5 +1,5 @@
 /**
- * Entrar con Google en el POS (hz:6bfcd3a1:D1): las dos rutas públicas nuevas llevan su propio tope por IP real del
+ * Entrar con Google en el POS (hz:6bfcd3a1:D1): las tres rutas públicas nuevas llevan su propio tope por IP real del
  * visitante, con el `mobile.routes.ts` real y el límite real (sin mockear express-rate-limit). El controlador va mockeado.
  */
 import express from 'express'
@@ -35,10 +35,24 @@ it('GET /auth/google/config: 60 por minuto por IP; la 61 es 429 en español', as
 it('POST /auth/google: 20 por minuto por IP; la 21 es 429 en español', async () => {
   const ip = '198.51.100.20'
   for (let i = 0; i < 20; i++) {
-    const r = await request(app).post('/api/v1/mobile/auth/google').set('cf-connecting-ip', ip).send({ idToken: 'x' })
+    const r = await request(app).post('/api/v1/mobile/auth/google').set('cf-connecting-ip', ip).send({})
     expect(r.status).not.toBe(429)
   }
-  const r = await request(app).post('/api/v1/mobile/auth/google').set('cf-connecting-ip', ip).send({ idToken: 'x' })
+  const r = await request(app).post('/api/v1/mobile/auth/google').set('cf-connecting-ip', ip).send({})
   expect(r.status).toBe(429)
   expect(r.body.message).toBe(TEXTO)
+})
+
+it('GET /auth/google/vuelta: 60 por minuto por IP, con un contador aparte del de config', async () => {
+  const ip = '198.51.100.30'
+  for (let i = 0; i < 60; i++) {
+    const r = await request(app).get('/api/v1/mobile/auth/google/vuelta').set('cf-connecting-ip', ip)
+    expect(r.status).not.toBe(429)
+  }
+  const r = await request(app).get('/api/v1/mobile/auth/google/vuelta').set('cf-connecting-ip', ip)
+  expect(r.status).toBe(429)
+  expect(r.body.message).toBe(TEXTO)
+  // la misma IP todavía puede pedir la config: no comparten cupo
+  const config = await request(app).get('/api/v1/mobile/auth/google/config').set('cf-connecting-ip', ip)
+  expect(config.status).not.toBe(429)
 })

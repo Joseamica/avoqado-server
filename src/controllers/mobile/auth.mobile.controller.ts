@@ -14,7 +14,7 @@ import * as authMobileService from '../../services/mobile/auth.mobile.service'
 import { requestPasswordReset } from '../../services/dashboard/auth.service'
 import { asegurarAparatoAlEntrar } from '../../middlewares/registerDevice.middleware'
 import { entrarAlPosConGoogle, type PaseDelPos } from '../../services/mobile/googleLogin.mobile.service'
-import { configDeGoogleParaElPos } from '../../services/auth/google/paseDeGoogleDelPos'
+import { configDeGoogleParaElPos, guardarVuelta } from '../../services/auth/google/paseDeGoogleDelPos'
 
 // ============================================================================
 // EMAIL/PASSWORD AUTHENTICATION
@@ -104,6 +104,30 @@ export const googleConfig = async (_req: Request, res: Response, next: NextFunct
     logControllerError('mobile google config', error)
     next(error)
   }
+}
+
+const STATE_DEL_POS = /^[A-Za-z0-9_-]{43}$/
+const CODIGO_DE_GOOGLE = /^[A-Za-z0-9/_.-]{10,512}$/
+const ERROR_DE_GOOGLE = /^[a-z_]{1,40}$/
+
+/**
+ * La vuelta de Google para ANDROID (hz:6bfcd3a1:D1): guarda el código por `state` (el primero gana) y regresa a la app
+ * (`avoqado-pos://google`), que lo canjea con su verificador en `POST /auth/google`. Nunca registra `code`
+ * (`requestLogger` lo tapa en la URL).
+ *
+ * @route GET /api/v1/mobile/auth/google/vuelta
+ */
+export const googleVuelta = (req: Request, res: Response): void => {
+  const { state, code, error } = req.query
+  res.set('Cache-Control', 'no-store')
+  if (typeof state !== 'string' || !STATE_DEL_POS.test(state)) {
+    res.status(400).type('text/plain').send('Vuelve al POS y toca otra vez «Continuar con Google».')
+    return
+  }
+  const vuelta = new URLSearchParams({ state })
+  if (error === undefined && typeof code === 'string' && CODIGO_DE_GOOGLE.test(code)) guardarVuelta(state, code)
+  else vuelta.set('error', typeof error === 'string' && ERROR_DE_GOOGLE.test(error) ? error : 'sin_codigo')
+  res.redirect(302, `avoqado-pos://google?${vuelta}`)
 }
 
 /**

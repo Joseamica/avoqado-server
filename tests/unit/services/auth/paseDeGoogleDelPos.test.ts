@@ -1,4 +1,7 @@
-/** El pase de Google del POS: audiencia propia, nonce de un solo uso y escritorio (hz:6bfcd3a1:D1). */
+/**
+ * El pase de Google del POS (hz:6bfcd3a1:D1): ANDROID por la vuelta del SERVIDOR (cliente web + PKCE) y WINDOWS con su
+ * canje de escritorio de siempre.
+ */
 const verifyIdToken = jest.fn()
 const getToken = jest.fn()
 const ctor = jest.fn()
@@ -12,91 +15,152 @@ jest.mock('google-auth-library', () => ({
 import logger from '@/config/logger'
 import {
   configDeGoogleParaElPos,
+  guardarVuelta,
   leerPaseDeAndroid,
   leerPaseDeEscritorio,
-  vaciarNoncesSoloPruebas,
+  tomarCodigo,
+  vaciarVueltasSoloPruebas,
 } from '../../../../src/services/auth/google/paseDeGoogleDelPos'
 
-const AUD = 'pos-android-aud.apps.test'
-const payload = (nonce?: string) => ({
-  getPayload: () => ({ sub: 'g-1', email: 'a@b.test', email_verified: true, hd: 'b.test', picture: 'https://p.test/x.png', nonce }),
+const WEB = 'pos-web-id.apps.test'
+const REDIRECT = 'https://api.test/api/v1/mobile/auth/google/vuelta'
+const STATE = 'S'.repeat(43)
+const VERIFIER = 'VERIF-X'.repeat(8)
+const CODIGO = '4/0Ab-CODIGO-SECRETO'
+const estado = (i: number) => String(i).padStart(43, 'e')
+const payload = () => ({
+  getPayload: () => ({ sub: 'g-1', email: 'a@b.test', email_verified: true, hd: 'b.test', picture: 'https://p.test/x.png' }),
 })
+const MIN = 60_000
 
 beforeEach(() => {
   jest.useFakeTimers().setSystemTime(new Date('2026-11-26T12:00:00Z'))
-  vaciarNoncesSoloPruebas()
+  vaciarVueltasSoloPruebas()
   verifyIdToken.mockReset()
   getToken.mockReset()
   ctor.mockReset()
-  process.env.GOOGLE_POS_ANDROID_AUDIENCE = AUD
-  process.env.GOOGLE_CLIENT_ID = 'panel-id'
+  process.env.GOOGLE_POS_WEB_CLIENT_ID = WEB
+  process.env.GOOGLE_POS_WEB_CLIENT_SECRET = 'web-secret'
+  process.env.GOOGLE_POS_REDIRECT_URI = REDIRECT
   process.env.GOOGLE_POS_DESKTOP_CLIENT_ID = 'desk-id'
   process.env.GOOGLE_POS_DESKTOP_CLIENT_SECRET = 'desk-secret'
 })
 afterEach(() => jest.useRealTimers())
 
-const invalido = { code: 'GOOGLE_TOKEN_INVALID', statusCode: 401 }
+const invalido = {
+  code: 'GOOGLE_TOKEN_INVALID',
+  statusCode: 401,
+  message: 'No pudimos confirmar tu cuenta de Google. Vuelve a intentarlo.',
+}
+const noConfigurado = { code: 'GOOGLE_ANDROID_NOT_CONFIGURED', statusCode: 503 }
+const VARIABLES_WEB = ['GOOGLE_POS_WEB_CLIENT_ID', 'GOOGLE_POS_WEB_CLIENT_SECRET', 'GOOGLE_POS_REDIRECT_URI']
+
+describe('vueltas guardadas (guardarVuelta / tomarCodigo)', () => {
+  it('tomarCodigo dos veces ⇒ la segunda null', () => {
+    guardarVuelta(STATE, CODIGO)
+    expect(tomarCodigo(STATE)).toBe(CODIGO)
+    expect(tomarCodigo(STATE)).toBeNull()
+  })
+  it('state que nunca llegó ⇒ null', () => {
+    expect(tomarCodigo(STATE)).toBeNull()
+  })
+  it('vuelta repetida tras tomar no la revive', () => {
+    guardarVuelta(STATE, CODIGO)
+    tomarCodigo(STATE)
+    guardarVuelta(STATE, '4/0Ab-OTRO-CODIGO')
+    expect(tomarCodigo(STATE)).toBeNull()
+  })
+  it('a los 5 min ⇒ null; antes, todavía sirve', () => {
+    guardarVuelta(STATE, CODIGO)
+    guardarVuelta(estado(1), CODIGO)
+    jest.setSystemTime(Date.now() + 5 * MIN - 1)
+    expect(tomarCodigo(estado(1))).toBe(CODIGO)
+    jest.setSystemTime(Date.now() + 1)
+    expect(tomarCodigo(STATE)).toBeNull()
+  })
+  it('barre los vencidos al escribir', () => {
+    guardarVuelta(STATE, CODIGO)
+    jest.setSystemTime(Date.now() + 6 * MIN)
+    guardarVuelta(STATE, '4/0Ab-NUEVO')
+    expect(tomarCodigo(STATE)).toBe('4/0Ab-NUEVO')
+  })
+  it('con 10,000 guardados, uno más saca al más viejo', () => {
+    for (let i = 0; i < 10_000; i++) guardarVuelta(estado(i), CODIGO)
+    guardarVuelta(STATE, CODIGO)
+    expect(tomarCodigo(estado(0))).toBeNull()
+    expect(tomarCodigo(estado(1))).toBe(CODIGO)
+    expect(tomarCodigo(STATE)).toBe(CODIGO)
+  })
+})
 
 describe('leerPaseDeAndroid', () => {
-  it('token con audiencia del POS y nonce emitido => usuario con hd', async () => {
-    const nonce = configDeGoogleParaElPos().nonce!
-    verifyIdToken.mockResolvedValue(payload(nonce))
-    await expect(leerPaseDeAndroid('tok')).resolves.toEqual({
+  it('state desconocido ⇒ 401 GOOGLE_TOKEN_INVALID y getToken no se llamó', async () => {
+    await expect(leerPaseDeAndroid({ state: STATE, codeVerifier: VERIFIER })).rejects.toMatchObject(invalido)
+    expect(getToken).not.toHaveBeenCalled()
+    expect(ctor).not.toHaveBeenCalled()
+  })
+  it('POST bueno ⇒ getToken con el id, secreto y redirectUri del web y verifyIdToken con audience = web', async () => {
+    guardarVuelta(STATE, CODIGO)
+    getToken.mockResolvedValue({ tokens: { id_token: 'idt' } })
+    verifyIdToken.mockResolvedValue(payload())
+    await expect(leerPaseDeAndroid({ state: STATE, codeVerifier: VERIFIER })).resolves.toEqual({
       sub: 'g-1',
       email: 'a@b.test',
       emailVerified: true,
       hd: 'b.test',
       picture: 'https://p.test/x.png',
     })
-    expect(verifyIdToken).toHaveBeenCalledWith({ idToken: 'tok', audience: AUD })
+    expect(ctor).toHaveBeenCalledWith(WEB, 'web-secret')
+    expect(getToken).toHaveBeenCalledWith({ code: CODIGO, codeVerifier: VERIFIER, redirect_uri: REDIRECT })
+    expect(verifyIdToken).toHaveBeenCalledWith({ idToken: 'idt', audience: WEB })
   })
-  it('el mismo nonce dos veces => la segunda GOOGLE_TOKEN_INVALID', async () => {
-    const nonce = configDeGoogleParaElPos().nonce!
-    verifyIdToken.mockResolvedValue(payload(nonce))
-    await leerPaseDeAndroid('tok')
-    await expect(leerPaseDeAndroid('tok')).rejects.toMatchObject(invalido)
+  it('el mismo state dos veces ⇒ la segunda 401 sin hablar con Google', async () => {
+    guardarVuelta(STATE, CODIGO)
+    getToken.mockResolvedValue({ tokens: { id_token: 'idt' } })
+    verifyIdToken.mockResolvedValue(payload())
+    await leerPaseDeAndroid({ state: STATE, codeVerifier: VERIFIER })
+    getToken.mockClear()
+    await expect(leerPaseDeAndroid({ state: STATE, codeVerifier: VERIFIER })).rejects.toMatchObject(invalido)
+    expect(getToken).not.toHaveBeenCalled()
   })
-  it('nonce que nunca se emitio (o ausente) => GOOGLE_TOKEN_INVALID', async () => {
-    verifyIdToken.mockResolvedValue(payload('ajeno'))
-    await expect(leerPaseDeAndroid('tok')).rejects.toMatchObject(invalido)
-    verifyIdToken.mockResolvedValue(payload(undefined))
-    await expect(leerPaseDeAndroid('tok')).rejects.toMatchObject(invalido)
+  it('vuelta repetida tras tomar ⇒ el POST siguiente sigue en 401', async () => {
+    guardarVuelta(STATE, CODIGO)
+    getToken.mockRejectedValue(new Error('invalid_grant'))
+    await expect(leerPaseDeAndroid({ state: STATE, codeVerifier: VERIFIER })).rejects.toMatchObject(invalido)
+    guardarVuelta(STATE, CODIGO)
+    getToken.mockClear()
+    await expect(leerPaseDeAndroid({ state: STATE, codeVerifier: VERIFIER })).rejects.toMatchObject(invalido)
+    expect(getToken).not.toHaveBeenCalled()
   })
-  it('nonce vencido (+11 min) => GOOGLE_TOKEN_INVALID', async () => {
-    const nonce = configDeGoogleParaElPos().nonce!
-    jest.setSystemTime(Date.now() + 11 * 60_000)
-    verifyIdToken.mockResolvedValue(payload(nonce))
-    await expect(leerPaseDeAndroid('tok')).rejects.toMatchObject(invalido)
-  })
-  it('verifyIdToken truena (aud del panel) => GOOGLE_TOKEN_INVALID, con audience del POS', async () => {
-    const nonce = configDeGoogleParaElPos().nonce!
-    verifyIdToken.mockRejectedValue(new Error('Wrong recipient'))
-    await expect(leerPaseDeAndroid('tok')).rejects.toMatchObject(invalido)
-    expect(verifyIdToken).toHaveBeenCalledWith({ idToken: 'tok', audience: AUD })
-    // el nonce no se gasto: Google fallo antes
-    verifyIdToken.mockResolvedValue(payload(nonce))
-    await expect(leerPaseDeAndroid('tok')).resolves.toBeDefined()
-  })
-  it('sin audiencia => 503', async () => {
-    delete process.env.GOOGLE_POS_ANDROID_AUDIENCE
-    await expect(leerPaseDeAndroid('tok')).rejects.toMatchObject({ code: 'GOOGLE_ANDROID_NOT_CONFIGURED', statusCode: 503 })
+  it('state vencido (5 min) ⇒ 401 sin hablar con Google', async () => {
+    guardarVuelta(STATE, CODIGO)
+    jest.setSystemTime(Date.now() + 5 * MIN)
+    await expect(leerPaseDeAndroid({ state: STATE, codeVerifier: VERIFIER })).rejects.toMatchObject(invalido)
+    expect(getToken).not.toHaveBeenCalled()
   })
   it.each([
-    ['sin GOOGLE_CLIENT_ID del panel', undefined],
-    ['con la misma audiencia que el panel', AUD],
-  ])('%s => 503 sin hablar con Google', async (_caso, panel) => {
-    if (panel === undefined) delete process.env.GOOGLE_CLIENT_ID
-    else process.env.GOOGLE_CLIENT_ID = panel
-    await expect(leerPaseDeAndroid('tok')).rejects.toMatchObject({ code: 'GOOGLE_ANDROID_NOT_CONFIGURED', statusCode: 503 })
-    expect(verifyIdToken).not.toHaveBeenCalled()
+    ['getToken falla (verificador equivocado)', () => getToken.mockRejectedValue(new Error('invalid_grant'))],
+    ['sin id_token', () => getToken.mockResolvedValue({ tokens: {} })],
+    [
+      'verifyIdToken falla',
+      () => {
+        getToken.mockResolvedValue({ tokens: { id_token: 'idt' } })
+        verifyIdToken.mockRejectedValue(new Error('Wrong recipient'))
+      },
+    ],
+  ])('%s ⇒ 401 GOOGLE_TOKEN_INVALID', async (_caso, preparar) => {
+    guardarVuelta(STATE, CODIGO)
+    preparar()
+    await expect(leerPaseDeAndroid({ state: STATE, codeVerifier: VERIFIER })).rejects.toMatchObject(invalido)
   })
-  it('reusa un solo cliente de Google entre peticiones (caché de certificados)', async () => {
-    const n1 = configDeGoogleParaElPos().nonce!
-    const n2 = configDeGoogleParaElPos().nonce!
-    verifyIdToken.mockResolvedValueOnce(payload(n1)).mockResolvedValueOnce(payload(n2))
-    await leerPaseDeAndroid('tok')
-    await leerPaseDeAndroid('tok')
-    expect(ctor).not.toHaveBeenCalled()
+  it.each(VARIABLES_WEB)('sin %s ⇒ 503 y la vuelta no se gasta', async variable => {
+    guardarVuelta(STATE, CODIGO)
+    const antes = process.env[variable]
+    delete process.env[variable]
+    await expect(leerPaseDeAndroid({ state: STATE, codeVerifier: VERIFIER })).rejects.toMatchObject(noConfigurado)
+    expect(getToken).not.toHaveBeenCalled()
+    process.env[variable] = antes
+    expect(tomarCodigo(STATE)).toBe(CODIGO)
   })
 })
 
@@ -123,79 +187,79 @@ describe('leerPaseDeEscritorio', () => {
     delete process.env.GOOGLE_POS_DESKTOP_CLIENT_SECRET
     await expect(leerPaseDeEscritorio(p)).rejects.toMatchObject({ code: 'GOOGLE_DESKTOP_NOT_CONFIGURED', statusCode: 503 })
   })
+  it('no toca las vueltas de ANDROID', async () => {
+    guardarVuelta(STATE, CODIGO)
+    getToken.mockResolvedValue({ tokens: { id_token: 'idt' } })
+    verifyIdToken.mockResolvedValue(payload())
+    await leerPaseDeEscritorio(p)
+    expect(tomarCodigo(STATE)).toBe(CODIGO)
+  })
 })
 
 describe('registro de rechazos', () => {
-  it('verifyIdToken falla: logger.warn con el mensaje y sin token ni secreto', async () => {
-    const err: any = new Error('Wrong recipient')
-    err.config = { client_secret: 'desk-secret' }
-    verifyIdToken.mockRejectedValue(err)
+  const todoLoRegistrado = () => JSON.stringify((logger.warn as jest.Mock).mock.calls)
+
+  it('el rechazo no registra el code, el state, el verificador ni el secreto', async () => {
+    const err: any = new Error('invalid_grant')
+    err.config = { client_secret: 'web-secret', code: CODIGO }
+    guardarVuelta(STATE, CODIGO)
+    getToken.mockRejectedValue(err)
     ;(logger.warn as jest.Mock).mockClear()
-    await expect(leerPaseDeAndroid('TOKEN-SECRETO-123')).rejects.toMatchObject(invalido)
+    await expect(leerPaseDeAndroid({ state: STATE, codeVerifier: VERIFIER })).rejects.toMatchObject(invalido)
     expect(logger.warn).toHaveBeenCalledTimes(1)
-    const logged = JSON.stringify((logger.warn as jest.Mock).mock.calls[0])
-    expect(logged).toContain('verificacion-fallida')
-    expect(logged).toContain('Wrong recipient')
-    expect(logged).not.toContain('TOKEN-SECRETO-123')
-    expect(logged).not.toContain('desk-secret')
+    const logged = todoLoRegistrado()
+    expect(logged).toContain('canje-fallido')
+    expect(logged).toContain('invalid_grant')
+    for (const secreto of [CODIGO, STATE, VERIFIER, 'web-secret']) expect(logged).not.toContain(secreto)
+  })
+  it('state desconocido queda en el log sin el state', async () => {
+    ;(logger.warn as jest.Mock).mockClear()
+    await leerPaseDeAndroid({ state: STATE, codeVerifier: VERIFIER }).catch(() => {})
+    const logged = todoLoRegistrado()
+    expect(logged).toContain('vuelta-desconocida')
+    expect(logged).not.toContain(STATE)
   })
   it.each([
     ['Wrong number of segments in token: SECRETO', 'SECRETO', 'Wrong number of segments in token'],
     ['Token used too late, 1 > 2: {"email":"x@y.com"}', 'x@y.com', 'Token used too late, 1 > 2'],
   ])('mensaje de la librería %s se recorta antes de ":"', async (msg, secreto, esperado) => {
+    guardarVuelta(STATE, CODIGO)
+    getToken.mockResolvedValue({ tokens: { id_token: 'idt' } })
     verifyIdToken.mockRejectedValue(new Error(msg))
     ;(logger.warn as jest.Mock).mockClear()
-    await leerPaseDeAndroid('t').catch(() => {})
-    const logged = JSON.stringify((logger.warn as jest.Mock).mock.calls)
+    await leerPaseDeAndroid({ state: STATE, codeVerifier: VERIFIER }).catch(() => {})
+    const logged = todoLoRegistrado()
+    expect(logged).toContain('verificacion-fallida')
     expect(logged).toContain(esperado)
     expect(logged).not.toContain(secreto)
   })
-  it('nonce desconocido y canje fallido también quedan en el log', async () => {
+  it('canje fallido de escritorio también queda en el log, sin code ni verificador', async () => {
     ;(logger.warn as jest.Mock).mockClear()
-    verifyIdToken.mockResolvedValue(payload('ajeno'))
-    await leerPaseDeAndroid('t').catch(() => {})
     getToken.mockRejectedValue(new Error('invalid_grant'))
-    await leerPaseDeEscritorio({ code: 'CODIGO-X', codeVerifier: 'VERIF-X'.repeat(8), redirectUri: 'http://127.0.0.1:5/cb' }).catch(
-      () => {},
-    )
-    const logged = JSON.stringify((logger.warn as jest.Mock).mock.calls)
-    expect(logged).toContain('nonce-desconocido')
+    await leerPaseDeEscritorio({ code: 'CODIGO-X', codeVerifier: VERIFIER, redirectUri: 'http://127.0.0.1:5/cb' }).catch(() => {})
+    const logged = todoLoRegistrado()
     expect(logged).toContain('canje-fallido')
     expect(logged).not.toMatch(/CODIGO-X|VERIF-X/)
   })
 })
 
 describe('configDeGoogleParaElPos', () => {
-  it('sin secreto: windows=false, y el secreto nunca sale', () => {
+  it('config con las tres variables ⇒ android true, webClientId y redirectUri (sin audiencia ni nonce)', () => {
+    expect(configDeGoogleParaElPos()).toEqual({
+      android: true,
+      windows: true,
+      webClientId: WEB,
+      redirectUri: REDIRECT,
+      desktopClientId: 'desk-id',
+    })
+  })
+  it.each(VARIABLES_WEB)('falta %s ⇒ android false y nulls', variable => {
+    delete process.env[variable]
+    expect(configDeGoogleParaElPos()).toMatchObject({ android: false, webClientId: null, redirectUri: null, windows: true })
+  })
+  it('ningún secreto sale; sin secreto de escritorio: windows false y su id null', () => {
+    expect(JSON.stringify(configDeGoogleParaElPos())).not.toMatch(/secret/)
     delete process.env.GOOGLE_POS_DESKTOP_CLIENT_SECRET
-    const c = configDeGoogleParaElPos()
-    expect(c.windows).toBe(false)
-    expect(JSON.stringify(c)).not.toContain('desk-secret')
-  })
-  it('con todo: nonce nuevo cada vez, ids de escritorio y audiencia', () => {
-    const a = configDeGoogleParaElPos(),
-      b = configDeGoogleParaElPos()
-    expect(a).toMatchObject({ android: true, windows: true, androidAudience: AUD, desktopClientId: 'desk-id' })
-    expect(a.nonce).toMatch(/^[A-Za-z0-9_-]{43}$/)
-    expect(a.nonce).not.toBe(b.nonce)
-  })
-  it.each([
-    ['sin GOOGLE_CLIENT_ID del panel', undefined],
-    ['con la misma audiencia que el panel', AUD],
-  ])('android apagado %s', (_caso, panel) => {
-    if (panel === undefined) delete process.env.GOOGLE_CLIENT_ID
-    else process.env.GOOGLE_CLIENT_ID = panel
-    expect(configDeGoogleParaElPos()).toMatchObject({ android: false, nonce: null, androidAudience: null, windows: true })
-  })
-  it('nonce sólo con android', () => {
-    delete process.env.GOOGLE_POS_ANDROID_AUDIENCE
-    const c = configDeGoogleParaElPos()
-    expect(c).toMatchObject({ android: false, nonce: null, androidAudience: null })
-  })
-  it('tope de 10,000: descarta el mas viejo', async () => {
-    const primero = configDeGoogleParaElPos().nonce!
-    for (let i = 0; i < 10_000; i++) configDeGoogleParaElPos()
-    verifyIdToken.mockResolvedValue(payload(primero))
-    await expect(leerPaseDeAndroid('tok')).rejects.toMatchObject(invalido)
+    expect(configDeGoogleParaElPos()).toMatchObject({ windows: false, desktopClientId: null, android: true })
   })
 })

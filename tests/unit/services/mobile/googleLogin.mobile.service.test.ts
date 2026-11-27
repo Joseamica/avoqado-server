@@ -40,7 +40,7 @@ const cuenta = (o: Record<string, unknown> = {}) => ({
   venues: [OK_VENUE],
   ...o,
 })
-const pase = { idToken: 't' }
+const pase = { state: 'S'.repeat(43), codeVerifier: 'v'.repeat(43) }
 
 beforeEach(() => {
   jest.clearAllMocks()
@@ -164,6 +164,12 @@ describe('entrarAlPosConGoogle', () => {
       message: 'Vuelve a intentarlo.',
     })
     expect(emitir).not.toHaveBeenCalled()
+  })
+
+  it('pase de ANDROID usa leerPaseDeAndroid con state y verificador', async () => {
+    await entrarAlPosConGoogle(pase, false, 'd')
+    expect(android).toHaveBeenCalledWith(pase)
+    expect(escritorio).not.toHaveBeenCalled()
   })
 
   it('pase de escritorio usa leerPaseDeEscritorio', async () => {
