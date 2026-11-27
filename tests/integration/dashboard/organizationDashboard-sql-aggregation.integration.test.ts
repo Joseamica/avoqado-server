@@ -759,6 +759,21 @@ describe('getStaffAttendance — efectivo por checada agregado en Postgres', () 
     }
   })
 
+  it('marca la checada que el sistema cerró como «Salida olvidada», con su nota, para que el gerente la corrija (hz:0433f0cb:D3)', async () => {
+    const e2 = await prisma.timeEntry.findFirstOrThrow({ where: { staffId: ana, clockInTime: E2_IN } })
+    const nota = 'Salida olvidada: no marcó salida y no tiene horario ese día; quedó en 0 horas hasta que el gerente la corrija.'
+    await prisma.timeEntry.update({ where: { id: e2.id }, data: { salidaOlvidada: true, autoClockOut: true, notes: nota } })
+    try {
+      const { staff } = await svc.getStaffAttendance(orgId, DIA)
+      const a = (staff as Array<any>).find(r => r.id === ana)!
+      const [olvidada, normal] = a.allTimeEntries // la más reciente primero
+      expect(olvidada).toMatchObject({ id: e2.id, salidaOlvidada: true, notes: nota })
+      expect(normal).toMatchObject({ salidaOlvidada: false, notes: null })
+    } finally {
+      await prisma.timeEntry.update({ where: { id: e2.id }, data: { salidaOlvidada: false, autoClockOut: false, notes: null } })
+    }
+  })
+
   it('el filtro de estado deja sólo a quien sigue dentro', async () => {
     const { staff } = await svc.getStaffAttendance(orgId, DIA, undefined, 'ACTIVE')
     expect((staff as Array<any>).map(r => r.id).sort()).toEqual([beto, carla].sort())

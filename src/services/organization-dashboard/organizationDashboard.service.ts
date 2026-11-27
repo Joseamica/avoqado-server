@@ -2322,6 +2322,9 @@ class OrganizationDashboardService {
             depositPhotoUrl: true,
             status: true,
             validationStatus: true,
+            // La bitácora de marca blanca marca y deja corregir la «Salida olvidada» (hz:0433f0cb:D3), con su nota.
+            salidaOlvidada: true,
+            notes: true,
           },
         })
 
@@ -2461,6 +2464,8 @@ class OrganizationDashboardService {
           validationStatus: te.validationStatus,
           cashSales: teCashSales,
           isLate,
+          salidaOlvidada: te.salidaOlvidada,
+          notes: te.notes,
         }
       })
 
