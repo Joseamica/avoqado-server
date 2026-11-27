@@ -140,7 +140,10 @@ describe('loginWithGoogle — cuenta provisional de una invitación', () => {
     // «true»: la invitación ya quedó aceptada; la página no debe volver a /invite/:token («ya utilizada»).
     expect(result.isNewUser).toBe(true)
     expect(staffUpdate).toHaveBeenCalledWith(
-      expect.objectContaining({ where: expect.objectContaining({ id: 'staff-rafa' }), data: expect.objectContaining({ googleId: 'google-uid-rafa' }) }),
+      expect.objectContaining({
+        where: expect.objectContaining({ id: 'staff-rafa' }),
+        data: expect.objectContaining({ googleId: 'google-uid-rafa' }),
+      }),
     )
   })
 

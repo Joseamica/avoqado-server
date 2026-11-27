@@ -89,6 +89,7 @@ describe('Parte A — el dashboard web emite sesiones revocables', () => {
     mockJwt.generateRefreshToken = jest.fn().mockReturnValue('refresh')
     createSessionMock.mockResolvedValue({ id: SESSION_ID })
     mockPrisma.staff.update = jest.fn().mockResolvedValue({})
+    mockPrisma.staff.updateMany = jest.fn().mockResolvedValue({ count: 1 })
     mockPrisma.invitation = { findMany: jest.fn().mockResolvedValue([]) }
     mockPrisma.venueRoleConfig = { findMany: jest.fn().mockResolvedValue([]), findUnique: jest.fn().mockResolvedValue(null) }
     mockPrisma.venueRolePermission = { findMany: jest.fn().mockResolvedValue([]) }
