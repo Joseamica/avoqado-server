@@ -63,13 +63,13 @@ describe('GET /api/v1/public/plan-offer', () => {
   })
 
   it('601 peticiones a /plan-offer en un minuto no le dan 429 a /price-list', async () => {
-    const ip = '10.8.0.4'
+    // Sin `CF-Connecting-IP`, los dos limitadores leen la MISMA llave (`req.ip`): si compartieran instancia, /price-list daría 429.
     let ultimo = 0
     for (let i = 0; i < 601; i++) {
-      ultimo = (await request(app).get('/api/v1/public/plan-offer').set('CF-Connecting-IP', ip)).status
+      ultimo = (await request(app).get('/api/v1/public/plan-offer')).status
     }
     expect(ultimo).toBe(429)
-    const lista = await request(app).get('/api/v1/public/price-list').set('CF-Connecting-IP', ip)
+    const lista = await request(app).get('/api/v1/public/price-list')
     expect(lista.status).not.toBe(429)
   })
 })
