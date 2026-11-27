@@ -1,3 +1,4 @@
+import { definicionDePrueba, idsDeLaVersion, punteroA } from '@tests/__helpers__/planOfferFixtures'
 import { PlanWinbackJob } from '@/jobs/plan-winback.job'
 import prisma from '@/utils/prismaClient'
 import emailService from '@/services/email.service'
@@ -82,6 +83,18 @@ describe('PlanWinbackJob.runNow', () => {
       where: { id: 'vf1' },
       data: { winbackSentAt: expect.any(Date) },
     })
+  })
+
+  it('B4: la v2 «Plus» da el nombre del plan al correo de regreso; sin versión, Pro', async () => {
+    const pointer = (prisma as any).planOfferPointer.findUnique as jest.Mock
+    mockPrisma.venueFeature.findMany.mockResolvedValue([vfRow()])
+    pointer.mockResolvedValue(punteroA('ver_v2', 2, definicionDePrueba({ ids: idsDeLaVersion('v2'), nombres: { PRO: 'Plus' } })))
+    await new PlanWinbackJob().runNow()
+    expect(sendSpy.mock.calls[0][1]).toMatchObject({ planName: 'Plus' })
+    sendSpy.mockClear()
+    pointer.mockResolvedValue(null)
+    await new PlanWinbackJob().runNow()
+    expect(sendSpy.mock.calls[0][1]).toMatchObject({ planName: 'Pro' })
   })
 
   it('sends to multiple eligible venues', async () => {

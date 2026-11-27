@@ -154,6 +154,13 @@ jest.mock('@/services/dashboard/notification.dashboard.service', () => ({
   createNotification: jest.fn(),
 }))
 
+// B4 Task 2: la versión del editor que rige (nula = sin versión). Lo demás de planOffer, real.
+const mockVersionQueCobra = jest.fn().mockResolvedValue(null)
+jest.mock('@/services/billing/planOffer', () => ({
+  ...jest.requireActual('@/services/billing/planOffer'),
+  versionQueCobra: (...a: unknown[]) => mockVersionQueCobra(...a),
+}))
+
 // `trial_will_end` de planes: el monto es lo que Stripe de verdad cobrará (vista previa de la factura); `noHabraCobro` va real.
 jest.mock('@/services/billing/siguienteCobro', () => ({
   ...jest.requireActual('@/services/billing/siguienteCobro'),
@@ -662,6 +669,58 @@ describe('Stripe Webhook Service - Critical Tests', () => {
           lastPaymentAttempt: expect.any(Date),
         }),
       })
+    })
+  })
+
+  describe('B4 · el aviso de pago rechazado de un plan lleva el nombre del editor', () => {
+    const pagoRechazado = async (code: string, name: string) => {
+      const mockVenueFeature = {
+        id: 'vf_1',
+        venueId: 'venue_1',
+        active: true,
+        feature: { code, name },
+        venue: { name: 'Test Venue', status: 'ACTIVE', organization: { email: 'test@example.com', stripeCustomerId: 'cus_test123' } },
+      }
+      ;(prisma.venueFeature.findFirst as jest.Mock).mockResolvedValue(mockVenueFeature)
+      ;(prisma.staffVenue.findMany as jest.Mock).mockResolvedValue([
+        { staff: { id: 'st_1', email: 'o@x.com', firstName: 'A', lastName: 'B' } },
+      ])
+      ;(prisma.venue.findUnique as jest.Mock).mockResolvedValue({ slug: 'test-venue' })
+      ;(prisma.venueFeature.updateMany as jest.Mock).mockResolvedValue(mockVenueFeature)
+      const createNotification = jest.requireMock('@/services/dashboard/notification.dashboard.service').createNotification as jest.Mock
+      createNotification.mockClear()
+      await handleStripeWebhookEvent({
+        id: 'evt_payment_failed_b4',
+        object: 'event',
+        type: 'invoice.payment_failed',
+        created: Date.now() / 1000,
+        livemode: false,
+        pending_webhooks: 0,
+        request: null,
+        api_version: '2023-10-16',
+        data: { object: { id: 'in_failed_b4', object: 'invoice', subscription: 'sub_123', attempt_count: 1 } },
+      } as unknown as Stripe.Event)
+      return createNotification
+    }
+    afterEach(() => mockVersionQueCobra.mockResolvedValue(null))
+
+    it('con la v2 «Plus»: «Pago rechazado - Plan Avoqado Plus»; sin versión, el Feature.name de hoy', async () => {
+      mockVersionQueCobra.mockResolvedValue({
+        definition: { FREE: { displayName: 'Gratis' }, PRO: { displayName: 'Plus' }, PREMIUM: { displayName: 'Premium' } },
+      })
+      const conV2 = await pagoRechazado('PLAN_PRO', 'Plan Avoqado Pro')
+      expect(conV2).toHaveBeenCalledWith(expect.objectContaining({ title: '🚨 Pago rechazado - Plan Avoqado Plus' }))
+      mockVersionQueCobra.mockResolvedValue(null)
+      const sinV = await pagoRechazado('PLAN_PRO', 'Plan Avoqado Pro')
+      expect(sinV).toHaveBeenCalledWith(expect.objectContaining({ title: '🚨 Pago rechazado - Plan Avoqado Pro' }))
+    })
+
+    it('una función que no es plan nunca cambia de nombre, aunque haya versión', async () => {
+      mockVersionQueCobra.mockResolvedValue({
+        definition: { FREE: { displayName: 'Gratis' }, PRO: { displayName: 'Plus' }, PREMIUM: { displayName: 'Premium' } },
+      })
+      const n = await pagoRechazado('CHATBOT', 'Chatbot')
+      expect(n).toHaveBeenCalledWith(expect.objectContaining({ title: '🚨 Pago rechazado - Chatbot' }))
     })
   })
 

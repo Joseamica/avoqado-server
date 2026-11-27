@@ -78,6 +78,22 @@ describe('createPlanCheckoutSession', () => {
     expect(arg.expires_at).toBeLessThanOrEqual(antes + 31 * 60)
   })
 
+  it('B4: la descripción de la suscripción lleva el nombre de la versión; sin él, Pro como hoy', async () => {
+    const base = {
+      venueId: 'v1',
+      customerId: 'cus_1',
+      priceId: 'price_cotizado',
+      interval: 'monthly' as const,
+      successUrl: 'https://dash/ok',
+      cancelUrl: 'https://dash/no',
+      venueName: 'Acme',
+    }
+    await createPlanCheckoutSession({ ...base, planDisplayName: 'Plus' })
+    expect(mockSessionCreate.mock.calls[0][0].subscription_data.description).toBe('Plan Avoqado Plus - Acme')
+    await createPlanCheckoutSession(base)
+    expect(mockSessionCreate.mock.calls[1][0].subscription_data.description).toBe('Plan Avoqado Pro - Acme')
+  })
+
   it('annual: uses the annual price lookup_key', async () => {
     await createPlanCheckoutSession({
       venueId: 'v1',

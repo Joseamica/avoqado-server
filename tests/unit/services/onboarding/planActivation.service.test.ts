@@ -63,6 +63,12 @@ jest.mock('@/services/email.service', () => ({
   __esModule: true,
   default: { sendPlanConfirmationEmail: jest.fn().mockResolvedValue(true) },
 }))
+// B4 Task 2: el nombre del plan que dicen el correo y el aviso. Por defecto el de hoy; una prueba lo cambia a «Plus».
+const mockNombres = { PRO: 'Pro', PREMIUM: 'Premium' }
+jest.mock('@/services/billing/nombresDeLosPlanes', () => ({
+  ...jest.requireActual('@/services/billing/nombresDeLosPlanes'),
+  nombresDeLosPlanes: jest.fn(async () => ({ FREE: 'Gratis', ...mockNombres })),
+}))
 jest.mock('@/services/resend.service', () => ({
   __esModule: true,
   sendPlanActivatedNotice: jest.fn().mockResolvedValue(true),
@@ -362,6 +368,34 @@ describe('camino feliz con campaña', () => {
       'dueno@x.com',
       expect.objectContaining({ firstChargeDate: new Date('2026-10-17T00:00:00Z') }), // current_period_end de la suscripción
     )
+  })
+
+  it('B4 (M5): la campaña cobrada con el precio de la v2 «Plus» pone «Plan Avoqado Plus» en la descripción de Stripe; sin versión, la de hoy', async () => {
+    prismaMock.planOfferPointer.findUnique.mockResolvedValue(
+      punteroA('cv2', 2, definicionDePrueba({ ids: idsDeLaVersion('v2'), nombres: { PRO: 'Plus' } })) as never,
+    )
+    prismaMock.feature.findFirst.mockResolvedValue({
+      id: 'feat-pro',
+      code: 'PLAN_PRO',
+      monthlyPrice: 999,
+      stripeProductId: 'prod_pro',
+    } as never)
+    mockPriceRetrieve.mockResolvedValue({
+      id: 'price_v2_pro_m',
+      active: true,
+      currency: 'mxn',
+      unit_amount: LISTA,
+      tax_behavior: 'inclusive',
+      product: 'prod_pro',
+      recurring: { interval: 'month' },
+    })
+    await activatePlan({ ...BASE, offer: OFERTA_LAUNCH })
+    expect(mockSubCreate.mock.calls[0][0].description).toMatch(/^Plan Avoqado Plus/)
+  })
+
+  it('sin versión, la campaña deja la descripción de hoy («Plan Avoqado Pro»)', async () => {
+    await activatePlan({ ...BASE, offer: OFERTA_LAUNCH })
+    expect(mockSubCreate.mock.calls[0][0].description).toMatch(/^Plan Avoqado Pro/)
   })
 
   it('la redención queda APPLIED con la suscripción y la huella de tarjeta', async () => {
@@ -987,6 +1021,40 @@ describe('camino ESTÁNDAR (sin campaña)', () => {
     expect(prismaMock.launchCampaignRedemption.create).not.toHaveBeenCalled()
   })
 
+  it('B4: con la v2 «Plus» y una prueba de 14 días, el correo y el aviso al equipo dicen Plus y el correo trae trialDays 14', async () => {
+    mockNombres.PRO = 'Plus'
+    try {
+      const { resolvePlanNotificationTarget } = jest.requireMock('@/services/access/planNotification.service')
+      resolvePlanNotificationTarget.mockResolvedValue({ email: 'dueno@x.com', locale: 'es', venueName: 'Bar' })
+      const { default: emailService } = jest.requireMock('@/services/email.service')
+      const inicio = Math.floor(new Date('2026-10-03T00:00:00Z').getTime() / 1000)
+      mockSubRetrieve.mockResolvedValue({
+        id: 'sub_1',
+        status: 'trialing',
+        trial_start: inicio,
+        trial_end: inicio + 14 * 86400,
+        current_period_end: inicio + 14 * 86400,
+        latest_invoice: { amount_due: 0 },
+      })
+      await activatePlan({ ...BASE, payNow: false, offer: { kind: 'STANDARD', expectedFirstChargeCents: 0 } })
+      for (let i = 0; i < 8; i++) await new Promise(r => setImmediate(r))
+      expect(emailService.sendPlanConfirmationEmail).toHaveBeenCalledWith(
+        'dueno@x.com',
+        expect.objectContaining({ planName: 'Plus', trialDays: 14 }),
+      )
+      expect(jest.requireMock('@/services/resend.service').sendPlanActivatedNotice).toHaveBeenCalledWith(
+        expect.objectContaining({ planName: 'Plus' }),
+      )
+    } finally {
+      mockNombres.PRO = 'Pro'
+      jest.requireMock('@/services/access/planNotification.service').resolvePlanNotificationTarget.mockResolvedValue({
+        email: null,
+        locale: 'es',
+        venueName: 'Bar',
+      })
+    }
+  })
+
   it('con prueba gratis: trial 30, sin cupón y sin cobro hoy', async () => {
     mockSubRetrieve.mockResolvedValue({
       id: 'sub_1',
@@ -1072,6 +1140,28 @@ describe('camino ESTÁNDAR (sin campaña)', () => {
     expect(prismaMock.planOfferPointer.findUnique).toHaveBeenCalledTimes(2)
     expect(prismaMock.planOfferPointer.findUnique.mock.invocationCallOrder[1]).toBeGreaterThan(mockAutorizar.mock.invocationCallOrder[0])
     expect(prismaMock.planOfferPointer.findUnique.mock.invocationCallOrder[1]).toBeLessThan(mockSubCreate.mock.invocationCallOrder[0])
+  })
+
+  it('🔴 B4 (guarda del supuesto del cupón): con la v2 vigente, PRO mensual pagando hoy crea la suscripción SIN INTRO_PRO_3M y con el precio de la versión', async () => {
+    prismaMock.planOfferPointer.findUnique.mockResolvedValue(punteroA('cv2', 2, VERSION_DOS()) as never)
+    mockPriceRetrieve.mockResolvedValue({ id: 'price_v2_pro_m', active: true, unit_amount: 115884 })
+
+    await activatePlan({
+      ...BASE,
+      offer: { kind: 'STANDARD', expectedFirstChargeCents: 115884 },
+      quoteToken: comprobanteDePrueba({
+        alcance: 'org:org-1',
+        interval: 'monthly',
+        firstChargeCents: 115884,
+        precioCents: 115884,
+        trialEndsAt: null,
+      }),
+    })
+
+    expect(mockSubCreate).toHaveBeenCalledTimes(1)
+    expect(mockSubCreate.mock.calls[0][0].items).toEqual([{ price: 'price_v2_pro_m' }])
+    // Con versión del editor los `discounts` van explícitos y vacíos (`''`): sin INTRO_PRO_3M.
+    expect(mockSubCreate.mock.calls[0][0].discounts).toBe('')
   })
 
   it('🔴 si otra versión quedó vigente entre el PASO 4 y el cobro → 409 OFFER_CHANGED reason VERSION (B2: el comprobante es de la v2) y no se cobra', async () => {

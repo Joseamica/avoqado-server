@@ -3,10 +3,18 @@
  * la base de verdad (lo que lee getPlanState, Stripe que no contesta, el puesto, la oferta de pausa) está en
  * `tests/integration/support/data/planStatus.integration.test.ts`.
  */
-jest.mock('@/services/dashboard/planState.service', () => ({ getPlanState: jest.fn() }))
+// El bot lee los nombres por el servicio del panel (B4); aquí ese servicio pasa por el de los avisos, también fingido
+jest.mock('@/services/dashboard/planState.service', () => ({
+  getPlanState: jest.fn(),
+  nombresDeLosPlanesDeTuPlan: () => jest.requireMock('@/services/billing/nombresDeLosPlanes').nombresDeLosPlanes(),
+}))
+jest.mock('@/services/billing/nombresDeLosPlanes', () => ({
+  nombresDeLosPlanes: jest.fn().mockResolvedValue({ FREE: 'Gratis', PRO: 'Pro', PREMIUM: 'Premium' }),
+}))
 
 import { getPlanState, type PlanOrigin, type PlanState } from '@/services/dashboard/planState.service'
-import { planStatus, renderPlan, withoutPrice } from '@/services/support/data/capabilities/planStatus'
+import { planStatus } from '@/services/support/data/capabilities/planStatus'
+import { renderPlan, withoutPrice } from '@/services/support/data/planText'
 import type { DataRequest, DataScope } from '@/services/support/data/catalog'
 import { checkRendered, template } from '@/services/support/data/check'
 import { SUPPORT_DATA_OMITTED } from '@/services/support/data/texts'
@@ -380,11 +388,43 @@ it('params never refuses: any day is the plan of today', () => {
 it('read asks the panel for the plan of the venue of the scope, without the pause offer and with Stripe bounded', async () => {
   const state = base({}, { currentPeriodEnd: D('2026-12-03') })
   ;(getPlanState as jest.Mock).mockResolvedValueOnce(state)
-  expect(await planStatus.read(scope, {})).toBe(state)
+  // B4: el estado, más el nombre de cada plan de la versión vigente
+  expect(await planStatus.read(scope, {})).toEqual({ ...state, nombres: { FREE: 'Gratis', PRO: 'Pro', PREMIUM: 'Premium' } })
   expect(getPlanState).toHaveBeenCalledWith(scope.venueId, { skipPauseOffer: true, stripeTimeoutMs: 3000 })
 })
 
 it('render is renderPlan', () => {
   const state = base({ state: 'trial' }, { currentPeriodEnd: D('2026-11-20') })
   expect(planStatus.render(scope, {}, state)).toEqual(renderPlan(scope, state))
+})
+
+// B4 (final, S2): «después pasas a …» dice el nombre del plan Gratis de la versión del editor
+it('a plan that ends says the FREE name of the editor version (v2 «Inicial»), and «Gratis» without one', () => {
+  const state = base({}, { cancelAt: D('2026-12-03'), currentPeriodEnd: D('2026-12-03') })
+  const v2 = renderPlan(scope, { ...state, nombres: { FREE: 'Inicial', PRO: 'Plus', PREMIUM: 'Premium' } })
+  expect(checkRendered(v2, scope.timezone)).toBe(true)
+  expect(v2.text).toContain('Tu plan Plus sigue activo hasta el 3-dic-2026; después pasas a Inicial.')
+  expect(v2.text).not.toMatch(/Gratis/)
+  const v1 = renderPlan(scope, state)
+  expect(v1.text).toContain('después pasas a Gratis.')
+})
+
+// B4 (final, S3): el estado y los nombres se piden a la vez, no uno después del otro
+it('read starts the plan state and the names at the same time', async () => {
+  const orden: string[] = []
+  let soltarEstado!: (s: PlanState) => void
+  ;(getPlanState as jest.Mock).mockImplementationOnce(() => {
+    orden.push('estado')
+    return new Promise<PlanState>(r => (soltarEstado = r))
+  })
+  const nombres = jest.requireMock('@/services/billing/nombresDeLosPlanes').nombresDeLosPlanes as jest.Mock
+  nombres.mockImplementationOnce(async () => {
+    orden.push('nombres')
+    return { FREE: 'Gratis', PRO: 'Pro', PREMIUM: 'Premium' }
+  })
+  const lectura = planStatus.read(scope, {})
+  // Con el estado todavía sin contestar, los nombres ya se pidieron
+  expect(orden).toEqual(['estado', 'nombres'])
+  soltarEstado(base())
+  await lectura
 })

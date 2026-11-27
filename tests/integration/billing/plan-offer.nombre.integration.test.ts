@@ -111,7 +111,7 @@ jest.mock('@/services/launchCampaigns/hybridPrices', () => ({
 }))
 jest.mock('@/services/billing/planesEditablesListos', () => ({
   SERVIDOR_LISTO_PARA_PLANES_EDITABLES: true,
-  cuponDeIntroduccionRetirado: () => true,
+  cuponDeIntroduccionExcluidoConVersion: () => true,
 }))
 // La regla común de compra (vence sesiones abiertas, lee lo vivo en Stripe) tiene su propia suite: aquí corre lo que se le pide crear.
 jest.mock('@/services/access/autorizarObligacionNueva', () => ({

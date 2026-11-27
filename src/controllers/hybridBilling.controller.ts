@@ -1,3 +1,6 @@
+import { versionQueCobra } from '@/services/billing/planOffer'
+import logger from '@/config/logger'
+import { planesPublicos } from '@/services/billing/planesPublicos'
 import { asyncHandler } from '@/utils/asyncHandler'
 import { BadRequestError } from '@/errors/AppError'
 import { z } from 'zod'
@@ -86,7 +89,27 @@ export const campaignCatalog = asyncHandler(async (req, res) => {
   if (!query.success) throw new BadRequestError('Revisa los filtros del catálogo.')
   res.json({ success: true, data: listFeatureCatalog(query.data) })
 })
-export const publicBasicPlan = asyncHandler(async (_req, res) => res.json({ success: true, data: await getPublicBasicPlan() }))
+/** Planes editables (B4): los planes pagados vigentes, sólo campos públicos. Con la vigente dañada, el 503 de `ofertaVigente`. */
+export const publicPlanOffer = asyncHandler(async (_req, res) => {
+  const data = await planesPublicos()
+  res.set('Cache-Control', 'public, max-age=30')
+  res.json({ success: true, data })
+})
+/**
+ * Planes editables (B4): con una versión del editor el Básico ya no se vende → `data: null`. Sin ella, lo de hoy (y sus errores
+ * siguen al manejador). Si leer la versión lanza, aviso y lo de hoy.
+ */
+export const publicBasicPlan = asyncHandler(async (_req, res) => {
+  let conVersion = false
+  try {
+    conVersion = (await versionQueCobra()) !== null
+  } catch (error) {
+    logger.warn('publicBasicPlan: no se pudo leer la versión de la oferta; se responde el Básico de hoy', {
+      error: error instanceof Error ? error.message : String(error),
+    })
+  }
+  res.json({ success: true, data: conVersion ? null : await getPublicBasicPlan() })
+})
 export const basicPlan = asyncHandler(async (_req, res) => res.json({ success: true, data: await getBasicPlanRow() }))
 const basicPlanBody = z
   .object({

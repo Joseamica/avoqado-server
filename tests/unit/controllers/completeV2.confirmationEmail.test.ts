@@ -38,6 +38,9 @@ jest.mock('../../../src/services/onboarding/ensureVenue.service', () => ({
 jest.mock('../../../src/services/onboarding/signup.service', () => ({ __esModule: true }))
 jest.mock('../../../src/services/onboarding/testPaymentLink.service', () => ({ __esModule: true }))
 
+jest.mock('../../../src/services/billing/nombresDeLosPlanes', () => ({
+  nombresDeLosPlanes: jest.fn().mockResolvedValue({ FREE: 'Gratis', PRO: 'Pro', PREMIUM: 'Premium' }),
+}))
 jest.mock('../../../src/services/billing/precioDelPlan', () => ({
   resolverPrecioDelPlan: jest.fn().mockResolvedValue({ priceId: 'price_x', unitAmount: 0 }),
   // Codex b2-code r5 A: el `catch` del alta larga pregunta `instanceof LecturaDeLaOfertaFallida`; aquí ninguna lectura falla.
@@ -101,6 +104,7 @@ import * as venueCreationService from '../../../src/services/onboarding/venueCre
 import { resolvePlanNotificationTarget } from '../../../src/services/access/planNotification.service'
 import emailService from '../../../src/services/email.service'
 import prisma from '../../../src/utils/prismaClient'
+import { nombresDeLosPlanes } from '../../../src/services/billing/nombresDeLosPlanes'
 import * as resendService from '../../../src/services/resend.service'
 
 const VENUE = { id: 'venue_1', slug: 'bar-test', name: 'Bar Test' }
@@ -238,6 +242,28 @@ describe('completeV2Onboarding — plan confirmation email + venue.language', ()
     expect(data.billingPortalUrl).toContain('/venues/bar-test/settings/billing/subscriptions')
     expect(res.status).toHaveBeenCalledWith(201)
     expect(next).not.toHaveBeenCalled()
+  })
+
+  it('B4: con la v2 «Plus» y una suscripción de 14 días, el correo dice Plus y trae trialDays 14 (de Stripe, no de lo vigente)', async () => {
+    primeHappyPath({ payNow: false, interval: 'monthly' })
+    ;(nombresDeLosPlanes as jest.Mock).mockResolvedValueOnce({ FREE: 'Gratis', PRO: 'Plus', PREMIUM: 'Premium' })
+    ;(stripeService.retrievePlanSubscription as jest.Mock).mockResolvedValueOnce({
+      currentPeriodEnd: new Date('2026-11-20T18:00:00Z'),
+      trialDays: 14,
+    })
+    await completeV2Onboarding(buildReq({ language: 'es' }) as Request, buildRes() as Response, jest.fn())
+    await vaciarCorreo()
+    const [, data] = (emailService.sendPlanConfirmationEmail as jest.Mock).mock.calls[0]
+    expect(data).toMatchObject({ planName: 'Plus', trialDays: 14 })
+  })
+
+  it('sin versión (sin trialDays de Stripe) el correo no trae trialDays y el plan es Pro', async () => {
+    primeHappyPath({ payNow: false, interval: 'monthly' })
+    await completeV2Onboarding(buildReq({ language: 'es' }) as Request, buildRes() as Response, jest.fn())
+    await vaciarCorreo()
+    const [, data] = (emailService.sendPlanConfirmationEmail as jest.Mock).mock.calls[0]
+    expect(data.planName).toBe('Pro')
+    expect(data).not.toHaveProperty('trialDays')
   })
 
   it('🔴 la fecha del primer cobro es la de Stripe y va con la zona del negocio (no «hoy + 30 días»; 20-oct)', async () => {

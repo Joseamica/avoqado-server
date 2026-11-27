@@ -4,7 +4,7 @@ import prisma from '../../utils/prismaClient'
 import AppError, { ConflictError } from '../../errors/AppError'
 import { priceTransaction } from '../launchCampaigns/hybridProduct'
 import { ofertaVigente, tomarCandadoDeLaOferta, type Periodicidad, type PlanPagado } from './planOffer'
-import { cuponDeIntroduccionRetirado, SERVIDOR_LISTO_PARA_PLANES_EDITABLES } from './planesEditablesListos'
+import { cuponDeIntroduccionExcluidoConVersion, SERVIDOR_LISTO_PARA_PLANES_EDITABLES } from './planesEditablesListos'
 
 /**
  * Planes editables (B1): el INTERRUPTOR de plataforma `PLANES_EDITABLES` (patrón de `interruptorPausaSola.ts`).
@@ -17,7 +17,7 @@ import { cuponDeIntroduccionRetirado, SERVIDOR_LISTO_PARA_PLANES_EDITABLES } fro
 export const CLAVE_PLANES_EDITABLES = 'PLANES_EDITABLES'
 export const CACHE_MS = 5_000
 
-export type RequisitoFaltante = 'VERSION_1' | 'CUPON_DE_INTRODUCCION' | 'SERVIDOR_LISTO'
+export type RequisitoFaltante = 'VERSION_1' | 'CUPON_DE_INTRODUCCION' | 'CAMPANAS_ACTIVAS' | 'SERVIDOR_LISTO'
 
 const RANURAS: ReadonlyArray<[PlanPagado, Periodicidad]> = [
   ['PRO', 'monthly'],
@@ -76,7 +76,11 @@ export async function requisitosFaltantes(db?: Prisma.TransactionClient): Promis
     versionValida = false
   }
   if (!versionValida) faltan.push('VERSION_1')
-  if (!cuponDeIntroduccionRetirado()) faltan.push('CUPON_DE_INTRODUCCION')
+  if (!cuponDeIntroduccionExcluidoConVersion()) faltan.push('CUPON_DE_INTRODUCCION')
+  // Las campañas de lanzamiento ACTIVE de Pro o Premium (la misma noción de `campanasQueBloquean`, sin su filtro por precio):
+  // con el editor prendido sus precios dejan de ser los de la llave. Se leen con la transacción del candado si la hay.
+  const campanasActivas = await (db ?? prisma).launchCampaign.count({ where: { status: 'ACTIVE', planTier: { in: ['PRO', 'PREMIUM'] } } })
+  if (campanasActivas > 0) faltan.push('CAMPANAS_ACTIVAS')
   if (!SERVIDOR_LISTO_PARA_PLANES_EDITABLES) faltan.push('SERVIDOR_LISTO')
   return faltan
 }

@@ -535,6 +535,15 @@ describe('GET /plan → POST /plan/checkout con la versión del editor (B2, Task
     expect(jest.mocked(logger.warn)).toHaveBeenCalledWith(expect.stringContaining('«Tu plan»'), expect.objectContaining({ venueId }))
   })
 
+  it('B4: con la v2 «Plus», la descripción de la suscripción en la sesión dice «Plan Avoqado Plus - <negocio>»', async () => {
+    conVigente(2, definicionDePrueba({ ids: idsDeLaVersion('v2'), netos: { 'PRO:monthly': 79900 }, nombres: { PRO: 'Plus' } }))
+    precioV2()
+    const plan = await leerPlan()
+    const res = await comprar({ quoteToken: plan.body.data.cotizacion.planes.PRO.monthly.quoteToken })
+    expect(res.status).toBe(200)
+    expect(sesion().subscription_data.description).toMatch(/^Plan Avoqado Plus - /)
+  })
+
   it('🔴 GET /plan de un negocio en Gratis → POST /plan/checkout con su quoteToken: line_items [{ price: "price_v2_pro_m" }], metadata { planOfferVersion: "2", planOfferPrecioDe: "2" }', async () => {
     conVigente(2, v2())
     precioV2()

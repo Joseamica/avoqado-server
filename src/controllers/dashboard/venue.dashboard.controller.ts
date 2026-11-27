@@ -541,10 +541,11 @@ export async function getVenuePlan(req: Request<{ venueId: string }>, res: Respo
     const { planState, suscripcion } = await planStateService.getPlanStateYSuscripcion(
       venueId,
       vigente
-        ? { conTarjeta: true, stripeTimeoutMs: LECTURA_ACOTADA.timeout }
+        ? { conTarjeta: true, stripeTimeoutMs: LECTURA_ACOTADA.timeout, conVersionDelEditor: true }
         : delEditor
-          ? { stripeTimeoutMs: LECTURA_ACOTADA.timeout }
-          : {},
+          ? { stripeTimeoutMs: LECTURA_ACOTADA.timeout, conVersionDelEditor: true }
+          : // B4: sin versión del editor, la oferta del Básico de hoy, sin volver a leer la versión.
+            { conVersionDelEditor: false },
     )
     const cotizacion = vigente ? await cotizacionDeTuPlanSinRomper(vigente, venueId, planState, suscripcion) : null
     res.status(200).json({ success: true, data: cotizacion ? { ...planState, cotizacion } : planState })

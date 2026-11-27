@@ -29,6 +29,7 @@ import { registerCfdiTools } from './tools/cfdi'
 import { registerCommissionTools } from './tools/commissions'
 import { registerStaffPayTools } from './tools/staffPay'
 import { registerSubscriptionTools } from './tools/subscriptions'
+import { registerPlanPricesTools } from './tools/planPrices'
 import { registerMenuTools } from './tools/menu'
 import { registerCatalogInBulkTools } from './tools/catalogInBulk'
 import { registerStaffTools } from './tools/staff'
@@ -145,6 +146,7 @@ export function registerAllTools(server: McpServer, scope: McpScope, flags: Tool
   registerCommissionTools(server, scope)
   registerStaffPayTools(server, scope)
   registerSubscriptionTools(server, scope)
+  registerPlanPricesTools(server, scope) // planes y precios vigentes (sólo lectura): sólo /mcp libre
   registerMenuTools(server, scope)
   registerCatalogInBulkTools(server, scope) // catálogo en bloque (buscar por código, precios, altas, existencias): sólo el MCP libre
   registerStaffTools(server, scope)

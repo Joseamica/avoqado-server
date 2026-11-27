@@ -1107,6 +1107,24 @@ describe('Stripe Service - Comprehensive Tests', () => {
         })
       })
 
+      it('B4: trialDays sale de trial_end − trial_start de ESA suscripción (14 días), y no viene sin prueba', async () => {
+        const start = 1735689600
+        mockStripeInstance.subscriptions.retrieve.mockResolvedValueOnce({
+          id: 'sub_plan_pro',
+          status: 'trialing',
+          trial_start: start,
+          trial_end: start + 14 * 86400,
+          items: { data: [{ price: { recurring: { interval: 'month' }, unit_amount: 115884 } }] },
+        })
+        expect((await stripeService.retrievePlanSubscription('sub_plan_pro')).trialDays).toBe(14)
+        mockStripeInstance.subscriptions.retrieve.mockResolvedValueOnce({
+          id: 'sub_plan_pro',
+          status: 'active',
+          items: { data: [{ price: { recurring: { interval: 'month' }, unit_amount: 115884 } }] },
+        })
+        expect(await stripeService.retrievePlanSubscription('sub_plan_pro')).not.toHaveProperty('trialDays')
+      })
+
       it('C5 (la B): con tiempo máximo, UNA llamada con ese tiempo y sin reintentos (ni los de retry ni los del SDK)', async () => {
         const timeout = Object.assign(new Error('Request aborted due to timeout being reached (3000ms)'), { type: 'StripeConnectionError' })
         mockStripeInstance.subscriptions.retrieve.mockRejectedValueOnce(timeout)

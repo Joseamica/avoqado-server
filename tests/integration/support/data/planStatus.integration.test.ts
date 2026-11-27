@@ -162,7 +162,8 @@ it('parity: read gives what GET /plan gives the panel, without the pause offer; 
   expect(next).not.toHaveBeenCalled()
   const panel = (res.json.mock.calls[0][0] as { data: PlanState }).data
   const b = await planStatus.read(scopeFor(), {})
-  expect(b).toEqual({ ...panel, pauseOfferEligible: false })
+  // B4: la lectura suma el nombre de cada plan (por el servicio del panel); sin versión del editor, los de hoy
+  expect(b).toEqual({ ...panel, pauseOfferEligible: false, nombres: { FREE: 'Gratis', PRO: 'Pro', PREMIUM: 'Premium' } })
   expect(panel.state).toBe('canceling')
   expect(stripe.mock.calls).toEqual([[id], [id, { timeoutMs: 3000 }]])
   // Lista cerrada: un campo nuevo de «Tu plan» (una tarjeta, otro precio) truena aquí y se revisa antes de que llegue a la capacidad
@@ -176,6 +177,7 @@ it('parity: read gives what GET /plan gives the panel, without the pause offer; 
     'grandfathered',
     'hasPlan',
     'interval',
+    'nombres',
     'origin',
     'pauseOfferEligible',
     'paymentMethod',

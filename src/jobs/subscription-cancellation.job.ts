@@ -28,6 +28,7 @@ import { resolvePlanNotificationTarget } from '@/services/access/planNotificatio
 import { scheduleJob } from '../observability/jobContext'
 import { retry, shouldRetryDbConnectionError } from '@/utils/retry'
 import { sweepLapsedBasicSeats } from '@/services/launchCampaigns/hybridSeats'
+import { nombreDeLaFeatureParaAvisos } from '@/services/billing/nombresDeLosPlanes'
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || '')
 
@@ -179,7 +180,8 @@ export class SubscriptionCancellationJob {
             if (recipient) {
               const emailSent = await emailService.sendTrialExpiredEmail(recipient, {
                 venueName: venueFeature.venue.name,
-                featureName: venueFeature.feature.name,
+                // B4 Task 2: un plan lleva el nombre del editor; cualquier otra función, su nombre de siempre.
+                featureName: await nombreDeLaFeatureParaAvisos(venueFeature.feature),
                 expiredAt: venueFeature.endDate || now,
                 locale: target.locale,
               })
@@ -349,7 +351,8 @@ export class SubscriptionCancellationJob {
             if (recipient) {
               const emailSent = await emailService.sendSubscriptionCanceledEmail(recipient, {
                 venueName: venueFeature.venue.name,
-                featureName: venueFeature.feature.name,
+                // B4 Task 2: un plan lleva el nombre del editor; cualquier otra función, su nombre de siempre.
+                featureName: await nombreDeLaFeatureParaAvisos(venueFeature.feature),
                 canceledAt: now,
                 suspendedAt: venueFeature.suspendedAt || now,
                 locale: target.locale,

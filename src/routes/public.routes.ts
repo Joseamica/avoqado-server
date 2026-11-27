@@ -5,6 +5,7 @@ import {
   publicOffers as publicHybridOffers,
   publicOffer as publicHybridOffer,
   publicBasicPlan,
+  publicPlanOffer,
 } from '../controllers/hybridBilling.controller'
 import express, { ErrorRequestHandler, Router } from 'express'
 import { soloConAltaConCodigo } from '../config/altaLandingConCodigo'
@@ -232,6 +233,16 @@ router.get('/basic-plan', offerReadLimit, publicBasicPlan)
 // /presentacion/precios del DASHBOARD: precios de lista vivos del SUPERADMIN (spec 2026-10-26-presentacion-de-precios).
 router.get('/price-list', offerReadLimit, getPriceList)
 router.get('/hybrid-offers/:slug', offerReadLimit, publicHybridOffer)
+// Planes editables (B4): la lectura pública de los planes pagados (correos, DASHBOARD, presentación). 🔴 Su propia instancia de
+// `rateLimit`: cada instancia lleva su cuenta, así que 600 lecturas de aquí nunca le dan 429 a `/price-list` ni a las ofertas.
+const planOfferReadLimit = rateLimit({
+  windowMs: 60_000,
+  max: 600,
+  keyGenerator: porVisitante,
+  standardHeaders: true,
+  legacyHeaders: false,
+})
+router.get('/plan-offer', planOfferReadLimit, publicPlanOffer)
 
 // CFDI stamping costs money — tight per-IP cap to prevent abuse
 const cfdiLimit = rateLimit({ windowMs: 60_000, max: 5, keyGenerator: porVisitante, standardHeaders: true, legacyHeaders: false })

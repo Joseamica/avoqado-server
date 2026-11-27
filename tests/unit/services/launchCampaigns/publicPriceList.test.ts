@@ -1,11 +1,7 @@
 jest.mock('@/services/launchCampaigns/hybridListPrice.service', () => ({ listPriceBoard: jest.fn() }))
 import prisma from '@/utils/prismaClient'
 import { listPriceBoard } from '@/services/launchCampaigns/hybridListPrice.service'
-import {
-  getPublicPriceList,
-  priceSelection,
-  type PublicPriceList,
-} from '@/services/launchCampaigns/publicPriceList.service'
+import { getPublicPriceList, priceSelection, type PublicPriceList } from '@/services/launchCampaigns/publicPriceList.service'
 
 const db = prisma as any
 const board = listPriceBoard as jest.Mock
@@ -26,7 +22,15 @@ const PRO = ['LOYALTY_PROGRAM', 'RESERVATIONS', 'ADVANCED_REPORTS', 'AGGREGATOR_
 const PREMIUM = [...PRO, 'INVENTORY_TRACKING', 'AUTO_REORDER', 'CFDI']
 
 function row(productKey: string, price: number | null, status: 'ACTIVE' | 'PAUSED' | null = 'ACTIVE') {
-  return { productKey, price, status, campaignId: 'camp_x', revision: 3, pendingPrice: null, activeGroups: [{ id: 'g', name: 'g', revision: 1 }] }
+  return {
+    productKey,
+    price,
+    status,
+    campaignId: 'camp_x',
+    revision: 3,
+    pendingPrice: null,
+    activeGroups: [{ id: 'g', name: 'g', revision: 1 }],
+  }
 }
 
 function setup(opts: { premiumStatus?: 'ACTIVE' | 'PAUSED'; proComposition?: string[] } = {}) {
@@ -125,6 +129,12 @@ describe('priceSelection', () => {
     const out = priceSelection(list, ['LOYALTY_PROGRAM', 'ADVANCED_REPORTS'])
     expect(out.best).toEqual({ kind: 'SUELTO', totalCents: 44800, extras: [] })
     expect(out.savingsCents).toBe(0)
+  })
+
+  it('B4 r3 #6: planNames sale de los plans de la MISMA lista (el de hoy sin versión; el de la lista con ella, y Premium de hoy si no está)', () => {
+    expect(priceSelection(list, ['LOYALTY_PROGRAM']).planNames).toEqual({ PRO: 'Pro', PREMIUM: 'Premium' })
+    const deLaV2 = { ...list, plans: [{ tier: 'PRO' as const, name: 'Plus', price: 926.84 }] }
+    expect(priceSelection(deLaV2, ['LOYALTY_PROGRAM']).planNames).toEqual({ PRO: 'Plus', PREMIUM: 'Premium' })
   })
 
   it('agrega solo el requisito pagado y lo suma', () => {
