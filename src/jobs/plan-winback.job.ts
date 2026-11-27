@@ -30,6 +30,7 @@ import emailService from '@/services/email.service'
 import { resolvePlanNotificationTarget } from '@/services/access/planNotification.service'
 import { billingPageUrl } from '@/utils/dashboardLinks'
 import { scheduleJob } from '../observability/jobContext'
+import { nombresDeLosPlanes } from '@/services/billing/nombresDeLosPlanes'
 
 export class PlanWinbackJob {
   private job: CronJob | null = null
@@ -110,6 +111,8 @@ export class PlanWinbackJob {
           locale: target.locale,
           venueName: target.venueName,
           reactivateUrl: billingPageUrl(vf.venue.slug, '?winback=1'),
+          // B4 Task 2: el nombre del plan es el del editor (sin versión, «Pro» como hoy).
+          planName: (await nombresDeLosPlanes()).PRO,
         })
 
         await prisma.venueFeature.update({

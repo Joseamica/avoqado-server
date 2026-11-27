@@ -64,6 +64,8 @@ export interface PriceSelection {
   options: PriceOption[]
   best: PriceOption
   savingsCents: number
+  /** B4 r3 #6: el nombre de cada plan en la MISMA lista que calculó los importes (el de la v2 si la hay). Sólo para escribirlo en el correo. */
+  planNames?: Record<'PRO' | 'PREMIUM', string>
 }
 
 /** The names of the SUPERADMIN «Precios» screen (avoqado-superadmin/src/shared/lib/feature-categories.ts), in its order. */
@@ -293,5 +295,9 @@ export function priceSelection(list: PublicPriceList, ids: string[], offerVersio
     options,
     best,
     savingsCents: options[0].totalCents - best.totalCents,
+    planNames: {
+      PRO: list.plans.find(p => p.tier === 'PRO')?.name ?? 'Pro',
+      PREMIUM: list.plans.find(p => p.tier === 'PREMIUM')?.name ?? 'Premium',
+    },
   }
 }

@@ -87,6 +87,29 @@ describe('Subscription lifecycle plan emails', () => {
       expect(JSON.stringify(spy.mock.calls.at(-1))).toContain('Tu primer cobro será de <strong>$1,158.84</strong>')
     })
 
+    it('B4: la prueba de una suscripción de 14 días dice «14 días» y el plan «Plus» (es y en); sin trialDays, 30', async () => {
+      const base = {
+        venueName: 'Bar',
+        payNow: false,
+        interval: 'monthly' as const,
+        firstChargeDate: new Date('2026-12-17T18:00:00Z'),
+        firstChargeAmountCents: 115884,
+        billingPortalUrl: 'u',
+      }
+      await emailService.sendPlanConfirmationEmail('a@x.com', { ...base, locale: 'es', planName: 'Plus', trialDays: 14 })
+      const es = spy.mock.calls.at(-1)![0]
+      expect(es.subject).toBe('Tu prueba de Avoqado Plus empezó')
+      expect(es.html).toContain('Tu prueba de 14 días está activa.')
+      expect(es.text).toContain('Tu prueba de 14 días está activa.')
+      expect(es.html).not.toContain('30 días')
+      await emailService.sendPlanConfirmationEmail('a@x.com', { ...base, locale: 'en', planName: 'Plus', trialDays: 14 })
+      const en = spy.mock.calls.at(-1)![0]
+      expect(en.html).toContain('Your 14-day trial is active.')
+      expect(en.text).toContain('Your 14-day trial is active.')
+      await emailService.sendPlanConfirmationEmail('a@x.com', { ...base, locale: 'es' })
+      expect(spy.mock.calls.at(-1)![0].html).toContain('Tu prueba de 30 días está activa.')
+    })
+
     it('🔴 D13: el monto lleva coma de miles aunque el Intl del servidor no la ponga (prod escribió «$1970.84»)', async () => {
       const original = Intl.NumberFormat
       ;(Intl as any).NumberFormat = jest.fn(() => ({ format: () => 'SIN-COMA' }))
@@ -266,6 +289,21 @@ describe('Subscription lifecycle plan emails', () => {
       expect(arg.html).toContain('Contratar Básico')
       expect(arg.html).toContain('Contratar Pro')
       expect(arg.headers?.['List-Unsubscribe']).toBe(`<${baja.url}>`)
+    })
+
+    it('B4: con el nombre del editor («Plus») el correo de fin de plan dice Plus; sin él, Pro como hoy', async () => {
+      await emailService.sendPlanEndedEmail('a@x.com', { locale: 'es', venueName: 'Bar', kind: 'TRIAL', billingUrl: 'u', planName: 'Plus' })
+      const es = spy.mock.calls.at(-1)![0]
+      expect(es.subject).toBe('Tu prueba de Avoqado Plus terminó')
+      expect(es.html).toContain('Tu prueba de Plus terminó y no se te cobró nada.')
+      expect(es.html).toContain('Puedes volver a Plus cuando quieras.')
+      expect(es.html).toContain('Contratar Plus')
+      expect(es.html).not.toContain('Pro')
+      await emailService.sendPlanEndedEmail('a@x.com', { locale: 'en', venueName: 'Bar', kind: 'PRO', billingUrl: 'u', planName: 'Plus' })
+      const en = spy.mock.calls.at(-1)![0]
+      expect(en.subject).toBe('Your Avoqado Plus plan has ended')
+      expect(en.html).toContain('Get Plus')
+      expect(en.html).not.toContain('Pro')
     })
 
     it('«Tu Pro terminó» sin Básico publicado: sólo «Contratar Pro»', async () => {

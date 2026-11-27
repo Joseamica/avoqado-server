@@ -412,7 +412,9 @@ describe('POST …/v2/activate-plan — la validación del alta sin tarjeta', ()
       }
       const ok = await pedirCon(deHoy)
       expect(ok.status).toBe(200)
-      expect(espia).toHaveBeenCalledTimes(1)
+      // 1 del servicio (PASO 3) + 1 del correo de confirmación + 1 del aviso al equipo (B4 Task 2: cada uno lee el nombre del plan
+      // una vez, y esa lectura nunca lanza). La validación de la ruta sigue sin consultarla.
+      expect(espia).toHaveBeenCalledTimes(3)
     } finally {
       espia.mockRestore()
     }

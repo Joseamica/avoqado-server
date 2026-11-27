@@ -63,6 +63,12 @@ jest.mock('@/services/email.service', () => ({
   __esModule: true,
   default: { sendPlanConfirmationEmail: jest.fn().mockResolvedValue(true) },
 }))
+// B4 Task 2: el nombre del plan que dicen el correo y el aviso. Por defecto el de hoy; una prueba lo cambia a «Plus».
+const mockNombres = { PRO: 'Pro', PREMIUM: 'Premium' }
+jest.mock('@/services/billing/nombresDeLosPlanes', () => ({
+  ...jest.requireActual('@/services/billing/nombresDeLosPlanes'),
+  nombresDeLosPlanes: jest.fn(async () => ({ FREE: 'Gratis', ...mockNombres })),
+}))
 jest.mock('@/services/resend.service', () => ({
   __esModule: true,
   sendPlanActivatedNotice: jest.fn().mockResolvedValue(true),
@@ -985,6 +991,40 @@ describe('camino ESTÁNDAR (sin campaña)', () => {
     expect(r.launchOffer).toBeUndefined()
     // Cero cupo consumido: no hay campaña.
     expect(prismaMock.launchCampaignRedemption.create).not.toHaveBeenCalled()
+  })
+
+  it('B4: con la v2 «Plus» y una prueba de 14 días, el correo y el aviso al equipo dicen Plus y el correo trae trialDays 14', async () => {
+    mockNombres.PRO = 'Plus'
+    try {
+      const { resolvePlanNotificationTarget } = jest.requireMock('@/services/access/planNotification.service')
+      resolvePlanNotificationTarget.mockResolvedValue({ email: 'dueno@x.com', locale: 'es', venueName: 'Bar' })
+      const { default: emailService } = jest.requireMock('@/services/email.service')
+      const inicio = Math.floor(new Date('2026-10-03T00:00:00Z').getTime() / 1000)
+      mockSubRetrieve.mockResolvedValue({
+        id: 'sub_1',
+        status: 'trialing',
+        trial_start: inicio,
+        trial_end: inicio + 14 * 86400,
+        current_period_end: inicio + 14 * 86400,
+        latest_invoice: { amount_due: 0 },
+      })
+      await activatePlan({ ...BASE, payNow: false, offer: { kind: 'STANDARD', expectedFirstChargeCents: 0 } })
+      for (let i = 0; i < 8; i++) await new Promise(r => setImmediate(r))
+      expect(emailService.sendPlanConfirmationEmail).toHaveBeenCalledWith(
+        'dueno@x.com',
+        expect.objectContaining({ planName: 'Plus', trialDays: 14 }),
+      )
+      expect(jest.requireMock('@/services/resend.service').sendPlanActivatedNotice).toHaveBeenCalledWith(
+        expect.objectContaining({ planName: 'Plus' }),
+      )
+    } finally {
+      mockNombres.PRO = 'Pro'
+      jest.requireMock('@/services/access/planNotification.service').resolvePlanNotificationTarget.mockResolvedValue({
+        email: null,
+        locale: 'es',
+        venueName: 'Bar',
+      })
+    }
   })
 
   it('con prueba gratis: trial 30, sin cupón y sin cobro hoy', async () => {

@@ -247,6 +247,8 @@ export interface PlanConfirmationEmailData {
    * el correo dice que la prueba termina sin cobro y lleva a «Tu plan», sin ofrecer el Básico. Sin él, el texto de hoy.
    */
   basicPlanNotOffered?: true
+  /** B4 Task 2: días de la prueba de la suscripción (de Stripe: `trial_end − trial_start`). Sin él, 30, como hoy. */
+  trialDays?: number
 }
 
 export interface PlanRenewalReminderEmailData {
@@ -296,6 +298,8 @@ export interface PlanEndedEmailData {
   venueName: string
   kind: 'TRIAL' | 'PRO'
   billingUrl: string
+  /** B4 Task 2: nombre del plan (el del editor). Sin él, «Pro» como hoy. */
+  planName?: string
   basicPlanPriceWithoutTaxCents?: number
   unsubscribe?: PlanNoticeUnsubscribe
   idempotencyKey?: string
@@ -382,6 +386,8 @@ export interface PlanWinbackEmailData {
   locale: 'es' | 'en'
   venueName: string
   reactivateUrl: string
+  /** B4 Task 2: nombre del plan (el del editor). Sin él, «Pro» como hoy. */
+  planName?: string
 }
 
 export interface PlanCancellationEmailData {
@@ -5057,6 +5063,8 @@ Servicios Tecnologicos Avo S.A. de C.V.`
     const mesesEs = introMonths === 1 ? 'el primer mes' : `los primeros ${introMonths} meses`
     const monthsEn = introMonths === 1 ? 'the first month' : `the first ${introMonths} months`
     const planName = data.planName ?? 'Pro'
+    // B4 Task 2: los días de la prueba son los de ESA suscripción (los que leyó Stripe), no «30» escrito a mano.
+    const diasDePrueba = data.trialDays ?? 30
     // Al terminar el onboarding éste es el único correo que llega: también dice dónde bajar la app
     // (founder, 16-oct). Va antes de la facturación, que es lo menos urgente.
     const idioma = data.locale === 'en' ? 'en' : 'es'
@@ -5172,11 +5180,11 @@ ${data.locale === 'en' ? 'Avoqado Team' : 'Equipo de Avoqado'}`
         bodyHtml = `
       <p style="font-size: 16px; margin: 0 0 16px 0; color: #000;">${greeting}</p>
       <p style="font-size: 16px; margin: 0 0 24px 0; color: #000;">
-        Your 30-day trial is active. Your first charge of <strong>${firstAmount}</strong> is on <strong>${dateFormatted}</strong>.
+        Your ${diasDePrueba}-day trial is active. Your first charge of <strong>${firstAmount}</strong> is on <strong>${dateFormatted}</strong>.
       </p>`
         text = `Hi,
 
-Your 30-day trial is active. Your first charge of ${firstAmount} is on ${dateFormatted}.
+Your ${diasDePrueba}-day trial is active. Your first charge of ${firstAmount} is on ${dateFormatted}.
 
 ${descargaTexto}
 
@@ -5188,11 +5196,11 @@ Avoqado Team`
         bodyHtml = `
       <p style="font-size: 16px; margin: 0 0 16px 0; color: #000;">${greeting}</p>
       <p style="font-size: 16px; margin: 0 0 24px 0; color: #000;">
-        Tu prueba de 30 días está activa. Tu primer cobro será de <strong>${firstAmount}</strong> el <strong>${dateFormatted}</strong>.
+        Tu prueba de ${diasDePrueba} días está activa. Tu primer cobro será de <strong>${firstAmount}</strong> el <strong>${dateFormatted}</strong>.
       </p>`
         text = `Hola,
 
-Tu prueba de 30 días está activa. Tu primer cobro será de ${firstAmount} el ${dateFormatted}.
+Tu prueba de ${diasDePrueba} días está activa. Tu primer cobro será de ${firstAmount} el ${dateFormatted}.
 
 ${descargaTexto}
 
@@ -5230,7 +5238,12 @@ Equipo de Avoqado`
       new Date(),
     )
     const nameOf = (id: string) => selection.chosen.find(f => f.id === id)?.name ?? id
-    const optionLabel = (kind: string) => (kind === 'SUELTO' ? 'Funciones sueltas' : `Plan ${kind === 'PRO' ? 'Pro' : 'Premium'}`)
+    // r3 #6: el nombre del plan sale de la MISMA lista que calculó el importe (`planNames`); sin ella, el de hoy.
+    const optionLabel = (kind: string) =>
+      kind === 'SUELTO'
+        ? 'Funciones sueltas'
+        : `Plan ${selection.planNames?.[kind as 'PRO' | 'PREMIUM'] ?? (kind === 'PRO' ? 'Pro' : 'Premium')}`
+    const optionLabelHtml = (kind: string) => esc(optionLabel(kind))
     const row = (left: string, right: string) =>
       `<tr><td style="padding: 8px 0; border-bottom: 1px solid #e0e0e0; font-size: 14px;">${left}</td><td style="padding: 8px 0; border-bottom: 1px solid #e0e0e0; font-size: 14px; text-align: right; white-space: nowrap;">${right}</td></tr>`
     const chosenRows = selection.chosen.map(f => {
@@ -5242,7 +5255,7 @@ Equipo de Avoqado`
     const quotedRows = selection.quoted.map(f => row(esc(f.name), 'Se cotiza aparte'))
     const optionRows = selection.options.map(o => {
       const extras = o.extras.length ? ` <span style="color: #666;">+ ${o.extras.map(id => esc(nameOf(id))).join(', ')}</span>` : ''
-      const label = `${optionLabel(o.kind)}${extras}`
+      const label = `${optionLabelHtml(o.kind)}${extras}`
       return row(
         o === selection.best ? `<strong>${label}</strong>` : label,
         o === selection.best ? `<strong>${money(o.totalCents)}</strong>` : money(o.totalCents),
@@ -5251,7 +5264,7 @@ Equipo de Avoqado`
     const advice =
       selection.best.kind === 'SUELTO'
         ? ''
-        : `<p style="font-size: 16px; margin: 24px 0 0 0;">💡 Le conviene el <strong>${optionLabel(selection.best.kind)}</strong>${
+        : `<p style="font-size: 16px; margin: 24px 0 0 0;">💡 Le conviene el <strong>${optionLabelHtml(selection.best.kind)}</strong>${
             selection.best.extras.length ? ` + ${selection.best.extras.map(id => esc(nameOf(id))).join(', ')}` : ''
           }: ${money(selection.best.totalCents)}/mes, ahorra ${money(selection.savingsCents)} al mes.</p>`
     // The button never points where the visitor says (Codex r1 #2: a public POST must not put a phishing link in an
@@ -5469,31 +5482,39 @@ ${en ? 'Avoqado Team' : 'Equipo de Avoqado'}`
    */
   async sendPlanEndedEmail(email: string, data: PlanEndedEmailData): Promise<boolean> {
     const en = data.locale === 'en'
+    // B4 Task 2: el nombre del plan que terminó sigue a la versión del editor; sin él, «Pro» como hoy.
+    const planName = data.planName ?? 'Pro'
     const precio = data.basicPlanPriceWithoutTaxCents != null ? precioSinIva(data.basicPlanPriceWithoutTaxCents) : null
     const prueba = data.kind === 'TRIAL'
     const subject = prueba
       ? en
-        ? 'Your Avoqado Pro trial has ended'
-        : 'Tu prueba de Avoqado Pro terminó'
+        ? `Your Avoqado ${planName} trial has ended`
+        : `Tu prueba de Avoqado ${planName} terminó`
       : en
-        ? 'Your Avoqado Pro plan has ended'
-        : 'Tu plan Avoqado Pro terminó'
+        ? `Your Avoqado ${planName} plan has ended`
+        : `Tu plan Avoqado ${planName} terminó`
     // «No se te cobró nada» sólo es verdad de la PRUEBA: a quien pagó su Pro no se le dice (revisión de Task 6, hallazgo 3).
-    const parrafos = en
-      ? [
-          `${prueba ? "Your Pro trial ended and we didn't charge you anything." : 'Your Pro plan ended.'} Your business keeps working on the Free plan and your data stays as it is.`,
-          precio ? `You can get Básico (${precio} + VAT) with one click, or go back to Pro.` : 'You can go back to Pro whenever you want.',
-        ]
-      : [
-          `${prueba ? 'Tu prueba de Pro terminó y no se te cobró nada.' : 'Tu plan Pro terminó.'} Tu negocio sigue funcionando con el plan Gratis y tus datos se quedan igual.`,
-          precio ? `Puedes contratar el Básico (${precio} + IVA) con un clic, o volver a Pro.` : 'Puedes volver a Pro cuando quieras.',
-        ]
+    // `parrafosDe(nombre)`: el mismo texto para el HTML (con el nombre escapado) y para el texto plano.
+    const parrafosDe = (p: string) =>
+      en
+        ? [
+            `${prueba ? `Your ${p} trial ended and we didn't charge you anything.` : `Your ${p} plan ended.`} Your business keeps working on the Free plan and your data stays as it is.`,
+            precio
+              ? `You can get Básico (${precio} + VAT) with one click, or go back to ${p}.`
+              : `You can go back to ${p} whenever you want.`,
+          ]
+        : [
+            `${prueba ? `Tu prueba de ${p} terminó y no se te cobró nada.` : `Tu plan ${p} terminó.`} Tu negocio sigue funcionando con el plan Gratis y tus datos se quedan igual.`,
+            precio ? `Puedes contratar el Básico (${precio} + IVA) con un clic, o volver a ${p}.` : `Puedes volver a ${p} cuando quieras.`,
+          ]
+    const parrafos = parrafosDe(planName)
+    const parrafosHtml = parrafosDe(escapeHtml(planName))
     const greeting = en ? 'Hi,' : 'Hola,'
     const contratarBasico = en ? 'Get Básico' : 'Contratar Básico'
-    const contratarPro = en ? 'Get Pro' : 'Contratar Pro'
+    const contratarPro = en ? `Get ${planName}` : `Contratar ${planName}`
     const bodyHtml = `
       <p style="font-size: 16px; margin: 0 0 16px 0; color: #000;">${greeting}</p>
-      ${parrafos.map(p => `<p style="font-size: 16px; margin: 0 0 16px 0; color: #000;">${p}</p>`).join('\n      ')}`
+      ${parrafosHtml.map(p => `<p style="font-size: 16px; margin: 0 0 16px 0; color: #000;">${p}</p>`).join('\n      ')}`
     const text = `${greeting}
 
 ${parrafos.join('\n\n')}
@@ -5678,8 +5699,12 @@ ${en ? 'Avoqado Team' : 'Equipo de Avoqado'}`
    * offering the first month free (WINBACK_FIRST_MONTH_FREE coupon).
    */
   async sendPlanWinbackEmail(email: string, data: PlanWinbackEmailData): Promise<boolean> {
+    // B4 Task 2: el nombre del plan es el del editor; sin él, «Pro» como hoy.
+    const planName = data.planName ?? 'Pro'
     const subject =
-      data.locale === 'en' ? 'Come back to Avoqado Pro — your first month is free' : 'Vuelve a Avoqado Pro — tu primer mes es gratis'
+      data.locale === 'en'
+        ? `Come back to Avoqado ${planName} — your first month is free`
+        : `Vuelve a Avoqado ${planName} — tu primer mes es gratis`
     const ctaLabel = data.locale === 'en' ? 'Reactivate — 1 month free' : 'Reactivar con 1 mes gratis'
 
     let bodyHtml: string
@@ -5688,11 +5713,11 @@ ${en ? 'Avoqado Team' : 'Equipo de Avoqado'}`
       bodyHtml = `
       <p style="font-size: 16px; margin: 0 0 16px 0; color: #000;">Hi,</p>
       <p style="font-size: 16px; margin: 0 0 24px 0; color: #000;">
-        We miss you. Reactivate Avoqado Pro and your first month is free. Your data is intact and access turns back on instantly.
+        We miss you. Reactivate Avoqado ${planName} and your first month is free. Your data is intact and access turns back on instantly.
       </p>`
       text = `Hi,
 
-We miss you. Reactivate Avoqado Pro and your first month is free. Your data is intact and access turns back on instantly.
+We miss you. Reactivate Avoqado ${planName} and your first month is free. Your data is intact and access turns back on instantly.
 
 Reactivate — 1 month free: ${data.reactivateUrl}
 
@@ -5701,11 +5726,11 @@ Avoqado Team`
       bodyHtml = `
       <p style="font-size: 16px; margin: 0 0 16px 0; color: #000;">Hola,</p>
       <p style="font-size: 16px; margin: 0 0 24px 0; color: #000;">
-        Te extrañamos. Reactiva Avoqado Pro y tu primer mes es gratis. Tus datos siguen intactos y el acceso se reactiva al instante.
+        Te extrañamos. Reactiva Avoqado ${planName} y tu primer mes es gratis. Tus datos siguen intactos y el acceso se reactiva al instante.
       </p>`
       text = `Hola,
 
-Te extrañamos. Reactiva Avoqado Pro y tu primer mes es gratis. Tus datos siguen intactos y el acceso se reactiva al instante.
+Te extrañamos. Reactiva Avoqado ${planName} y tu primer mes es gratis. Tus datos siguen intactos y el acceso se reactiva al instante.
 
 Reactivar con 1 mes gratis: ${data.reactivateUrl}
 

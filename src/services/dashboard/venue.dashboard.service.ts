@@ -2229,6 +2229,8 @@ async function checkoutConLaOferta(args: {
       venueName: venue.name,
       venueSlug: venue.slug,
       trialEnd,
+      // B4 Task 2: la descripción de la suscripción en Stripe lleva el nombre de la versión citada.
+      planDisplayName: vigente.definition[tier].displayName,
       extraMetadata: { planOfferVersion: String(n), planOfferPrecioDe: String(n) },
     })
   })
@@ -2300,6 +2302,8 @@ async function checkoutDeLaAceptacion(args: {
       venueName: venue.name,
       venueSlug: venue.slug,
       trialEnd,
+      // B4 Task 2: la descripción de la suscripción en Stripe lleva el nombre de la versión aceptada.
+      planDisplayName: version.definition[tier].displayName,
       extraMetadata: { planOfferVersion: String(n), planOfferPrecioDe: String(n), planAcceptanceId: aceptacion.id },
     })
   })

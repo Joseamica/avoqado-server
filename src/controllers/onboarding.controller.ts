@@ -48,6 +48,7 @@ import { standardPlanQuote } from '../services/access/planPricing.constants'
 import { MENSAJE_PLAN_NO_CONFIGURADO, versionQueCobra, type OfertaVigente } from '../services/billing/planOffer'
 import { ofertaCambio } from '../services/billing/opcionesDeCompra'
 import { basicoDeLaBienvenida } from '../services/billing/avisosDelBasico'
+import { nombresDeLosPlanes } from '../services/billing/nombresDeLosPlanes'
 import {
   avisoDeLaPruebaSinTarjeta,
   clienteDeStripeVivo,
@@ -1723,7 +1724,8 @@ export async function completeV2Onboarding(req: Request, res: Response, next: Ne
                 await emailService.sendPlanConfirmationEmail(target.email, {
                   locale: target.locale,
                   venueName: target.venueName,
-                  planName: paidTier === 'PREMIUM' ? 'Premium' : 'Pro',
+                  planName: (await nombresDeLosPlanes())[paidTier],
+                  ...(real.trialDays !== undefined ? { trialDays: real.trialDays } : {}),
                   payNow: planData.payNow,
                   interval: planData.interval,
                   firstChargeDate,

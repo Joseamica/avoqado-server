@@ -58,6 +58,7 @@ import {
   type PlanPagado,
 } from '../billing/planOffer'
 import { basicoDeLaBienvenida } from '../billing/avisosDelBasico'
+import { diasDeLaPrueba, nombresDeLosPlanes } from '../billing/nombresDeLosPlanes'
 import { DIA_MS, ofertaCambio, planFueraDeVenta, revisarComprobante } from '../billing/opcionesDeCompra'
 import { verificarCotizacion, type CotizacionFirmada } from '../billing/comprobanteDeCotizacion'
 import {
@@ -1756,6 +1757,8 @@ export async function activatePlan(
           // base, sin Stripe: otra versión publicada en medio es otro priceId); `LLAVE` → la llave, como B0. `LUGAR` y
           // `SUSCRIPCION` no se releen: es el precio que ese lugar ya consintió y Avoqado no archiva precios (§15). Un precio
           // de la versión que el PASO 7 guardó en el lugar ya es `LUGAR` (`origenDeLaRelectura`).
+          // B4 Task 2: el nombre del plan en la versión que cita esta compra, sólo para la descripción de la suscripción en Stripe.
+          let nombreDelPlanEnLaVersion: string | undefined
           if (conComprobante) {
             // Planes editables (B2): con comprobante se relee la vigente (sólo la base) y tiene que ser LA MISMA versión del
             // comprobante con el MISMO precio en esta ranura: otra versión publicada en medio (aunque sólo cambien los días) es
@@ -1774,6 +1777,7 @@ export async function activatePlan(
               })
               throw ofertaCambio('VERSION', releida?.number ?? 1)
             }
+            nombreDelPlanEnLaVersion = releida.definition[input.tier].displayName
           }
           const vigente = conComprobante
             ? null
@@ -1807,6 +1811,7 @@ export async function activatePlan(
             // B2 Task 6: la prueba sin tarjeta, sin método de pago y con el fin de su comprobante (metadata `sinTarjeta: 'true'`).
             ...(sinTarjetaPedido ? { sinTarjeta: true } : {}),
             tierCode,
+            ...(nombreDelPlanEnLaVersion ? { planDisplayName: nombreDelPlanEnLaVersion } : {}),
             interval: input.interval,
             priceId: verificado.priceId,
             // Con campaña SIEMPRE se paga el primer ciclo: la oferta no tiene prueba gratis.
@@ -2277,6 +2282,7 @@ export async function activatePlan(
       nextChargeAt,
       timeZone: venueRecord?.timezone,
       terminaSinCobro,
+      trialDays: diasDeLaPrueba(sub.trial_start, sub.trial_end),
       ...(montoDelPlanCents !== undefined ? { montoDelPlanCents } : {}),
     }).catch(error =>
       logger.warn('activate-plan: no se pudo enviar el correo de confirmación', {
@@ -2577,13 +2583,13 @@ function avisarActivacion(a: {
       : a.campaign
         ? (a.campaign.listPriceCentsSnapshot as number)
         : (a.montoDelPlanCents ?? STANDARD_PLAN_GROSS_CENTS[a.tier][a.interval])
-  void resolvePlanNotificationTarget(a.venueId)
-    .then(target =>
+  void Promise.all([resolvePlanNotificationTarget(a.venueId), nombresDeLosPlanes()])
+    .then(([target, nombres]) =>
       resendService.sendPlanActivatedNotice({
         venueId: a.venueId,
         venueName: a.venueName ?? target.venueName,
         ownerEmail: target.email,
-        planName: a.tier === 'PREMIUM' ? 'Premium' : 'Pro',
+        planName: nombres[a.tier],
         payNow: a.payNow,
         firstChargeCents: primerCobro,
         nextChargeAt: a.nextChargeAt,
@@ -2616,6 +2622,8 @@ async function enviarConfirmacion(args: {
   timeZone?: string
   /** Plan Básico: la suscripción REAL termina sin cobrar. El correo no anuncia el cobro de Pro. */
   terminaSinCobro?: boolean
+  /** B4 Task 2: los días de la prueba de ESA suscripción (de Stripe). Sin ellos, el correo dice 30, como hoy. */
+  trialDays?: number
   /**
    * Planes editables (B2, §10.5): con una versión del editor, el precio de la suscripción leída en el PASO 9. Con él nunca hay
    * introducción legacy (esa compra no lleva `INTRO_PRO_3M`). Sin él, las constantes de hoy.
@@ -2631,7 +2639,8 @@ async function enviarConfirmacion(args: {
   await emailService.sendPlanConfirmationEmail(target.email, {
     locale: input.language ?? target.locale,
     venueName: target.venueName,
-    planName: input.tier === 'PREMIUM' ? 'Premium' : 'Pro',
+    planName: (await nombresDeLosPlanes())[input.tier],
+    ...(args.trialDays !== undefined ? { trialDays: args.trialDays } : {}),
     payNow: campaign ? true : input.payNow,
     interval: input.interval,
     // 🔴 La fecha de Stripe, no «hoy + 30 días»: un alta del 18-oct decía 17-nov y Stripe cobra el 18-nov (y en el anual
@@ -2682,7 +2691,7 @@ async function enviarBienvenidaSinTarjeta(args: {
     locale: args.language ?? target.locale,
     venueName: target.venueName,
     endDate: args.trialEnd,
-    planName: args.tier === 'PREMIUM' ? 'Premium' : 'Pro',
+    planName: (await nombresDeLosPlanes())[args.tier],
     timeZone: args.timeZone,
     idempotencyKey: `plan-trial-no-card-start:${args.subscriptionId}`,
     billingUrl: billingPageUrl(args.venueSlug),

@@ -327,6 +327,12 @@ describe('B2 Task 4: activate-plan cobra un intento nuevo con su comprobante', (
     expect(mockPriceList).not.toHaveBeenCalled()
   })
 
+  it('B4: la descripción de la suscripción lleva el nombre de la versión citada («Plan Avoqado Plus - Negocio»)', async () => {
+    conVigente(definicionDePrueba({ ids: idsDeLaVersion('v2'), netos: { 'PRO:monthly': 79900 }, nombres: { PRO: 'Plus' } }))
+    await pedir({ quoteToken: comprobante() })
+    expect(mockSubCreate.mock.calls[0][0].description).toBe('Plan Avoqado Plus - Negocio')
+  })
+
   it('con 0 días en la versión: payNow true, sin trial_end, payment_behavior error_if_incomplete y autenticación con primerCobroEsperadoCents 92684', async () => {
     conVigente(v2({ PRO: { trialDays: 0 } }))
     mockSubCreate

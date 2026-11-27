@@ -24,6 +24,7 @@ import { BASIC_PLAN_DEFINITION_WHERE } from '@/services/launchCampaigns/basicPla
 import { TIPO_AVISOS_SIN_COBRO } from '@/services/notifications/avisosSinCobro'
 import { descuentoDelPlan } from './descuentoDelPlan'
 import { versionQueCobra } from './planOffer'
+import { nombresDeLosPlanes } from './nombresDeLosPlanes'
 import type { getPublicBasicPlan } from '@/services/launchCampaigns/hybridCampaign.service'
 import { isLastDiscountedPeriod, type SuscripcionConDescuento } from './ultimoPeriodoConDescuento'
 
@@ -300,6 +301,8 @@ export async function avisarPlanTerminado(sub: Stripe.Subscription): Promise<boo
           venueName: target.venueName,
           kind,
           billingUrl: billingPageUrl(vf.venue.slug),
+          // B4 Task 2: el nombre del plan que terminó es el del editor (sin versión, «Pro» como hoy).
+          planName: (await nombresDeLosPlanes()).PRO,
           ...(basico ? { basicPlanPriceWithoutTaxCents: precioSinIvaCents(basico) } : {}),
           unsubscribe: bajaDelAviso(target.staffId, vf.venueId, vf.venue.slug),
           idempotencyKey: `plan-termino:${sub.id}`,

@@ -31,6 +31,7 @@ import {
 import { montoDelSiguienteCobro, noHabraCobro } from './billing/siguienteCobro'
 import { avisoDeLaPruebaSinTarjeta, LECTURA_ACOTADA, type TarjetaVisible } from './billing/tarjetaQueCobraria'
 import { modalidadDePrueba } from './billing/modalidadDePrueba'
+import { nombreDeLaFeatureParaAvisos, nombresDeLosPlanes } from './billing/nombresDeLosPlanes'
 import { avisarPlanTerminado, ofertaDelBasico } from './billing/avisosDelBasico'
 import { PAID_PLAN_TIER_CODES } from './access/basePlan.service'
 import socketManager from '../communication/sockets'
@@ -952,7 +953,7 @@ export async function handleInvoicePaymentFailed(invoice: Stripe.Invoice) {
   await sendPaymentFailedNotifications(
     venueFeature.venueId,
     venueFeature.venue.name,
-    venueFeature.feature.name,
+    await nombreDeLaFeatureParaAvisos(venueFeature.feature),
     attemptCount,
     amountDue,
     currency,
@@ -1197,7 +1198,8 @@ async function sendPlanTrialEndingNotifications(
     // Sin OWNER/ADMIN no hay a quién avisar en la app, pero el correo del plan no depende de esta lista.
     if (staffMembers.length === 0) logger.warn('⚠️ No OWNER/ADMIN staff found for venue', { venueId })
 
-    const planName = venueFeature.feature.code === 'PLAN_PREMIUM' ? 'Premium' : 'Pro'
+    // B4 Task 2: el nombre del plan sigue a la versión del editor; sin ella, «Premium» / «Pro» como hoy.
+    const planName = (await nombresDeLosPlanes())[venueFeature.feature.code === 'PLAN_PREMIUM' ? 'PREMIUM' : 'PRO']
     // An empty or non-IANA zone makes toLocaleDateString throw, and `fecha` is computed before BOTH notices.
     const timeZone = zonaValida(venue.timezone)
     const billingPortalUrl = billingPageUrl(venue.slug)
@@ -1218,7 +1220,7 @@ async function sendPlanTrialEndingNotifications(
           title: `⏰ Prueba gratuita terminando pronto`,
           message,
           metadata: {
-            featureName: venueFeature.feature.name,
+            featureName: await nombreDeLaFeatureParaAvisos(venueFeature.feature),
             trialEndDate: trialEnd.toISOString(),
             billingPortalUrl,
           },

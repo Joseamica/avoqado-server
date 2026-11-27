@@ -46,6 +46,7 @@ import { getPlanState } from '@/services/dashboard/planState.service'
 import { MARGEN_OFERTA_MS } from '@/services/billing/cobroDiferido'
 import { modalidadDePrueba } from '@/services/billing/modalidadDePrueba'
 import { avisoDeLaPruebaSinTarjeta, LECTURA_ACOTADA } from '@/services/billing/tarjetaQueCobraria'
+import { nombresDeLosPlanes } from '@/services/billing/nombresDeLosPlanes'
 import {
   avisarPlanTerminado,
   avisoDelPlanApagado,
@@ -339,7 +340,7 @@ export class PlanRenewalReminderJob {
             locale: target.locale,
             venueName: target.venueName,
             endDate: fin,
-            planName: vf.feature?.code === 'PLAN_PREMIUM' ? 'Premium' : 'Pro',
+            planName: (await nombresDeLosPlanes())[vf.feature?.code === 'PLAN_PREMIUM' ? 'PREMIUM' : 'PRO'],
             timeZone: zonaValida(vf.venue?.timezone),
             // Same row and date → one email at the provider even if the stamp below is lost (its window is 24 h).
             idempotencyKey: `prueba-regalada:${vf.id}:${fin.toISOString()}`,
@@ -494,7 +495,7 @@ export class PlanRenewalReminderJob {
             locale: target.locale,
             venueName: target.venueName,
             endDate: new Date(periodEndMs),
-            planName: vf.feature?.code === 'PLAN_PREMIUM' ? 'Premium' : 'Pro',
+            planName: (await nombresDeLosPlanes())[vf.feature?.code === 'PLAN_PREMIUM' ? 'PREMIUM' : 'PRO'],
             timeZone: zonaValida(vf.venue?.timezone),
             billingUrl: billingPageUrl(vf.venue?.slug),
             ...(amountCents !== null ? { montoAlTerminarCents: amountCents } : {}),
@@ -517,7 +518,7 @@ export class PlanRenewalReminderJob {
             renewalDate: new Date(periodEndMs),
             amountCents,
             billingPortalUrl: billingPageUrl(vf.venue?.slug),
-            planName: vf.feature?.code === 'PLAN_PREMIUM' ? 'Premium' : 'Pro',
+            planName: (await nombresDeLosPlanes())[vf.feature?.code === 'PLAN_PREMIUM' ? 'PREMIUM' : 'PRO'],
             isTrialEnd: sub.status === 'trialing',
             // An empty or non-IANA zone ("GMT-6") makes toLocaleDateString throw: fall back to CDMX instead of never sending.
             timeZone: zonaValida(vf.venue?.timezone),

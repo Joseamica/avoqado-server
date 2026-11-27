@@ -1,3 +1,4 @@
+import { definicionDePrueba, idsDeLaVersion, punteroA } from '@tests/__helpers__/planOfferFixtures'
 import type Stripe from 'stripe'
 import { PlanRenewalReminderJob, TOPE_PRUEBAS, diasParaAvisar, tocaAvisoDePruebaSinCobro } from '@/jobs/plan-renewal-reminder.job'
 import { montoDelSiguienteCobro, noHabraCobro } from '@/services/billing/siguienteCobro'
@@ -251,6 +252,24 @@ describe('PlanRenewalReminderJob.runNow', () => {
       where: { id: 'vf1' },
       data: { renewalReminderSentAt: expect.any(Date) },
     })
+  })
+
+  it('B4: con la v2 «Plus» el recordatorio de renovación dice Plus (y Premium sigue Premium); sin versión, Pro', async () => {
+    const pointer = (mockPrisma as any).planOfferPointer.findUnique as jest.Mock
+    pointer.mockResolvedValue(punteroA('ver_v2', 2, definicionDePrueba({ ids: idsDeLaVersion('v2'), nombres: { PRO: 'Plus' } })))
+    mockPrisma.venueFeature.findMany.mockResolvedValue([row()])
+    mockRetrieve.mockResolvedValue(stripeSub(8))
+    await new PlanRenewalReminderJob().runNow()
+    expect(sendSpy.mock.calls[0][1]).toMatchObject({ planName: 'Plus' })
+    sendSpy.mockClear()
+    mockPrisma.venueFeature.findMany.mockResolvedValue([row({ feature: { code: 'PLAN_PREMIUM' } })])
+    await new PlanRenewalReminderJob().runNow()
+    expect(sendSpy.mock.calls[0][1]).toMatchObject({ planName: 'Premium' })
+    sendSpy.mockClear()
+    pointer.mockResolvedValue(null)
+    mockPrisma.venueFeature.findMany.mockResolvedValue([row()])
+    await new PlanRenewalReminderJob().runNow()
+    expect(sendSpy.mock.calls[0][1]).toMatchObject({ planName: 'Pro' })
   })
 
   it('trialing PLAN_PREMIUM 8 days out → isTrialEnd, planName Premium, preview amount (not the $0 trial invoice)', async () => {

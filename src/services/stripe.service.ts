@@ -34,6 +34,7 @@ import {
   registrarConflictoDeObligacion,
 } from './access/conflictosDeObligacion.service'
 import { descuentoDelPlan, type DescuentoDelPlan } from './billing/descuentoDelPlan'
+import { diasDeLaPrueba } from './billing/nombresDeLosPlanes'
 import {
   clasificarEstado,
   clasificarSuscripcion,
@@ -728,6 +729,11 @@ export interface CreatePlanSubscriptionInput {
    * metadata `sinTarjeta: 'true'`, la única marca que la reconoce (Ruling P6). El resto del cuerpo, el de hoy.
    */
   sinTarjeta?: boolean
+  /**
+   * B4 Task 2: el nombre del plan en la versión que cita esta compra (`displayName`). Sólo texto de la descripción de la suscripción
+   * («Plan Avoqado <nombre>»); ningún consumidor la compara. Sin él, «Pro» / «Premium» como hoy.
+   */
+  planDisplayName?: string
   tierCode: PlanTierCode
   /** Precio de Stripe ya resuelto (`resolverPrecioDelPlan`): se cobra con éste, sin volver a listar la llave. */
   priceId: string
@@ -1073,8 +1079,8 @@ export async function createPlanSubscription(input: CreatePlanSubscriptionInput)
         ? { discounts: [{ coupon: input.coupon }] }
         : {}),
     description: input.venueName
-      ? `Plan Avoqado ${planLabel(input.tierCode)} - ${input.venueName}`
-      : `Plan Avoqado ${planLabel(input.tierCode)}`,
+      ? `Plan Avoqado ${input.planDisplayName ?? planLabel(input.tierCode)} - ${input.venueName}`
+      : `Plan Avoqado ${input.planDisplayName ?? planLabel(input.tierCode)}`,
     metadata,
     // 🔴 Sólo se manda con trial 0: con prueba gratis no hay primer cobro que pueda fallar.
     ...(input.paymentBehavior && !input.trialEnd && input.trialPeriodDays === 0 ? { payment_behavior: input.paymentBehavior } : {}),
@@ -1241,6 +1247,8 @@ export interface CreatePlanCheckoutSessionInput {
   cancelUrl: string
   /** Base-plan tier to subscribe to. Defaults to PLAN_PRO for back-compat. */
   tierCode?: PlanTierCode
+  /** B4 Task 2: el nombre del plan de la versión que cita la compra (sólo la descripción). Sin él, «Pro» / «Premium». */
+  planDisplayName?: string
   venueName?: string
   venueSlug?: string
   /**
@@ -1269,7 +1277,8 @@ export async function createPlanCheckoutSession(input: CreatePlanCheckoutSession
   const feature = await prisma.feature.findFirst({ where: { code: tierCode, active: true } })
   if (!feature) throw new Error(`Feature ${tierCode} not found or inactive`)
 
-  const description = input.venueName ? `Plan Avoqado ${planLabel(tierCode)} - ${input.venueName}` : `Plan Avoqado ${planLabel(tierCode)}`
+  const nombreDelPlan = input.planDisplayName ?? planLabel(tierCode)
+  const description = input.venueName ? `Plan Avoqado ${nombreDelPlan} - ${input.venueName}` : `Plan Avoqado ${nombreDelPlan}`
 
   const session = await retry(
     () =>
@@ -1916,6 +1925,8 @@ export async function retrievePlanSubscription(
   tarjetaQueCobrara?: TarjetaVisible | null
   /** El fin de la prueba de Stripe (`trial_end`), o `null`. */
   trialEnd: Date | null
+  /** B4 Task 2: los días de ESTA prueba, `round((trial_end − trial_start) / 86400)`; ausente sin prueba o sin las dos fechas. */
+  trialDays?: number
   /**
    * Al terminar la prueba (sin prueba, desde ahora) Stripe NO cobrará: cancelación programada o cobranza en pausa. La misma regla de
    * los recordatorios (`noHabraCobro`).
@@ -1957,6 +1968,7 @@ export async function retrievePlanSubscription(
     sinTarjeta,
     ...(tarjeta ?? {}),
     trialEnd,
+    ...(diasDeLaPrueba(sub.trial_start, sub.trial_end) !== undefined ? { trialDays: diasDeLaPrueba(sub.trial_start, sub.trial_end) } : {}),
     noHabraCobro: noHabraCobro(sub, trialEnd ? trialEnd.getTime() : Date.now()),
   }
 }

@@ -190,6 +190,52 @@ describe('«Tu Pro terminó» / «Tu prueba terminó» (avisarPlanTerminado)', (
   })
 })
 
+describe('B4 · el correo de fin de plan lleva el nombre del editor', () => {
+  const FIN_S = Math.floor((Date.now() - 2 * DIA) / 1000)
+  const proTerminado = {
+    id: 'sub_t',
+    status: 'canceled',
+    ended_at: FIN_S,
+    cancel_at_period_end: true,
+    cancel_at: FIN_S,
+    trial_end: FIN_S - 60 * 86_400,
+    current_period_end: FIN_S,
+    items: { data: [{ current_period_end: FIN_S }] },
+    cancellation_details: { reason: 'cancellation_requested' },
+  } as unknown as Stripe.Subscription
+
+  beforeEach(() => {
+    prismaMock.venueFeature.findFirst.mockResolvedValue({
+      id: 'vf_t',
+      venueId: 'venue-1',
+      renewalReminderSentAt: null,
+      venue: { slug: 'negocio-de-prueba', status: 'ACTIVE' },
+    } as never)
+    prismaMock.activityLog.findFirst.mockResolvedValue(null as never)
+    prismaMock.activityLog.create.mockResolvedValue({} as never)
+    prismaMock.venueFeature.count.mockResolvedValue(0 as never)
+    prismaMock.hybridContract.count.mockResolvedValue(0 as never)
+  })
+
+  it('con la v2 «Plus»: el asunto y el texto dicen Plus, no Pro; sin versión, Pro como hoy', async () => {
+    prismaMock.planOfferPointer.findUnique.mockResolvedValue(
+      punteroA('cv2', 2, definicionDePrueba({ ids: idsDeLaVersion('v2'), nombres: { PRO: 'Plus' } })) as never,
+    )
+    await expect(avisarPlanTerminado(proTerminado)).resolves.toBe(true)
+    expect(planTermino.mock.calls[0][1]).toMatchObject({ planName: 'Plus' })
+    const salida = enviar.mock.calls[0][0] as { subject: string; text: string }
+    expect(salida.subject).toBe('Tu plan Avoqado Plus terminó')
+    expect(salida.text).toContain('Puedes volver a Plus cuando quieras.')
+    expect(salida.text).not.toContain('Pro')
+
+    planTermino.mockClear()
+    enviar.mockClear()
+    prismaMock.planOfferPointer.findUnique.mockResolvedValue(null as never)
+    await expect(avisarPlanTerminado(proTerminado)).resolves.toBe(true)
+    expect((enviar.mock.calls[0][0] as { subject: string }).subject).toBe('Tu plan Avoqado Pro terminó')
+  })
+})
+
 describe('basicoPublicado()', () => {
   it('🔴 b2-r9 #8: con una v1 dañada (versionQueCobra lanza) → basicoPublicado() devuelve lo de hoy, sin lanzar', async () => {
     conLaV1Danada()
