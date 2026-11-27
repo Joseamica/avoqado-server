@@ -524,7 +524,6 @@ describe('corregirSalidaOlvidada (el gerente, en Asistencia)', () => {
   beforeEach(() => {
     prismaMock.timeEntry.findFirst.mockReset()
     prismaMock.staffVenue.findFirst.mockResolvedValue(null)
-    prismaMock.staffVenue.findMany.mockResolvedValue([])
   })
 
   it('toma el candado de la persona (el mismo de la checada del celular) y no pisa una nota que llegó después de leer', async () => {
@@ -671,8 +670,7 @@ describe('corregirSalidaOlvidada (el gerente, en Asistencia)', () => {
 
   // Codex 26-nov sobre #659 (#1): la entrada de la TPV y del POS toma otro candado; la corrección también lo toma antes de
   // buscar la siguiente entrada, para no encimarse con una que se está guardando en ese instante.
-  it('toma el candado de la entrada de la TPV y del POS en cada sucursal de la persona antes de buscar la siguiente', async () => {
-    prismaMock.staffVenue.findMany.mockResolvedValueOnce([{ venueId: 'venue-2' }, { venueId: 'venue-1' }] as any)
+  it('toma el candado de la entrada de la TPV y del POS (de la persona, en cualquier sucursal) antes de buscar la siguiente', async () => {
     prismaMock.timeEntry.findFirst
       .mockResolvedValueOnce({ staffId: 'staff-1' } as any)
       .mockResolvedValueOnce(olvidada() as any)
@@ -688,11 +686,9 @@ describe('corregirSalidaOlvidada (el gerente, en Asistencia)', () => {
     })
 
     const calls = (prismaMock.$queryRaw as jest.Mock).mock.calls
-    const candados = calls.map((c: unknown[]) => String(c[1])).filter(k => k.startsWith('time-entry-clock-in:'))
-    // En orden de id (sin interbloqueos entre dos correcciones) y una vez cada una.
-    expect(candados).toEqual(['time-entry-clock-in:venue-1:staff-1', 'time-entry-clock-in:venue-2:staff-1'])
-    const ultimo = calls.findIndex((c: unknown[]) => String(c[1]) === 'time-entry-clock-in:venue-2:staff-1')
-    const orden = (prismaMock.$queryRaw as jest.Mock).mock.invocationCallOrder[ultimo]
+    const i = calls.findIndex((c: unknown[]) => String(c[1]) === 'time-entry-clock-in:staff-1')
+    expect(i).toBeGreaterThanOrEqual(0)
+    const orden = (prismaMock.$queryRaw as jest.Mock).mock.invocationCallOrder[i]
     expect(orden).toBeLessThan(prismaMock.timeEntry.findFirst.mock.invocationCallOrder[2])
   })
 

@@ -245,7 +245,7 @@ export async function clockIn(params: ClockInParams) {
       }),
     )
   }
-  const timeEntry = await conCandadoDeEntrada(venueId, staffId, async tx => {
+  const timeEntry = await conCandadoDeEntrada(staffId, async tx => {
     // Check if already clocked in
     const existingEntry = await tx.timeEntry.findFirst({
       where: {

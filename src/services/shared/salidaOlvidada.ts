@@ -518,13 +518,9 @@ export async function corregirSalidaOlvidada(params: {
     if (!dueno) throw new NotFoundError('No encontramos esa checada.', 'ENTRADA_NO_ENCONTRADA')
     // El mismo candado que la checada del celular (Codex r1 #7): una entrada que sube a la vez no se encima con esta salida.
     await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${`checada:${dueno.staffId}`}))::text`
-    // Y el de la entrada de la TPV y del POS en cada sucursal de la persona (Codex 26-nov sobre #659, #1, r1 y r2): una entrada
-    // que se guarda en ese instante ya se ve al buscar la siguiente, que mira todas sus sucursales. En orden de id.
-    // ponytail: tope de 50 sucursales por persona; más allá, una entrada en las demás no espera.
-    const sedes = await tx.staffVenue.findMany({ where: { staffId: dueno.staffId }, select: { venueId: true }, take: 50 })
-    for (const sede of [...new Set([venueId, ...sedes.map(x => x.venueId)])].sort()) {
-      await tomarCandadoDeEntrada(tx, sede, dueno.staffId)
-    }
+    // Y el de la entrada de la TPV y del POS, que es de la persona (Codex 26-nov sobre #659): una entrada que se guarda en ese
+    // instante, en cualquiera de sus sucursales, ya se ve al buscar la siguiente.
+    await tomarCandadoDeEntrada(tx, dueno.staffId)
     const e = await tx.timeEntry.findFirst({
       where: { id: timeEntryId, venueId },
       select: {

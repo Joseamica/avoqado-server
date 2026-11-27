@@ -136,7 +136,7 @@ describe('clockIn — un solo «¿ya tiene entrada? → crearla» a la vez por p
     expect(prismaMock.$transaction).toHaveBeenCalledTimes(1)
     const sql = (prismaMock.$queryRaw as jest.Mock).mock.calls[0]
     expect(sql[0].join('?')).toContain('pg_advisory_xact_lock')
-    expect(sql[1]).toBe('time-entry-clock-in:venue-1:staff-1')
+    expect(sql[1]).toBe('time-entry-clock-in:staff-1')
   })
 })
 
