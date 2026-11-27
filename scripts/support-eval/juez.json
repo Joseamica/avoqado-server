@@ -275,15 +275,15 @@
     "guideId": "general/overview",
     "intro": null,
     "steps": [
-      { "text": "El precio vigente de tu plan está en «Tu plan», en Facturación.", "quote": "El precio vigente de tu plan está en «Tu plan», en Facturación." },
+      { "text": "El plan Pro cuesta $999 al mes.", "quote": "**Pro**        | $999 / mes" },
       {
-        "text": "Aquí no se escribe el precio de ningún plan porque puede cambiar.",
-        "quote": "Aquí no se escribe el precio de ningún plan porque puede cambiar"
+        "text": "Es precio de referencia en pesos y sin IVA; confirma el vigente en la página de precios de Avoqado.",
+        "quote": "Precios de referencia en pesos mexicanos, sin IVA. Confirma siempre el precio vigente en la página de precios de Avoqado."
       }
     ],
     "supported": true,
     "alteracion": "none",
-    "nota": "La remisión a «Tu plan» y la aclaración de que la guía no escribe precios, tal como vienen."
+    "nota": "Precio y aclaración de IVA tal como vienen en la tabla de planes."
   },
   {
     "id": "j16",
@@ -291,15 +291,15 @@
     "guideId": "general/overview",
     "intro": null,
     "steps": [
-      { "text": "El plan Pro cuesta $899 al mes.", "quote": "El precio vigente de tu plan está en «Tu plan», en Facturación." },
+      { "text": "El plan Pro cuesta $899 al mes.", "quote": "**Pro**        | $999 / mes" },
       {
-        "text": "Aquí no se escribe el precio de ningún plan porque puede cambiar.",
-        "quote": "Aquí no se escribe el precio de ningún plan porque puede cambiar"
+        "text": "Es precio de referencia en pesos y sin IVA; confirma el vigente en la página de precios de Avoqado.",
+        "quote": "Precios de referencia en pesos mexicanos, sin IVA. Confirma siempre el precio vigente en la página de precios de Avoqado."
       }
     ],
     "supported": false,
     "alteracion": "importe",
-    "nota": "Inventa un importe ($899) que la cita (la remisión a «Tu plan») no trae."
+    "nota": "Importe cambiado: $899 contra los $999 de la cita."
   },
   {
     "id": "j17",
@@ -390,20 +390,20 @@
     "question": "¿Cuánto cuesta el plan Pro?",
     "guideId": "general/overview",
     "intro": null,
-    "steps": [{ "text": "El precio vigente de tu plan está en «Tu plan», en Facturación.", "quote": "El precio vigente de tu plan está en «Tu plan», en Facturación." }],
+    "steps": [{ "text": "El plan Pro cuesta $999 al mes + IVA.", "quote": "**Pro**        | $999 / mes" }],
     "supported": true,
     "alteracion": "none",
-    "nota": "Revisión final I1 (B4): copia la remisión a «Tu plan»; la guía ya no escribe precios."
+    "nota": "Revisión final I1: copia el precio de la tabla y le agrega «+ IVA»; la guía da los precios «sin IVA»."
   },
   {
     "id": "j22",
     "question": "¿Cuánto cuesta el plan Pro?",
     "guideId": "general/overview",
     "intro": null,
-    "steps": [{ "text": "El plan Pro cuesta $999 al mes, IVA incluido.", "quote": "El precio vigente de tu plan está en «Tu plan», en Facturación." }],
+    "steps": [{ "text": "El plan Pro cuesta $999 al mes, IVA incluido.", "quote": "**Pro**        | $999 / mes" }],
     "supported": false,
     "alteracion": "importe",
-    "nota": "Revisión final I1 (B4): inventa un precio con el IVA incluido; la cita sólo remite a «Tu plan»."
+    "nota": "Revisión final I1: dice que $999 ya incluye el IVA; la guía da $999 sin IVA (el total sería otro)."
   },
   {
     "id": "j23",
