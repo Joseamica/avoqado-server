@@ -283,23 +283,85 @@ export function limiteDeUnCierre(
   return guardado ?? limiteDelTurno(clockIn, timezone, cierre, null)
 }
 
-/**
- * Las anotaciones que deja el SERVIDOR cuando una salida tardía no se usó, renglón completo y con su hora: la app de campo
- * (`checadaDeCampo.service.ts`, «HH:mm del D-mes (zona)» o la hora ISO) y la PAX o el POS (`anotarSalidaQueNoSeUso`,
- * «HH:mm dd/MM»). Exactas para que una nota libre que las imite no saque texto de más (Codex D3 r3).
- */
-const SALIDA_NO_USADA = [
-  /^Salida del celular de las (?:\d{2}:\d{2} del \d{1,2}-\S+ \([\w/+-]+\)|\d{4}-\d{2}-\d{2}T[\d:.]+Z): llegó después (?:de que el gerente corrigió la salida y no se usó\.|del día del turno y no se usó\. Revisa la hora real\.)$/,
-  /^Salida de la (?:PAX|POS) a las \d{2}:\d{2} \d{2}\/\d{2}: llegó después del cierre de salida olvidada y no se usó\. Revisa la hora real\.$/,
-]
+/** Checadas por consulta, y asientos que se enseñan por checada: una tiene una salida del celular y, a lo más, unos reintentos de la PAX. */
+const CHECADAS_POR_CONSULTA = 200
+const ASIENTOS_POR_CHECADA = 10
+const QUIEN_MANDO: Record<string, string> = { PAX: 'de la PAX', POS: 'del POS' }
+
+/** Un asiento `TIME_ENTRY_LATE_CLOCKOUT_NOT_USED` en una línea, con la hora en la zona de la sucursal; null si no se puede leer. */
+function lineaDeSalidaNoUsada(
+  data: Prisma.JsonValue | null,
+  timezone: string | null | undefined,
+): { cuando: number; linea: string } | null {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return null
+  const d = data as Record<string, unknown>
+  // La app de campo (`checadaDeCampo.service.ts`) guarda `salidaDelCelular` y de dónde salió la hora (`origenHora`); la PAX o
+  // el POS (`anotarSalidaQueNoSeUso`), `origen` y `salidaRecibida`.
+  const delCelular = typeof d.salidaDelCelular === 'string'
+  const quien = delCelular ? 'del celular' : typeof d.origen === 'string' ? QUIEN_MANDO[d.origen] : undefined
+  const iso = delCelular ? d.salidaDelCelular : d.salidaRecibida
+  if (!quien || typeof iso !== 'string') return null
+  const hora = DateTime.fromISO(iso, { zone: zonaDe(timezone) })
+  if (!hora.isValid) return null
+  // Con el reloj del celular fuera de rango, la hora es la de llegada al SERVIDOR (`resolverHoraDelCelular`): se dice.
+  const verbo = delCelular && d.origenHora === 'SERVIDOR' ? 'recibida a las' : 'a las'
+  const dia = diaDeLaEntrada(hora.toJSDate(), timezone)
+  return {
+    cuando: hora.toMillis(),
+    linea: `Salida ${quien} ${verbo} ${hora.toFormat('HH:mm')} del ${dia}: llegó después del cierre y no se usó.`,
+  }
+}
 
 /**
- * Las salidas tardías que no se usaron (la hora real que mandó cada aparato), una por línea, o null. Sólo las anotaciones del
- * sistema: una nota libre de la persona no sale aunque diga lo mismo (Codex D3 r2 #3).
+ * Por checada «Salida olvidada», la hora real de las salidas tardías que no se usaron, una por línea y de la más temprana a la
+ * más tarde. Sale de los asientos que escribe el SERVIDOR (`TIME_ENTRY_LATE_CLOCKOUT_NOT_USED`), nunca de `notes`: una nota
+ * libre que copie el renglón del sistema no sale (hz:0433f0cb:D4), ni nada privado (Codex D3 r2 #3). Sólo asientos de la
+ * sucursal de la checada. Por lotes de checadas y con tope por checada: una con muchos reenvíos no tapa a las demás, y lo que
+ * pasa del tope se dice en una línea (Codex D4 r2 #2).
  */
-export function notaDeSalidaNoUsada(notes: string | null | undefined): string | null {
-  const lineas = (notes ?? '').split('\n').filter(l => SALIDA_NO_USADA.some(r => r.test(l)))
-  return lineas.length ? lineas.join('\n') : null
+export async function notasDeSalidasNoUsadas(
+  entradas: Array<{ id: string; venueId: string; timezone: string | null | undefined }>,
+  db: Pick<typeof defaultPrisma, '$queryRaw'> = defaultPrisma,
+): Promise<Map<string, string>> {
+  const porId = new Map(entradas.map(e => [e.id, e]))
+  const ids = [...porId.keys()]
+  const lineas = new Map<string, Array<{ cuando: number; linea: string }>>()
+  const total = new Map<string, number>()
+  for (let i = 0; i < ids.length; i += CHECADAS_POR_CONSULTA) {
+    const pares = ids.slice(i, i + CHECADAS_POR_CONSULTA).map(id => Prisma.sql`(${id}, ${porId.get(id)!.venueId})`)
+    // Sólo cuentan los asientos con la hora de salida legible, en el formato de `toISOString` que escriben los dos escritores (lo
+    // mismo que lee `lineaDeSalidaNoUsada`), y los 10 que se enseñan son los de la salida más temprana, no los registrados
+    // primero: la cola del celular puede subir después de varios avisos de la PAX (Codex D4 r3 #1 y #2).
+    const asientos = await db.$queryRaw<Array<{ entityId: string; data: Prisma.JsonValue; total: number }>>`
+      SELECT "entityId", "data", "total" FROM (
+        SELECT "entityId", "data",
+               ROW_NUMBER() OVER (PARTITION BY "entityId" ORDER BY "hora" COLLATE "C", "id") AS n,
+               COUNT(*) OVER (PARTITION BY "entityId")::int AS total
+        FROM (
+          SELECT "entityId", "id", "data",
+                 CASE WHEN jsonb_typeof("data" -> 'salidaDelCelular') = 'string' THEN "data" ->> 'salidaDelCelular'
+                      WHEN "data" ->> 'origen' IN ('PAX', 'POS') THEN "data" ->> 'salidaRecibida' END AS "hora"
+          FROM "ActivityLog"
+          WHERE "action" = 'TIME_ENTRY_LATE_CLOCKOUT_NOT_USED' AND "entity" = 'TimeEntry'
+            AND ("entityId", "venueId") IN (${Prisma.join(pares)})
+        ) h
+        WHERE "hora" ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]+)?Z$'
+      ) a
+      WHERE n <= ${ASIENTOS_POR_CHECADA}`
+    for (const a of asientos) {
+      const e = porId.get(a.entityId)!
+      total.set(e.id, a.total)
+      const l = lineaDeSalidaNoUsada(a.data, e.timezone)
+      if (l) lineas.set(e.id, [...(lineas.get(e.id) ?? []), l])
+    }
+  }
+  return new Map(
+    [...lineas].map(([id, ls]) => {
+      const mas = total.get(id)! - ASIENTOS_POR_CHECADA
+      const cola = mas === 1 ? ['Y 1 salida tardía más que no se usó.'] : mas > 1 ? [`Y ${mas} salidas tardías más que no se usaron.`] : []
+      return [id, [...ls.sort((a, b) => a.cuando - b.cuando).map(l => l.linea), ...cola].join('\n')]
+    }),
+  )
 }
 
 /** Cierra [e] como «salida olvidada» si ya pasó su límite y el negocio tiene la regla prendida. null = no tocó nada. */
@@ -680,6 +742,9 @@ export async function anotarSalidaQueNoSeUso(params: {
   if (!e) return null
   const hora = DateTime.fromJSDate(ahora, { zone: zonaDe(e.venue.timezone) }).toFormat('HH:mm dd/MM')
   const anotacion = `Salida de la ${params.origen} a las ${hora}: llegó después del cierre de salida olvidada y no se usó. Revisa la hora real.`
+  // Primero la nota con su evidencia y después el asiento con la hora real, que es lo que lee la bitácora de marca blanca
+  // (hz:0433f0cb:D4). Si el asiento fallara, la evidencia ya quedó: sólo falta esa línea y la marca «revisar» sigue (Codex D4
+  // r2 #1; founder delegó: «A»). La PAX y el POS no reenvían la misma salida, así que no se juntan en una transacción.
   const { count } = await defaultPrisma.timeEntry.updateMany({
     where: { id: e.id, salidaOlvidada: true, notes: e.notes },
     data: {
@@ -692,23 +757,26 @@ export async function anotarSalidaQueNoSeUso(params: {
         : {}),
     },
   })
+  if (count === 1) {
+    // Sin esperarlo, como en D3: un asiento lento no debe darle a la PAX un error con la evidencia ya guardada (Codex D4 r3 #3).
+    void logAction({
+      staffId: params.staffId,
+      venueId: params.venueId,
+      action: 'TIME_ENTRY_LATE_CLOCKOUT_NOT_USED',
+      entity: 'TimeEntry',
+      entityId: e.id,
+      data: {
+        origen: params.origen,
+        salidaRecibida: ahora.toISOString(),
+        cierreAutomatico: e.clockOutTime?.toISOString() ?? null,
+        gps: params.latitude != null && params.longitude != null ? { latitude: params.latitude, longitude: params.longitude } : null,
+      },
+    })
+  }
   const dia = diaDeLaEntrada(e.clockInTime, e.venue.timezone)
   // Codex r2 #5: sólo se dice «quedaron anotadas» si de verdad se escribió (otro escritor pudo cambiarla entre leer y escribir).
   if (count !== 1) {
     return `Tu entrada del ${dia} se cerró como salida olvidada y la revisa tu gerente. Tu salida no se pudo anotar: avísale. Si vas a trabajar, marca tu entrada.`
   }
-  void logAction({
-    staffId: params.staffId,
-    venueId: params.venueId,
-    action: 'TIME_ENTRY_LATE_CLOCKOUT_NOT_USED',
-    entity: 'TimeEntry',
-    entityId: e.id,
-    data: {
-      origen: params.origen,
-      salidaRecibida: ahora.toISOString(),
-      cierreAutomatico: e.clockOutTime?.toISOString() ?? null,
-      gps: params.latitude != null && params.longitude != null ? { latitude: params.latitude, longitude: params.longitude } : null,
-    },
-  })
   return `Tu entrada del ${dia} se cerró como salida olvidada y la revisa tu gerente (tu salida y tus fotos quedaron anotadas). Si vas a trabajar, marca tu entrada.`
 }

@@ -47,7 +47,7 @@ import { SQL_COBRO_ORIGINAL_DE_LA_DEVOLUCION, SQL_VENDEDOR_DEL_MOVIMIENTO } from
 import { computeTerminalMigration, migrationCommandWhere } from '../dashboard/terminals.superadmin.service'
 import { enmascararCorreo, enviarEnlaceDeRestablecimiento } from '../dashboard/enlaceDeRestablecimiento'
 import { sinLlaveReservada } from '@/lib/llaveReservadaSdkPropio'
-import { notaDeSalidaNoUsada } from '../shared/salidaOlvidada'
+import { notasDeSalidasNoUsadas } from '../shared/salidaOlvidada'
 
 // Types for organization dashboard
 export interface OrgCategoryBreakdown {
@@ -2323,9 +2323,9 @@ class OrganizationDashboardService {
             depositPhotoUrl: true,
             status: true,
             validationStatus: true,
-            // La bitácora de marca blanca marca y deja corregir la «Salida olvidada» (hz:0433f0cb:D3), con su nota.
+            // La bitácora de marca blanca marca y deja corregir la «Salida olvidada» (hz:0433f0cb:D3). Su nota sale de la bitácora
+            // del SERVIDOR, no de `notes` (D4).
             salidaOlvidada: true,
-            notes: true,
           },
         })
 
@@ -2378,6 +2378,11 @@ class OrganizationDashboardService {
     const salesData = porGrupo.flatMap(g => g.salesData)
     const cashSalesData = porGrupo.flatMap(g => g.cashSalesData)
     const cashByEntry = new Map(porGrupo.flatMap(g => [...g.cashByEntry]))
+    // La hora real de las salidas tardías de cada checada olvidada, de los asientos del SERVIDOR (hz:0433f0cb:D4).
+    const zonaDeSucursal = new Map(staffVenues.map(sv => [sv.venueId, sv.venue.timezone]))
+    const notasOlvidadas = await notasDeSalidasNoUsadas(
+      timeEntries.filter(te => te.salidaOlvidada).map(te => ({ id: te.id, venueId: te.venueId, timezone: zonaDeSucursal.get(te.venueId) })),
+    )
     const ventasPorLlegada = new Map(salesData.map(s => [`${s.processedById}:${s.venueId}`, Number(s.amountAtArrival) || 0]))
 
     // Key: staffId:venueId -> sales amount
@@ -2466,9 +2471,9 @@ class OrganizationDashboardService {
           cashSales: teCashSales,
           isLate,
           salidaOlvidada: te.salidaOlvidada,
-          // Sólo la hora real de una salida tardía del celular, no las notas completas: esta bitácora la lee también quien no
-          // maneja la asistencia (Codex D3 r1 #3).
-          notaSalidaOlvidada: te.salidaOlvidada ? notaDeSalidaNoUsada(te.notes) : null,
+          // Sólo la hora real de cada salida tardía, nunca las notas: esta bitácora la lee también quien no maneja la asistencia
+          // (Codex D3 r1 #3), y una nota libre puede copiar el texto del sistema (D4).
+          notaSalidaOlvidada: te.salidaOlvidada ? (notasOlvidadas.get(te.id) ?? null) : null,
         }
       })
 

@@ -410,9 +410,11 @@ describe('anotarSalidaQueNoSeUso (PAX y POS tras el cierre)', () => {
     venue: { timezone: MX },
   }
 
-  it('pega el voucher a la checada marcada y lo dice', async () => {
+  it('pega el voucher a la checada marcada y lo dice, sin esperar al asiento (Codex D4 r3 #3)', async () => {
     prismaMock.timeEntry.findFirst.mockResolvedValue(marcada as any)
     prismaMock.timeEntry.updateMany.mockResolvedValue({ count: 1 })
+    // Un asiento que nunca termina no detiene la respuesta: la PAX no debe ver un error con la evidencia ya guardada.
+    mockLogAction.mockReturnValueOnce(new Promise(() => {}))
 
     const t = await anotarSalidaQueNoSeUso({ staffId: 's', venueId: 'v', origen: 'PAX', depositPhotoUrl: 'https://x/voucher.jpg' })
 
@@ -420,6 +422,20 @@ describe('anotarSalidaQueNoSeUso (PAX y POS tras el cierre)', () => {
     expect(prismaMock.timeEntry.updateMany.mock.calls[0][0].data).toEqual(
       expect.objectContaining({ depositPhotoUrl: 'https://x/voucher.jpg' }),
     )
+    // D4 (Codex r2 #1, founder «A»): primero la nota con su evidencia y después el asiento con la hora real, que lee la
+    // bitácora de marca blanca; si el asiento fallara o tardara, la evidencia ya quedó guardada (`logAction` nunca lanza).
+    expect(mockLogAction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        staffId: 's',
+        venueId: 'v',
+        action: 'TIME_ENTRY_LATE_CLOCKOUT_NOT_USED',
+        entity: 'TimeEntry',
+        entityId: 'te-1',
+        data: expect.objectContaining({ origen: 'PAX', salidaRecibida: expect.any(String) }),
+      }),
+    )
+    expect(prismaMock.timeEntry.updateMany.mock.invocationCallOrder[0]).toBeLessThan(mockLogAction.mock.invocationCallOrder[0])
+    expect(prismaMock.$transaction).not.toHaveBeenCalled()
   })
 
   // FLAUTAS_C (revisión de apps viejas, 21-nov): la salida tardía de la PAX o del POS tiraba el GPS; en PlayTelecom el GPS
@@ -448,6 +464,7 @@ describe('anotarSalidaQueNoSeUso (PAX y POS tras el cierre)', () => {
 
     expect(t).not.toContain('quedaron anotadas')
     expect(t).toContain('no se pudo anotar')
+    expect(mockLogAction).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'TIME_ENTRY_LATE_CLOCKOUT_NOT_USED' })) // sin nota, sin asiento (D4)
   })
 })
 

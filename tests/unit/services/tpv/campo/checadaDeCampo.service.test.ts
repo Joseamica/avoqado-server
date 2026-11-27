@@ -130,6 +130,8 @@ function armarBase() {
         async () => (await tiempo(), { workSchedule: cuadrante ? { weekly: cuadrante } : null, workScheduleExceptions: [] }),
       ),
     },
+    // El asiento de la salida tardía va dentro de la transacción de la nota (hz:0433f0cb:D4).
+    activityLog: { create: jest.fn(async ({ data }) => ({ id: `al-${++consecutivo}`, ...data })) },
     timeEntryBreak: {
       updateMany: jest.fn(async ({ where, data }) => {
         await tiempo()
@@ -978,11 +980,28 @@ describe('salida olvidada (D3)', () => {
     expect(r).toMatchObject({ salidaNoUsada: true, totalHours: 18, hora: t('03:00', 4).toISOString() })
     expect(entradas[0]).toMatchObject({ clockOutTime: t('03:00', 4), totalHours: 18, autoClockOut: true, llaveSalida: LLAVE })
     expect(entradas[0].depositPhotoUrl).toContain('deposito.jpg')
-    expect(logAction).toHaveBeenCalledWith(expect.objectContaining({ action: 'TIME_ENTRY_LATE_CLOCKOUT_NOT_USED', entityId: e.id }))
+    // D4: el asiento con la hora real se escribe en la misma transacción que la nota, no después con `logAction`.
+    expect((prisma as any).activityLog.create).toHaveBeenCalledTimes(1)
+    expect((prisma as any).activityLog.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        staffId: STAFF,
+        venueId: V,
+        action: 'TIME_ENTRY_LATE_CLOCKOUT_NOT_USED',
+        entity: 'TimeEntry',
+        entityId: e.id,
+        data: expect.objectContaining({
+          salidaDelCelular: t('12:58', 9).toISOString(),
+          origenHora: 'RELOJ_DEL_CELULAR',
+          llaveSalida: LLAVE,
+        }),
+      }),
+    })
+    expect(logAction).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'TIME_ENTRY_LATE_CLOCKOUT_NOT_USED' }))
 
     // La misma salida repetida (reintento del celular) devuelve lo mismo, sin otra nota, y sigue diciendo que no se usó (Codex r1 #5).
     const otra = await registrarSalidaDeCampo(q, { llave: LLAVE, timeEntryId: e.id, ocurrioAt: t('12:58', 9).toISOString() }, t('13:30', 9))
     expect(otra).toMatchObject({ repetida: true, salidaNoUsada: true })
+    expect((prisma as any).activityLog.create).toHaveBeenCalledTimes(1) // ni otro asiento
   })
 
   it('26-nov r1 #1: el límite del cierre queda fijo; mover el corte después no deja que una salida tardía lo estire', async () => {
