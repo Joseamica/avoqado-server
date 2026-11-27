@@ -283,6 +283,25 @@ export function limiteDeUnCierre(
   return guardado ?? limiteDelTurno(clockIn, timezone, cierre, null)
 }
 
+/**
+ * Las anotaciones que deja el SERVIDOR cuando una salida tardía no se usó, renglón completo y con su hora: la app de campo
+ * (`checadaDeCampo.service.ts`, «HH:mm del D-mes (zona)» o la hora ISO) y la PAX o el POS (`anotarSalidaQueNoSeUso`,
+ * «HH:mm dd/MM»). Exactas para que una nota libre que las imite no saque texto de más (Codex D3 r3).
+ */
+const SALIDA_NO_USADA = [
+  /^Salida del celular de las (?:\d{2}:\d{2} del \d{1,2}-\S+ \([\w/+-]+\)|\d{4}-\d{2}-\d{2}T[\d:.]+Z): llegó después (?:de que el gerente corrigió la salida y no se usó\.|del día del turno y no se usó\. Revisa la hora real\.)$/,
+  /^Salida de la (?:PAX|POS) a las \d{2}:\d{2} \d{2}\/\d{2}: llegó después del cierre de salida olvidada y no se usó\. Revisa la hora real\.$/,
+]
+
+/**
+ * Las salidas tardías que no se usaron (la hora real que mandó cada aparato), una por línea, o null. Sólo las anotaciones del
+ * sistema: una nota libre de la persona no sale aunque diga lo mismo (Codex D3 r2 #3).
+ */
+export function notaDeSalidaNoUsada(notes: string | null | undefined): string | null {
+  const lineas = (notes ?? '').split('\n').filter(l => SALIDA_NO_USADA.some(r => r.test(l)))
+  return lineas.length ? lineas.join('\n') : null
+}
+
 /** Cierra [e] como «salida olvidada» si ya pasó su límite y el negocio tiene la regla prendida. null = no tocó nada. */
 async function cerrarSiOlvidada(db: Db, e: EntradaAbierta, ahora: Date, disparador: Disparador): Promise<SalidaOlvidadaCerrada | null> {
   if (e.venue.settings?.salidaOlvidadaEnabled === false) return null
