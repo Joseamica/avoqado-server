@@ -1544,4 +1544,147 @@ describe('reservation availability controller boundaries', () => {
     await publicController.getVenueInfo({ params: { venueSlug: 'venue' } } as any, res2, jest.fn())
     expect(res2.json.mock.calls[0][0].cancellationPolicy).toBeNull()
   })
+  // ---- Reserva de clases en línea: los 409 traen código y el GET de una reserva de clase trae su ficha ----
+  describe('reserva de clase: 409 con código y GET con ficha', () => {
+    const preparaPost = (opts: { enrolled: bigint; layoutConfig?: unknown; taken?: { spotIds: string[] }[] }) => {
+      prismaMock.slotHold.findFirst.mockResolvedValue({ id: 'class-hold', startsAt, endsAt } as any)
+      prismaMock.$transaction.mockImplementation(async (callback: any) => callback(prismaMock))
+      prismaMock.$queryRaw
+        .mockResolvedValueOnce([
+          { id: 'class-session-1', productId: 'class-product', startsAt, endsAt, duration: 60, capacity: 10, status: 'SCHEDULED' },
+        ] as any)
+        .mockResolvedValueOnce([{ total: opts.enrolled }] as any)
+      prismaMock.externalBusyBlock.findFirst.mockResolvedValue(null)
+      prismaMock.product.findFirst.mockResolvedValue({
+        type: 'CLASS',
+        active: true,
+        layoutConfig: opts.layoutConfig ?? null,
+        requireCreditForBooking: false,
+        price: new Prisma.Decimal(0),
+        upfrontPolicy: 'at_venue',
+        name: 'Lagree',
+      } as any)
+      prismaMock.reservation.findMany.mockResolvedValue((opts.taken ?? []) as any)
+      jest.spyOn(ecommerceCapability, 'resolveChargeableStripeMerchant').mockResolvedValue(null)
+    }
+    const reqPost = (extra: Record<string, unknown> = {}): any => ({
+      params: { venueSlug: 'venue' },
+      headers: {},
+      body: {
+        startsAt,
+        endsAt,
+        duration: 60,
+        partySize: 1,
+        productId: 'class-product',
+        classSessionId: 'class-session-1',
+        holdId: 'class-hold',
+        ...extra,
+      },
+    })
+
+    it('clase llena ⇒ 409 CLASS_FULL con details.available y el mismo mensaje de siempre', async () => {
+      preparaPost({ enrolled: 10n })
+      const res = responseMock()
+      const next = jest.fn()
+
+      await publicController.createReservation(reqPost(), res, next)
+
+      expect(res.json).not.toHaveBeenCalled()
+      expect(next.mock.calls[0][0]).toMatchObject({
+        statusCode: 409,
+        code: 'CLASS_FULL',
+        details: { available: 0 },
+        message: 'No hay suficientes lugares disponibles. Disponibles: 0, solicitados: 1',
+      })
+      expect(prismaMock.reservation.create).not.toHaveBeenCalled()
+    })
+
+    it('lugar tomado ⇒ 409 SPOTS_TAKEN con details.takenSpotIds', async () => {
+      preparaPost({
+        enrolled: 1n,
+        layoutConfig: {
+          spots: [
+            { id: 'A1', enabled: true },
+            { id: 'A2', enabled: true },
+          ],
+        },
+        taken: [{ spotIds: ['A1', 'B9'] }],
+      })
+      const res = responseMock()
+      const next = jest.fn()
+
+      await publicController.createReservation(reqPost({ spotIds: ['A1', 'A2'] }), res, next)
+
+      expect(res.json).not.toHaveBeenCalled()
+      expect(next.mock.calls[0][0]).toMatchObject({
+        statusCode: 409,
+        code: 'SPOTS_TAKEN',
+        details: { takenSpotIds: ['A1'] },
+        message: 'Los lugares A1 ya estan reservados',
+      })
+    })
+
+    const baseReservation = {
+      id: 'res-1',
+      venueId: 'venue-1',
+      confirmationCode: 'RES-1',
+      status: 'CONFIRMED',
+      startsAt: new Date(Date.now() + 48 * 60 * 60_000),
+      endsAt: new Date(Date.now() + 49 * 60 * 60_000),
+      duration: 60,
+      partySize: 1,
+      guestName: 'Ana',
+      venue: { name: 'Venue', slug: 'venue', timezone: 'UTC' },
+      product: { id: 'class-product', name: 'Lagree', price: null },
+      assignedStaff: null,
+      table: null,
+      productIds: [],
+      productId: 'class-product',
+    }
+    const preparaGet = (reservation: any) => {
+      jest.spyOn(reservationService, 'getReservationByCancelSecret').mockResolvedValue(reservation)
+      prismaMock.creditTransaction.findMany.mockResolvedValue([])
+      prismaMock.reservationModifier.findMany.mockResolvedValue([])
+      prismaMock.product.findMany.mockResolvedValue([])
+    }
+
+    it('GET de una reserva de clase trae className, instructorName y los spotIds guardados (aunque el mapa haya cambiado)', async () => {
+      preparaGet({ ...baseReservation, classSessionId: 'class-session-1', spotIds: ['A1', 'Z7'] })
+      prismaMock.classSession.findUnique.mockResolvedValue({ assignedStaff: { firstName: 'Fer', lastName: 'Gómez' } } as any)
+      // El mapa vigente del producto ya no tiene A1 ni Z7: no se vuelve a consultar.
+      prismaMock.product.findFirst.mockResolvedValue({ layoutConfig: { spots: [{ id: 'B1', enabled: true }] } } as any)
+      const req: any = { params: { venueSlug: 'venue', cancelSecret: 'secret' } }
+      const res = responseMock()
+      const next = jest.fn()
+
+      await publicController.getReservation(req, res, next)
+
+      expect(next).not.toHaveBeenCalled()
+      expect(res.json).toHaveBeenCalledWith(
+        expect.objectContaining({ className: 'Lagree', instructorName: 'Fer Gómez', spotIds: ['A1', 'Z7'] }),
+      )
+    })
+
+    it('GET de una clase sin coach ⇒ instructorName null', async () => {
+      preparaGet({ ...baseReservation, classSessionId: 'class-session-1', spotIds: [] })
+      prismaMock.classSession.findUnique.mockResolvedValue({ assignedStaff: null } as any)
+      const res = responseMock()
+
+      await publicController.getReservation({ params: { venueSlug: 'venue', cancelSecret: 'secret' } } as any, res, jest.fn())
+
+      expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ className: 'Lagree', instructorName: null, spotIds: [] }))
+    })
+
+    it('GET de una cita NO trae esos campos', async () => {
+      preparaGet({ ...baseReservation, classSessionId: null, spotIds: [] })
+      const res = responseMock()
+
+      await publicController.getReservation({ params: { venueSlug: 'venue', cancelSecret: 'secret' } } as any, res, jest.fn())
+
+      const body = res.json.mock.calls[0][0]
+      expect(body).not.toHaveProperty('className')
+      expect(body).not.toHaveProperty('instructorName')
+      expect(body).not.toHaveProperty('spotIds')
+    })
+  })
 })

@@ -41,6 +41,7 @@ import {
   redeemCreditsForReservation,
   requireSessionCustomerForCredits,
   titularDelPase,
+  type SaldoDespuesDelCanje,
 } from '@/services/reservation/creditRedemption.service'
 import { CREDIT_RESERVATION_NOT_ALIVE } from '@/services/credits/ilimitado'
 import { porcentajeDeDevolucion } from '@/services/dashboard/creditPack.public.service'
@@ -1106,6 +1107,8 @@ export async function createReservation(req: Request, res: Response, next: NextF
         depositAmount: reservation.upfrontAmount ?? null,
         creditRedeemed: reservation.creditRedeemed || false,
         creditsUsed: reservation.creditsUsed || 0,
+        // Sólo con canje: el saldo del paquete DESPUÉS de canjear (leído en la misma transacción).
+        ...(reservation.creditBalance ? { creditBalance: reservation.creditBalance } : {}),
         checkoutUrl,
         // owesAtVenue: true means policy was 'required' but the venue has no Stripe
         // configured. The reservation is CONFIRMED, but the customer is expected
@@ -1531,6 +1534,15 @@ export async function getReservation(req: Request, res: Response, next: NextFunc
       .filter((p): p is NonNullable<typeof p> => Boolean(p))
       .map(p => ({ id: p.id, name: p.name, price: p.price != null ? Number(p.price) : null, duration: p.duration ?? null }))
 
+    // Clase: la coach es la de la SESIÓN (la reserva de clase no lleva `assignedStaff`).
+    const classSessionId = (reservation as any).classSessionId as string | null | undefined
+    const claseConCoach = classSessionId
+      ? await prisma.classSession.findUnique({
+          where: { id: classSessionId },
+          select: { assignedStaff: { select: { firstName: true, lastName: true } } },
+        })
+      : null
+
     res.json({
       confirmationCode: reservation.confirmationCode,
       status: reservation.status,
@@ -1603,10 +1615,27 @@ export async function getReservation(req: Request, res: Response, next: NextFunc
         quantity: m.quantity,
         price: Number(m.price),
       })),
+      // Reserva de clase: lo que ve la pantalla «Listo» al volver de Stripe. Los lugares son los GUARDADOS (lo que eligió
+      // la clienta), nunca re-buscados en el mapa vigente. Una cita no trae estos campos.
+      ...(classSessionId
+        ? {
+            className: reservation.product?.name ?? 'Clase',
+            instructorName: instructorName(claseConCoach?.assignedStaff),
+            spotIds: ((reservation as any).spotIds as string[] | undefined) ?? [],
+          }
+        : {}),
     })
   } catch (error) {
     next(error)
   }
+}
+
+function instructorName(staff: { firstName: string | null; lastName: string | null } | null | undefined): string | null {
+  const nombre = [staff?.firstName, staff?.lastName]
+    .map(p => p?.trim())
+    .filter(Boolean)
+    .join(' ')
+  return nombre || null
 }
 
 function isWithinWindow(startsAt: Date, minHoursBefore: number | null): boolean {
@@ -2043,8 +2072,11 @@ async function createClassReservation(
       const effectiveCapacity = Math.floor((session.capacity * onlinePercent) / 100)
 
       if (enrolled + requestedPartySize > effectiveCapacity) {
+        const available = Math.max(0, effectiveCapacity - enrolled)
         throw new ConflictError(
           `No hay suficientes lugares disponibles. Disponibles: ${effectiveCapacity - enrolled}, solicitados: ${requestedPartySize}`,
+          'CLASS_FULL',
+          { available },
         )
       }
 
@@ -2070,7 +2102,9 @@ async function createClassReservation(
         })
         if (takenReservations.length > 0) {
           const takenIds = takenReservations.flatMap(r => r.spotIds).filter(id => requestedSpotIds.includes(id))
-          throw new ConflictError(`Los lugares ${takenIds.join(', ')} ya estan reservados`)
+          throw new ConflictError(`Los lugares ${takenIds.join(', ')} ya estan reservados`, 'SPOTS_TAKEN', {
+            takenSpotIds: [...new Set(takenIds)],
+          })
         }
       }
 
@@ -2145,9 +2179,10 @@ async function createClassReservation(
       // Charges N credits where N = requestedPartySize (one credit per seat).
       let creditRedeemed = false
       let creditsUsed = 0
+      let creditBalance: SaldoDespuesDelCanje | undefined
       if (body.creditItemBalanceId) {
         // Fase 0.B: los créditos son SÓLO del customer de la sesión; sin sesión → 401. Mismo canje que la cita (D679).
-        await redeemCreditsForReservation(tx, {
+        const canje = await redeemCreditsForReservation(tx, {
           venueId,
           reservationId: reservation.id,
           confirmationCode: reservation.confirmationCode,
@@ -2157,6 +2192,7 @@ async function createClassReservation(
           expectedProductIds: [session.productId],
           contexto: 'CLASE',
         })
+        creditBalance = canje.balances?.[0]
 
         creditRedeemed = true
         creditsUsed = requestedPartySize
@@ -2195,7 +2231,7 @@ async function createClassReservation(
       }
       await enqueuePassSessionSync(tx, venueId, body.classSessionId)
 
-      return { ...reservation, creditRedeemed, creditsUsed, requiresUpfrontCash, owesAtVenue, upfrontAmount }
+      return { ...reservation, creditRedeemed, creditsUsed, creditBalance, requiresUpfrontCash, owesAtVenue, upfrontAmount }
     },
     { reintentarInterbloqueo: true, etiqueta: 'createClassReservation' },
   )
