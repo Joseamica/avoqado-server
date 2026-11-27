@@ -64,6 +64,7 @@ jest.mock('../../../src/utils/prismaClient', () => ({
       findUnique: jest.fn(() => Promise.resolve(state.existingStaff)),
       findUniqueOrThrow: jest.fn(() => Promise.resolve(state.staffAfterCreate)),
       update: jest.fn().mockResolvedValue({}),
+      updateMany: jest.fn().mockResolvedValue({ count: 1 }),
     },
     invitation: {
       findFirst: jest.fn(() => Promise.resolve(state.invitation)),

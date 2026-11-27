@@ -54,6 +54,7 @@ jest.mock('../../../src/utils/prismaClient', () => ({
       findUnique: jest.fn(() => Promise.resolve(state.existingStaff)),
       findUniqueOrThrow: jest.fn(() => Promise.resolve(state.staffAfterCreate)),
       update: jest.fn().mockResolvedValue({}),
+      updateMany: jest.fn().mockResolvedValue({ count: 1 }),
     },
     invitation: {
       findFirst: jest.fn(() => Promise.resolve(state.invitation)),
@@ -197,7 +198,7 @@ describe('loginWithGoogle — cuenta existente sin verificar', () => {
   it('🔴 al verificarla con Google, la contraseña que puso quien la creó deja de servir', async () => {
     state.existingStaff = { ...duenoNuevo(), emailVerified: false, password: 'hash-del-intruso', googleId: null }
     await loginWithGoogle('code-1', true)
-    expect(prismaMock.staff.update).toHaveBeenCalledWith(
+    expect(prismaMock.staff.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({ data: expect.objectContaining({ emailVerified: true, password: null }) }),
     )
     expect(logAction).toHaveBeenCalledWith(
@@ -209,13 +210,13 @@ describe('loginWithGoogle — cuenta existente sin verificar', () => {
   it('una cuenta YA verificada conserva su contraseña (regresión: no se borra a nadie)', async () => {
     state.existingStaff = { ...duenoNuevo(), emailVerified: true, password: 'hash-propio', googleId: null }
     await loginWithGoogle('code-1', true)
-    const data = prismaMock.staff.update.mock.calls.map((c: any[]) => c[0].data)
+    const data = prismaMock.staff.updateMany.mock.calls.map((c: any[]) => c[0].data)
     expect(data.some((d: any) => 'password' in d)).toBe(false)
   })
 
   it('🔴 una cuenta DESACTIVADA se rechaza antes de tocar nada (ni vínculo con Google ni verificación)', async () => {
     state.existingStaff = { ...duenoNuevo(), active: false, emailVerified: false, password: 'x', googleId: null }
     await expect(loginWithGoogle('code-1', true)).rejects.toThrow()
-    expect(prismaMock.staff.update).not.toHaveBeenCalled()
+    expect(prismaMock.staff.updateMany).not.toHaveBeenCalled()
   })
 })

@@ -12,6 +12,7 @@ import logger from '@/config/logger'
 import { getPrimaryOrganizationId } from '../staffOrganization.service'
 import { assertCanAddSeatsBulk, lockSeatCap } from '../access/seatCap.service'
 import { logAction } from './activity-log.service'
+import { ligarCuentaConGoogle } from '@/services/auth/google/ligarCuentaConGoogle'
 import { createSession } from '@/services/auth/session.service'
 import { createSupportPersonalLogin } from '@/services/support/personalLogin.service'
 import { crearNegocioNuevo, resolverAtribucionDelAlta, type AtribucionDelAlta } from '../onboarding/nuevoNegocio'
@@ -486,49 +487,8 @@ export async function loginWithGoogle(
       throw new AuthenticationError('Account is inactive')
     }
 
-    // Update existing staff with Google info if not already set
-    const updateData: any = {
-      lastLoginAt: new Date(),
-    }
-
-    if (!staff.googleId) {
-      updateData.googleId = googleUser.id
-    }
-    if (!staff.photoUrl && googleUser.picture) {
-      updateData.photoUrl = googleUser.picture
-    }
-    if (!staff.emailVerified) {
-      updateData.emailVerified = true
-      // 🔴 Google demuestra que el correo es de ESTA persona; una contraseña puesta en una cuenta
-      // que nadie verificó no demuestra nada. Sin esto: alguien registra tu correo con SU
-      // contraseña, tú entras con Google, la cuenta queda verificada y su contraseña sigue
-      // sirviendo (el login con contraseña sólo exige correo verificado). Si era tuya, entras con
-      // Google o la restableces.
-      if (staff.password) updateData.password = null
-    }
-
-    if (Object.keys(updateData).length > 1) {
-      // More than just lastLoginAt
-      await prisma.staff.update({
-        where: { id: staff.id },
-        data: updateData,
-      })
-    }
-    if (updateData.password === null) {
-      // Cambio de ACCESO: queda en la bitácora (quién, cuándo y por qué ya no sirve su contraseña).
-      void logAction({
-        staffId: staff.id,
-        // En su COLUMNA: sin organización la bitácora del cliente no la muestra (filtra por ella).
-        organizationId: staff.organizations[0]?.organizationId ?? null,
-        action: 'STAFF_PASSWORD_INVALIDATED_BY_GOOGLE',
-        entity: 'Staff',
-        entityId: staff.id,
-        data: { reason: 'unverified_account_verified_by_google' },
-      })
-      logger.warn('Google OAuth: cuenta sin verificar verificada por Google; su contraseña previa deja de servir', {
-        staffId: staff.id,
-      })
-    }
+    // Una sola regla para ligar Google (la comparte el POS); aquí se ignora si otra entrada cambió la cuenta primero.
+    await ligarCuentaConGoogle(staff, { sub: googleUser.id, picture: googleUser.picture }, staff.organizations[0]?.organizationId ?? null)
   }
 
   if (!staff || !staff.active) {
