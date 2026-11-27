@@ -1,8 +1,8 @@
 {
   "version": 1,
-  "approvedBy": null,
-  "approvedAt": null,
-  "approvedHash": null,
+  "approvedBy": "Jose Antonio Amieva",
+  "approvedAt": "2026-11-27T01:21:56.072Z",
+  "approvedHash": "2e9221edbdda526cf90baad519a0818bd4552ddda87abcf7f59797aefb74fcaf",
   "retired": {},
   "guides": {
     "android/ayuda/ver-version-de-la-app": {
@@ -156,7 +156,7 @@
       "gateKind": "FEATURE"
     },
     "android/lealtad/aplicar-premio-de-sellos": {
-      "sha256": "eebbd52e1da9d54ed63d46bef203b815708d9fa1ed67b2396803565da8300493",
+      "sha256": "fbdf606443943169dc91e9d46921bd512f15a78e828d9868f58a506387c384b9",
       "requiredPermissions": [
         "loyalty:read"
       ],
@@ -1455,7 +1455,7 @@
       "gateKind": "FEATURE"
     },
     "windows/lealtad/aplicar-premio-de-sellos": {
-      "sha256": "eb5b2d14e5828c2b138120e0b95a277682550ea9b85f4dcb0504519a35d9c634",
+      "sha256": "3b460cf825c44c8583a500174ba68cc3f53dc8b026bb1b449d88434e685f2e05",
       "requiredPermissions": [
         "loyalty:read"
       ],

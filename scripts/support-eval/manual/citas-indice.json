@@ -1507,6 +1507,16 @@
         "sourceRef": "9ffba05b58cda839dd74906ede1cca3847653a42"
       }
     ],
+    "avoqado-android:app/src/main/java/com/avoqado/pos/loyalty/data/WalletScanRepository.kt": [
+      {
+        "pagina": "android/lealtad/aplicar-premio-de-sellos",
+        "sourceRef": "1c3999b1bf9de45ea788cbcf57a3ab6f75847a47"
+      },
+      {
+        "pagina": "windows/lealtad/aplicar-premio-de-sellos",
+        "sourceRef": "1c3999b1bf9de45ea788cbcf57a3ab6f75847a47"
+      }
+    ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/loyalty/domain/SelloDeLaVenta.kt": [
       {
         "pagina": "android/lealtad/sello-que-no-se-sumo",
@@ -2260,7 +2270,7 @@
       },
       {
         "pagina": "android/lealtad/aplicar-premio-de-sellos",
-        "sourceRef": "78e5372f37ed7791d86fc1fe621d4a073e5a09ff"
+        "sourceRef": "1c3999b1bf9de45ea788cbcf57a3ab6f75847a47"
       },
       {
         "pagina": "windows/cobro/aplicar-cupon-o-promocion",
@@ -2276,7 +2286,7 @@
       },
       {
         "pagina": "windows/lealtad/aplicar-premio-de-sellos",
-        "sourceRef": "78e5372f37ed7791d86fc1fe621d4a073e5a09ff"
+        "sourceRef": "1c3999b1bf9de45ea788cbcf57a3ab6f75847a47"
       }
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/payment/domain/CancelacionDeCobro.kt": [
@@ -2844,7 +2854,7 @@
       },
       {
         "pagina": "android/lealtad/aplicar-premio-de-sellos",
-        "sourceRef": "78e5372f37ed7791d86fc1fe621d4a073e5a09ff"
+        "sourceRef": "1c3999b1bf9de45ea788cbcf57a3ab6f75847a47"
       },
       {
         "pagina": "android/lealtad/canjear-puntos",
@@ -2892,7 +2902,7 @@
       },
       {
         "pagina": "windows/lealtad/aplicar-premio-de-sellos",
-        "sourceRef": "78e5372f37ed7791d86fc1fe621d4a073e5a09ff"
+        "sourceRef": "1c3999b1bf9de45ea788cbcf57a3ab6f75847a47"
       },
       {
         "pagina": "windows/lealtad/canjear-puntos",
@@ -2978,7 +2988,7 @@
       },
       {
         "pagina": "android/lealtad/aplicar-premio-de-sellos",
-        "sourceRef": "78e5372f37ed7791d86fc1fe621d4a073e5a09ff"
+        "sourceRef": "1c3999b1bf9de45ea788cbcf57a3ab6f75847a47"
       },
       {
         "pagina": "android/ordenes/agregar-productos-a-la-venta",
@@ -3030,7 +3040,7 @@
       },
       {
         "pagina": "windows/lealtad/aplicar-premio-de-sellos",
-        "sourceRef": "78e5372f37ed7791d86fc1fe621d4a073e5a09ff"
+        "sourceRef": "1c3999b1bf9de45ea788cbcf57a3ab6f75847a47"
       },
       {
         "pagina": "windows/ordenes/agregar-productos-a-la-venta",

@@ -1,61 +1,61 @@
 {
   "pagina": "android/lealtad/aplicar-premio-de-sellos",
   "sourceRepo": "avoqado-android",
-  "sourceRef": "78e5372f37ed7791d86fc1fe621d4a073e5a09ff",
+  "sourceRef": "1c3999b1bf9de45ea788cbcf57a3ab6f75847a47",
   "version": "2.25.58",
   "pasos": [
     {
       "paso": 1,
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
-      "linea": 1622,
+      "linea": 1624,
       "cita": "is ScannedBarcodeResult.CustomerCardFound -> if (cartViewModel.selectedCustomer.value?.id == clienteAlEscanear) {"
     },
     {
       "paso": 1,
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
-      "linea": 1633,
+      "linea": 1635,
       "cita": "cartViewModel.setSelectedCustomer(c.id, nombre)"
     },
     {
       "paso": 2,
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
-      "linea": 1751,
+      "linea": 1755,
       "cita": "val avance = \"${tarjeta.stampsEarned} de ${tarjeta.stampsRequired} sellos\""
     },
     {
       "paso": 2,
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
-      "linea": 1755,
-      "cita": "\"🎁 Tiene un premio por cobrar: ${premio.rewardLabel}\\n\\n$avance · esta compra le suma otro\""
+      "linea": 1767,
+      "cita": "\"🎁 Tiene un premio por cobrar: ${premio.rewardLabel}\\n\\n$avance$estaCompra\""
     },
     {
       "paso": 2,
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
-      "linea": 1776,
+      "linea": 1788,
       "cita": "text = \"Aplicar ${premio.rewardLabel}\","
     },
     {
       "paso": 3,
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/cart/CartPanelView.kt",
-      "linea": 1108,
+      "linea": 1107,
       "cita": "text = \"Premio: $etiqueta\","
     },
     {
       "paso": 3,
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/cart/CartPanelView.kt",
-      "linea": 412,
+      "linea": 411,
       "cita": "else -> \"Se calcula al cobrar\""
     },
     {
       "paso": 4,
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
-      "linea": 1772,
+      "linea": 1784,
       "cita": "// servidor lo aplica al crearla — por eso el total que se cobra ya"
     },
     {
       "paso": 5,
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/cart/CartPanelView.kt",
-      "linea": 1118,
+      "linea": 1117,
       "cita": "contentDescription = \"Quitar premio\","
     }
   ],
@@ -66,18 +66,33 @@
       "afirmacion": "Sin red al cobrar con el beneficio aplicado: no se cobra",
       "archivo": "app/src/main/java/com/avoqado/pos/payment/data/model/PaymentModels.kt",
       "linea": 428
+    },
+    {
+      "afirmacion": "Sin red, escanear la tarjeta del cliente dice «Sin conexión» y manda a elegirlo desde el carrito; no ofrece crear producto",
+      "archivo": "app/src/main/java/com/avoqado/pos/loyalty/data/WalletScanRepository.kt",
+      "linea": 92
     }
   ],
   "rutas": [
     {
       "ruta": "No aplica a esta venta",
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/cart/CartPanelView.kt",
-      "linea": 410
+      "linea": 409
     },
     {
       "ruta": "Revisa el premio",
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
-      "linea": 2455
+      "linea": 2481
+    },
+    {
+      "ruta": "Tarjeta no encontrada",
+      "archivo": "app/src/main/java/com/avoqado/pos/loyalty/data/WalletScanRepository.kt",
+      "linea": 95
+    },
+    {
+      "ruta": "No se pudo leer la tarjeta",
+      "archivo": "app/src/main/java/com/avoqado/pos/loyalty/data/WalletScanRepository.kt",
+      "linea": 98
     }
   ],
   "aparato": {
@@ -93,13 +108,17 @@
       "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/android/and-65-premio-en-carrito.png",
       "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/android/and-66-premio-quitado.png",
       "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/android/and-67-cobro-con-premio.png",
-      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/android/and-68-premio-cobrado.png"
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d36/android/and-68-premio-cobrado.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d53/aparato/b-con-red-tarjeta-ajena-no-encontrada.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d53/aparato/d-sin-red-aviso-honesto.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d53/aparato/e-sin-red-agregar-cliente-guardados.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d53/aparato/f-sin-red-cobro-en-efectivo-con-cliente.png"
     ],
     "filasCreadas": [
       "WalletPass emitido con el servicio para QA-D36 Referida (el alta por el cartel pide LOYALTY_WALLET, que esta base no trae)",
       "Sellos 2/2 en dos ventas escaneadas → StampReward REDEEMED en una orden de $25.50 (−$4.50) en efectivo"
     ],
-    "nota": "25-nov (D36): Configuración: Tarjeta digital con 2 sellos y 15 %; el Programa de Lealtad tuvo que pasar a Activo: con él inactivo, la venta no suma sello (loyalty.dashboard.service.ts: if (!config.active) return) aunque el aviso diga «esta compra le suma otro» (se agregó a Problemas). El lector se emuló con un teclado USB de mentira (comando uinput de Android, ~10 ms por tecla); `adb input` no sirve (deviceId −1). La primera lectura perdió el primer carácter y salió «Producto no encontrado» (LectorHid: «el precio es un carácter suelto la primera vez»; se agregó a Problemas). Con la tarjeta: «0 de 2 sellos · esta compra le suma otro» + Listo; tras 2 ventas: «🎁 Tiene un premio por cobrar: 15% de descuento» → «Aplicar 15% de descuento» → renglón «Premio: 15% de descuento» −$4.50; la X (Quitar premio) lo quita; de nuevo y cobro en efectivo. No se probó: «No aplica a esta venta», cobro por partes, «Revisa el premio», sin red."
+    "nota": "25-nov (D36): Configuración: Tarjeta digital con 2 sellos y 15 %; el Programa de Lealtad tuvo que pasar a Activo: con él inactivo, la venta no suma sello (loyalty.dashboard.service.ts: if (!config.active) return) aunque el aviso diga «esta compra le suma otro» (se agregó a Problemas). El lector se emuló con un teclado USB de mentira (comando uinput de Android, ~10 ms por tecla); `adb input` no sirve (deviceId −1). La primera lectura perdió el primer carácter y salió «Producto no encontrado» (LectorHid: «el precio es un carácter suelto la primera vez»; se agregó a Problemas). Con la tarjeta: «0 de 2 sellos · esta compra le suma otro» + Listo; tras 2 ventas: «🎁 Tiene un premio por cobrar: 15% de descuento» → «Aplicar 15% de descuento» → renglón «Premio: 15% de descuento» −$4.50; la X (Quitar premio) lo quita; de nuevo y cobro en efectivo. No se probó: «No aplica a esta venta», cobro por partes, «Revisa el premio», sin red. 26-nov (D53, hz:b37dd7ea:D53): «Tarjeta no encontrada», «Sin conexión» y «Agregar cliente» sin red se probaron en el D3 del Alien (POS SOLO, APK de QA de la rama fix/d53-tarjeta-sin-red contra el SERVIDOR local); el resto de la página sigue con la prueba del 25-nov."
   },
   "codex": {
     "lote": 4,
