@@ -6,7 +6,7 @@ category: personal
 task: iniciar-sesion
 requiredPermissions: []
 sourceRepo: avoqado-android
-sourceRef: 06e7fe9e45057b5b4e003bc994630910628ee1e6
+sourceRef: fa0624481213de8ea62d12f8bae02ba00843c3b6
 keywords:
   - iniciar sesión
   - entrar al POS
@@ -27,9 +27,11 @@ Sólo entran cuentas que ya existen. El POS no crea cuentas ni negocios: si eres
 2. Escribe tu contraseña y toca *Iniciar sesión*.
 3. Si no la recuerdas, toca *¿Olvidaste tu contraseña?*: te llega un enlace al correo, si la cuenta existe.
 4. O toca *Continuar con Google*, debajo de *Siguiente*.
-5. Se abre tu navegador: escoge tu cuenta de Google y el POS entra solo. Mientras espera dice «Termina en tu navegador…» y puedes tocar *Cancelar*.
+5. Se abre Microsoft Edge en una ventana aparte: escribe tu correo y contraseña de Google. Al terminar, la ventana se cierra y el POS entra solo.
 
-En Windows no hay huella ni rostro. Si pasan 3 minutos sin respuesta sale «No recibimos respuesta de Google. Vuelve a intentarlo.»; si no abre el navegador, «No pudimos abrir tu navegador. Entra con tu correo y contraseña.»
+Esa ventana se borra sola y no queda nada guardado en la PC. Mientras espera dice «Termina en tu navegador…» y puedes tocar *Cancelar*.
+
+En Windows no hay huella ni rostro. Si pasan 3 minutos sin respuesta sale «No recibimos respuesta de Google. Vuelve a intentarlo.»; si no hay Edge, «No pudimos abrir Microsoft Edge. Entra con tu correo y contraseña.»
 
 ## Problemas frecuentes
 

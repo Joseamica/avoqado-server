@@ -6,7 +6,7 @@ category: personal
 task: iniciar-sesion
 requiredPermissions: []
 sourceRepo: avoqado-android
-sourceRef: 06e7fe9e45057b5b4e003bc994630910628ee1e6
+sourceRef: fa0624481213de8ea62d12f8bae02ba00843c3b6
 keywords:
   - iniciar sesión
   - entrar al POS
@@ -29,7 +29,9 @@ Sólo entran cuentas que ya existen. El POS no crea cuentas ni negocios: si eres
 2. Escribe tu contraseña y toca *Iniciar sesión*.
 3. Si no la recuerdas, toca *¿Olvidaste tu contraseña?*: te llega un enlace al correo, si la cuenta existe.
 4. O toca *Continuar con Google*, debajo de *Siguiente*.
-5. Se abre la hoja de cuentas de Google: toca tu cuenta y entras.
+5. Se abre Google en una pestaña de Chrome: escribe tu correo y contraseña de Google, o elige la cuenta. Al terminar, el POS entra solo.
+
+Entrar con Google no deja nada guardado en la tableta: ni la cuenta de Google en Ajustes ni la sesión en Chrome. Si cancelas (Atrás o cerrando la pestaña), no pasa nada.
 
 Con huella o rostro: si ya entraste antes en este aparato y lo dejaste guardado, toca el icono de huella dentro del campo de correo.
 
@@ -40,7 +42,9 @@ Con huella o rostro: si ya entraste antes en este aparato y lo dejaste guardado,
 - «Esta cuenta todavía no está ligada a Google. Entra con tu correo y contraseña.»: la cuenta se creó con contraseña y su correo no es de Gmail ni de Google Workspace. Entra con correo y contraseña.
 - Si te registraste con Google en el panel y el POS te pide contraseña, toca *Continuar con Google* con esa misma cuenta de Google.
 
-- «Entrar con Google no está disponible en este aparato. Entra con tu correo y contraseña.»: el aparato no tiene los servicios de Google. Entra con correo y contraseña.
+- «Entrar con Google necesita Chrome actualizado en este aparato. Entra con tu correo y contraseña.»: actualiza Chrome en la tableta, o entra con correo y contraseña.
+- «Entrar con Google no está disponible con la caja bloqueada. Entra con tu correo y contraseña.»: el administrador tiene la tableta bloqueada. Entra con correo y contraseña.
+- «Entrar con Google no está disponible en este aparato. Entra con tu correo y contraseña.»: el aparato no puede abrir la pestaña de Google. Entra con correo y contraseña.
 
 ## Sin internet
 

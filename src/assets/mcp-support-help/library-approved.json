@@ -241,7 +241,7 @@
       "requiredPermissions": []
     },
     "android/personal/iniciar-sesion": {
-      "sha256": "42a3e53a6def280981398a2c60feb26480ce8b2211c6d064d64af0d3da0df343",
+      "sha256": "3d4142b98da535cb90be07f7533f41f26a725bb06029ecdd099d870e8c960113",
       "requiredPermissions": []
     },
     "android/promociones/crear-editar-o-eliminar-cupones-y-descuentos": {
@@ -1548,7 +1548,7 @@
       "requiredPermissions": []
     },
     "windows/personal/iniciar-sesion": {
-      "sha256": "68f0c41f5fb16fc123b9232385d4df4b947fd93e1deff46da9ddb3290bc78be8",
+      "sha256": "d803513022c6d1cc8aa05fe206543777c6c272c338f23eb579aabf30c62989ac",
       "requiredPermissions": []
     },
     "windows/promociones/crear-editar-o-eliminar-cupones-y-descuentos": {

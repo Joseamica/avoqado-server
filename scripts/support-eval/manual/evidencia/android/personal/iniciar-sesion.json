@@ -1,7 +1,7 @@
 {
   "pagina": "android/personal/iniciar-sesion",
   "sourceRepo": "avoqado-android",
-  "sourceRef": "06e7fe9e45057b5b4e003bc994630910628ee1e6",
+  "sourceRef": "fa0624481213de8ea62d12f8bae02ba00843c3b6",
   "version": "2.25.42",
   "pasos": [
     {
@@ -42,15 +42,21 @@
     },
     {
       "paso": 5,
-      "archivo": "app/src/main/java/com/avoqado/pos/auth/data/EntrarConGoogle.kt",
-      "linea": 15,
-      "cita": "TEXTO_APARATO"
-    },
-    {
-      "paso": 5,
       "archivo": "app/src/main/java/com/avoqado/pos/auth/presentation/SignInViewModel.kt",
       "linea": 233,
       "cita": "entrarConGoogle.pedirPase(activity, config)"
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/auth/data/EntrarConGoogle.kt",
+      "linea": 25,
+      "cita": "TEXTO_SIN_CHROME ="
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/auth/data/EntrarConGoogle.kt",
+      "linea": 28,
+      "cita": "TEXTO_CAJA_BLOQUEADA ="
     }
   ],
   "permisos": [],
@@ -71,7 +77,7 @@
     {
       "ruta": "Si aparece: entrar con Google no disponible en este aparato",
       "archivo": "app/src/main/java/com/avoqado/pos/auth/data/EntrarConGoogle.kt",
-      "linea": 15
+      "linea": 23
     },
     {
       "ruta": "Antes: huella o rostro",
