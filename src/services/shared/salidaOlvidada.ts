@@ -543,19 +543,21 @@ export async function corregirSalidaOlvidada(params: {
     }
     if (salida <= e.clockInTime) throw new BadRequestError('La salida tiene que ser después de la entrada.', 'SALIDA_ANTES_DE_ENTRADA')
     if (salida > ahora) throw new BadRequestError('La salida no puede estar en el futuro.', 'SALIDA_EN_EL_FUTURO')
-    // El límite con el que se cerró, fijo (26-nov r1 #1); los cierres de antes, con la regla de fábrica y su horario, como hoy.
-    const limite =
-      e.limiteOlvidada ??
-      (
-        await limiteYSalidaDeSuHorario(tx, {
-          staffId: e.staffId,
-          venueId: e.venueId,
-          clockInTime: e.clockInTime,
-          timezone: e.venue.timezone,
-          rotativos: e.venue.settings?.rotatingShiftsEnabled === true,
-          corte: null,
-        })
-      ).limite
+    // El gerente puede poner la salida REAL hasta el límite de fábrica (el siguiente 04:00, nunca antes de 12 h, o su horario):
+    // un turno no dura días. La hora de corte propia decide cuándo el SISTEMA da el turno por olvidado, no hasta cuándo se
+    // reconocen horas trabajadas (revisión de apps viejas, Codex 26-nov: con corte a las 22:00, quien salió a las 22:40 se
+    // quedaba en 0 h sin forma de corregirlo). El límite guardado del cierre sólo puede ampliarlo.
+    const deFabrica = (
+      await limiteYSalidaDeSuHorario(tx, {
+        staffId: e.staffId,
+        venueId: e.venueId,
+        clockInTime: e.clockInTime,
+        timezone: e.venue.timezone,
+        rotativos: e.venue.settings?.rotatingShiftsEnabled === true,
+        corte: null,
+      })
+    ).limite
+    const limite = e.limiteOlvidada && e.limiteOlvidada > deFabrica ? e.limiteOlvidada : deFabrica
     if (salida > limite) {
       throw new BadRequestError(
         `La salida no puede pasar de ${DateTime.fromJSDate(limite, { zone: zonaDe(e.venue.timezone) }).toFormat('HH:mm')} del día siguiente: un turno no dura días.`,

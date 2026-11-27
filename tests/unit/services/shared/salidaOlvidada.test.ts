@@ -569,6 +569,53 @@ describe('corregirSalidaOlvidada (el gerente, en Asistencia)', () => {
     expect(prismaMock.timeEntryBreak.update).toHaveBeenCalledWith({ where: { id: 'b1' }, data: { endTime: mx('2026-11-03T18:00:00') } })
   })
 
+  // Revisión de apps viejas antes de publicar (Codex, 26-nov, «grave»): con corte propio a las 22:00, quien de verdad trabajó
+  // hasta las 22:40 no podía recuperar esas horas: la corrección no dejaba pasar del corte. El gerente puede poner la salida
+  // real hasta el límite de fábrica («un turno no dura días»); el cierre y la salida tardía del celular siguen con el corte.
+  it('con corte propio (22:00), el gerente sí puede poner la salida real de las 22:40', async () => {
+    prismaMock.timeEntry.findFirst
+      .mockResolvedValueOnce({ staffId: 'staff-1' } as any)
+      .mockResolvedValueOnce(
+        olvidada({
+          clockInTime: mx('2026-11-03T14:00:00'),
+          clockOutTime: mx('2026-11-03T14:00:00'),
+          limiteOlvidada: mx('2026-11-03T22:00:00'),
+        }) as any,
+      )
+      .mockResolvedValueOnce(null)
+    prismaMock.timeEntry.updateMany.mockResolvedValue({ count: 1 })
+
+    const r = await corregirSalidaOlvidada({
+      venueId: 'venue-1',
+      timeEntryId: 'te-1',
+      clockOutTime: mx('2026-11-03T22:40:00'),
+      actorStaffId: 'gerente',
+      ahora,
+    })
+
+    expect(r.totalHours).toBe(8.67)
+  })
+
+  it('con corte propio, la corrección sigue sin pasar del límite de fábrica (un turno no dura días)', async () => {
+    prismaMock.timeEntry.findFirst.mockResolvedValueOnce({ staffId: 'staff-1' } as any).mockResolvedValueOnce(
+      olvidada({
+        clockInTime: mx('2026-11-03T14:00:00'),
+        clockOutTime: mx('2026-11-03T14:00:00'),
+        limiteOlvidada: mx('2026-11-03T22:00:00'),
+      }) as any,
+    )
+
+    await expect(
+      corregirSalidaOlvidada({
+        venueId: 'venue-1',
+        timeEntryId: 'te-1',
+        clockOutTime: mx('2026-11-04T05:00:00'),
+        actorStaffId: 'gerente',
+        ahora,
+      }),
+    ).rejects.toMatchObject({ statusCode: 400, code: 'SALIDA_DESPUES_DEL_DIA' })
+  })
+
   it('pone la salida real, recalcula horas, quita la marca y lo anota con el antes y el después', async () => {
     prismaMock.timeEntry.findFirst
       .mockResolvedValueOnce({ staffId: 'staff-1' } as any)
