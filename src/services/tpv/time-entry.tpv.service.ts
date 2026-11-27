@@ -202,7 +202,7 @@ export async function clockIn(params: ClockInParams) {
   await cerrarOlvidadasAntesDeChecar(staffId, 'ENTRADA')
 
   // Mismo candado que el POS: un solo «¿ya tiene entrada? → crearla» a la vez por persona (Codex r1 #4).
-  const timeEntry = await conCandadoDeEntrada(staffId, async tx => {
+  const timeEntry = await conCandadoDeEntrada(venueId, staffId, async tx => {
     // Check if staff member is already clocked in
     const existingEntry = await tx.timeEntry.findFirst({
       where: {

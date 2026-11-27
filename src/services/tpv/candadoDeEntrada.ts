@@ -11,9 +11,12 @@ import prisma from '../../utils/prismaClient'
  * Es de la persona, no de la sucursal (Codex 26-nov sobre #659, r3): así la corrección de una salida olvidada, que busca su
  * siguiente entrada en todas sus sucursales, espera a la que se guarda en cualquiera de ellas.
  */
-export function conCandadoDeEntrada<T>(staffId: string, fn: (tx: Prisma.TransactionClient) => Promise<T>): Promise<T> {
+export function conCandadoDeEntrada<T>(venueId: string, staffId: string, fn: (tx: Prisma.TransactionClient) => Promise<T>): Promise<T> {
   return prisma.$transaction(async tx => {
     await tomarCandadoDeEntrada(tx, staffId)
+    // ponytail: también la llave vieja (persona y sucursal), en este orden, mientras convivan dos versiones en un despliegue
+    // (Codex r4): la vieja sólo toma ésta. Se puede quitar cuando ya no quede ninguna instancia con la versión anterior.
+    await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`time-entry-clock-in:${venueId}:${staffId}`}, 0))::text`
     return fn(tx)
   })
 }
