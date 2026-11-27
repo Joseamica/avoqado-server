@@ -759,27 +759,73 @@ describe('getStaffAttendance — efectivo por checada agregado en Postgres', () 
     }
   })
 
-  it('marca la checada que el sistema cerró como «Salida olvidada», con su nota, para que el gerente la corrija (hz:0433f0cb:D3)', async () => {
+  it('marca la checada que el sistema cerró como «Salida olvidada», con la hora real de las salidas tardías que anotó el SERVIDOR (hz:0433f0cb:D3 y D4)', async () => {
     const e2 = await prisma.timeEntry.findFirstOrThrow({ where: { staffId: ana, clockInTime: E2_IN } })
-    const tardia =
-      'Salida del celular de las 22:40 del 11-mar (America/Mexico_City): llegó después del día del turno y no se usó. Revisa la hora real.'
-    const deLaTpv = 'Salida de la PAX a las 22:45 11/03: llegó después del cierre de salida olvidada y no se usó. Revisa la hora real.'
-    // Una nota libre de la persona no sale, ni con esas palabras ni imitando la del sistema con algo más al final (Codex D3 r2
-    // #3 y r3); las dos salidas tardías del sistema, sí.
-    const libre = 'El camión que no se usó llegó tarde'
-    const imitada = `${tardia} y esto es privado`
-    const notas = `${libre}\n${imitada}\nSalida olvidada: no marcó salida y no tiene horario ese día; quedó en 0 horas hasta que el gerente la corrija.\n${tardia}\n${deLaTpv}`
+    // D4: la nota sale de los asientos que escribe el SERVIDOR, nunca del texto de la checada. Una nota libre que copia EXACTO
+    // el renglón del sistema (la escribe la persona al checar entrada) no sale, ni con algo privado al final (Codex D3 r2 #3 y r3).
+    const copiaExacta =
+      'Salida del celular de las 23:59 del 11-mar (America/Mexico_City): llegó después del día del turno y no se usó. Revisa la hora real.'
+    const notas = `${copiaExacta}\n${copiaExacta} y esto es privado\nSalida olvidada: no marcó salida y no tiene horario ese día; quedó en 0 horas hasta que el gerente la corrija.`
     await prisma.timeEntry.update({ where: { id: e2.id }, data: { salidaOlvidada: true, autoClockOut: true, notes: notas } })
+    const asiento = (venueId: string, createdAt: string, data: Record<string, unknown>) =>
+      prisma.activityLog.create({
+        data: {
+          action: 'TIME_ENTRY_LATE_CLOCKOUT_NOT_USED',
+          entity: 'TimeEntry',
+          entityId: e2.id,
+          venueId,
+          staffId: ana,
+          createdAt: new Date(createdAt),
+          data: data as any,
+        },
+      })
+    const asientos: Array<{ id: string }> = []
     try {
-      const { staff } = await svc.getStaffAttendance(orgId, DIA)
-      const a = (staff as Array<any>).find(r => r.id === ana)!
+      const leer = async () => {
+        const { staff } = await svc.getStaffAttendance(orgId, DIA)
+        return (staff as Array<any>).find(r => r.id === ana)!
+      }
+      // Sin asientos: la copia exacta no sale.
+      const sinAsientos = await leer()
+      expect(sinAsientos.allTimeEntries[0]).toMatchObject({ id: e2.id, salidaOlvidada: true, notaSalidaOlvidada: null })
+
+      // Lo que sí escribió el SERVIDOR, en el orden en que llegó: la app de campo (`checadaDeCampo.service.ts`) y la PAX
+      // (`anotarSalidaQueNoSeUso`). No cuentan: el mismo id con la sucursal de otra organización y uno sin hora legible.
+      const porCrear: Array<[string, string, Record<string, unknown>]> = [
+        [
+          v1,
+          '2025-03-12T04:41:00.000Z',
+          {
+            cierreAutomatico: E2_OUT.toISOString(),
+            salidaDelCelular: '2025-03-12T04:40:00.000Z',
+            origenHora: 'CELULAR',
+            llaveSalida: 'llave-1',
+          },
+        ],
+        [
+          v1,
+          '2025-03-12T04:46:00.000Z',
+          { origen: 'PAX', salidaRecibida: '2025-03-12T04:45:00.000Z', cierreAutomatico: E2_OUT.toISOString(), gps: null },
+        ],
+        [vB, '2025-03-12T04:47:00.000Z', { salidaDelCelular: '2025-03-12T05:00:00.000Z' }],
+        [v1, '2025-03-12T04:48:00.000Z', { origen: 'PAX', salidaRecibida: 'no-es-fecha' }],
+      ]
+      for (const [venueId, createdAt, data] of porCrear) asientos.push(await asiento(venueId, createdAt, data))
+      const a = await leer()
       expect(a.venueTimezone).toBeTruthy() // la hora que teclea el gerente es la de la sucursal de la checada (Codex D3 r1 #1)
       const [olvidada, normal] = a.allTimeEntries // la más reciente primero
-      // Sólo la línea de la salida tardía, nunca las notas completas (las ve quien sólo puede leer la bitácora; Codex D3 r1 #3).
-      expect(olvidada).toMatchObject({ id: e2.id, salidaOlvidada: true, notaSalidaOlvidada: `${tardia}\n${deLaTpv}` })
+      // Sólo la hora de cada salida tardía, en la zona de la sucursal; nunca las notas (las ve quien sólo lee la bitácora; D3 r1 #3).
+      expect(olvidada).toMatchObject({
+        id: e2.id,
+        salidaOlvidada: true,
+        notaSalidaOlvidada:
+          'Salida del celular a las 22:40 del 11-mar: llegó después del cierre y no se usó.\n' +
+          'Salida de la PAX a las 22:45 del 11-mar: llegó después del cierre y no se usó.',
+      })
       expect(olvidada.notes).toBeUndefined()
       expect(normal).toMatchObject({ salidaOlvidada: false, notaSalidaOlvidada: null })
     } finally {
+      await prisma.activityLog.deleteMany({ where: { id: { in: asientos.map(x => x.id) } } })
       await prisma.timeEntry.update({ where: { id: e2.id }, data: { salidaOlvidada: false, autoClockOut: false, notes: null } })
     }
   })

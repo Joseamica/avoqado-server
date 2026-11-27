@@ -283,23 +283,55 @@ export function limiteDeUnCierre(
   return guardado ?? limiteDelTurno(clockIn, timezone, cierre, null)
 }
 
-/**
- * Las anotaciones que deja el SERVIDOR cuando una salida tardía no se usó, renglón completo y con su hora: la app de campo
- * (`checadaDeCampo.service.ts`, «HH:mm del D-mes (zona)» o la hora ISO) y la PAX o el POS (`anotarSalidaQueNoSeUso`,
- * «HH:mm dd/MM»). Exactas para que una nota libre que las imite no saque texto de más (Codex D3 r3).
- */
-const SALIDA_NO_USADA = [
-  /^Salida del celular de las (?:\d{2}:\d{2} del \d{1,2}-\S+ \([\w/+-]+\)|\d{4}-\d{2}-\d{2}T[\d:.]+Z): llegó después (?:de que el gerente corrigió la salida y no se usó\.|del día del turno y no se usó\. Revisa la hora real\.)$/,
-  /^Salida de la (?:PAX|POS) a las \d{2}:\d{2} \d{2}\/\d{2}: llegó después del cierre de salida olvidada y no se usó\. Revisa la hora real\.$/,
-]
+/** Por consulta: una página de la bitácora de un día trae a lo más unas decenas de checadas olvidadas. */
+const TOPE_ASIENTOS_DE_SALIDA = 2000
+const QUIEN_MANDO: Record<string, string> = { PAX: 'de la PAX', POS: 'del POS' }
+
+/** Una línea por asiento `TIME_ENTRY_LATE_CLOCKOUT_NOT_USED`, con la hora en la zona de la sucursal; null si no se puede leer. */
+function lineaDeSalidaNoUsada(data: Prisma.JsonValue | null, timezone: string | null | undefined): string | null {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return null
+  const d = data as Record<string, unknown>
+  // La app de campo (`checadaDeCampo.service.ts`) guarda `salidaDelCelular`; la PAX o el POS (`anotarSalidaQueNoSeUso`),
+  // `origen` y `salidaRecibida`.
+  const quien = typeof d.salidaDelCelular === 'string' ? 'del celular' : typeof d.origen === 'string' ? QUIEN_MANDO[d.origen] : undefined
+  const iso = typeof d.salidaDelCelular === 'string' ? d.salidaDelCelular : d.salidaRecibida
+  if (!quien || typeof iso !== 'string') return null
+  const hora = DateTime.fromISO(iso, { zone: zonaDe(timezone) })
+  if (!hora.isValid) return null
+  return `Salida ${quien} a las ${hora.toFormat('HH:mm')} del ${diaDeLaEntrada(hora.toJSDate(), timezone)}: llegó después del cierre y no se usó.`
+}
 
 /**
- * Las salidas tardías que no se usaron (la hora real que mandó cada aparato), una por línea, o null. Sólo las anotaciones del
- * sistema: una nota libre de la persona no sale aunque diga lo mismo (Codex D3 r2 #3).
+ * Por checada «Salida olvidada», la hora real de las salidas tardías que no se usaron, una por línea. Sale de los asientos que
+ * escribe el SERVIDOR (`TIME_ENTRY_LATE_CLOCKOUT_NOT_USED`), nunca de `notes`: una nota libre que copie el renglón del sistema
+ * no sale (hz:0433f0cb:D4), ni nada privado (Codex D3 r2 #3). Sólo asientos de la sucursal de la checada.
+ * ponytail: el asiento de la PAX o del POS no se espera (`void logAction`); si no se pudo escribir, esa línea no sale y la
+ * marca «Salida olvidada · revisar» sí.
  */
-export function notaDeSalidaNoUsada(notes: string | null | undefined): string | null {
-  const lineas = (notes ?? '').split('\n').filter(l => SALIDA_NO_USADA.some(r => r.test(l)))
-  return lineas.length ? lineas.join('\n') : null
+export async function notasDeSalidasNoUsadas(
+  entradas: Array<{ id: string; venueId: string; timezone: string | null | undefined }>,
+  db: Pick<typeof defaultPrisma, 'activityLog'> = defaultPrisma,
+): Promise<Map<string, string>> {
+  const notas = new Map<string, string>()
+  if (entradas.length === 0) return notas
+  const porId = new Map(entradas.map(e => [e.id, e]))
+  const asientos = await db.activityLog.findMany({
+    where: {
+      action: 'TIME_ENTRY_LATE_CLOCKOUT_NOT_USED',
+      entity: 'TimeEntry',
+      entityId: { in: [...porId.keys()] },
+      venueId: { in: [...new Set(entradas.map(e => e.venueId))] },
+    },
+    select: { entityId: true, venueId: true, data: true },
+    orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+    take: TOPE_ASIENTOS_DE_SALIDA,
+  })
+  for (const a of asientos) {
+    const e = a.entityId ? porId.get(a.entityId) : undefined
+    const linea = e && a.venueId === e.venueId ? lineaDeSalidaNoUsada(a.data, e.timezone) : null
+    if (e && linea) notas.set(e.id, notas.has(e.id) ? `${notas.get(e.id)}\n${linea}` : linea)
+  }
+  return notas
 }
 
 /** Cierra [e] como «salida olvidada» si ya pasó su límite y el negocio tiene la regla prendida. null = no tocó nada. */
