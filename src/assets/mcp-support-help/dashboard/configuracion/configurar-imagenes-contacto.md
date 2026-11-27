@@ -10,7 +10,7 @@ dashboardRoutes:
 roles:
   - OWNER
   - ADMIN
-lastVerified: 2026-05-21
+lastVerified: 2026-11-26
 sourceRepo: avoqado-web-dashboard
 relatedArticles:
   - editar-venue-local
@@ -32,17 +32,17 @@ Usa imágenes limpias, con buena resolución y sin texto pequeño que se pierda 
 
 ## Pasos
 
-1. Abre **Configuración > Editar Local > Información básica**.
+1. Abre **Configuración > Información del local > Información Básica**.
 2. Revisa nombre del local, dirección, ciudad, teléfono, correo y cualquier dato fiscal u operativo disponible en esa pantalla.
 3. Guarda cambios pequeños uno por uno si estás corrigiendo información sensible.
-4. Entra a **Configuración > Editar Local > Imágenes y contacto**.
+4. Entra a **Configuración > Información del local > Contacto e Imágenes**.
 5. Actualiza logo, imagen principal o fotos del local según lo que permita la pantalla.
 6. Revisa que los datos de contacto coincidan con los canales donde el equipo atiende clientes.
 7. Guarda y valida la información desde otra sesión o con otro usuario si el cambio afecta canales públicos.
 
 ## Problemas frecuentes
 
-Si no puedes entrar a **Editar Local**, tu rol no tiene permiso administrativo sobre venues. Si una imagen no carga, revisa formato, peso y conexión antes de intentar de nuevo. Si guardaste pero sigues viendo datos viejos, recarga el Dashboard y revisa que estés en la misma sucursal. Si el cambio aparece en Dashboard pero no en un canal externo, puede existir caché o sincronización pendiente.
+Si no puedes entrar a **Información del local**, tu rol no tiene permiso administrativo sobre venues. Si una imagen no carga, revisa formato, peso y conexión antes de intentar de nuevo. Si guardaste pero sigues viendo datos viejos, recarga el Dashboard y revisa que estés en la misma sucursal. Si el cambio aparece en Dashboard pero no en un canal externo, puede existir caché o sincronización pendiente.
 
 ## Qué revisar antes de publicar
 
