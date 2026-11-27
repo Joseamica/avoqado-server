@@ -1,7 +1,7 @@
 {
   "pagina": "windows/lealtad/canjear-puntos",
   "sourceRepo": "avoqado-android",
-  "sourceRef": "a8dc4b6f2b14a982fc3cc6b82f6fdc11d93fd295",
+  "sourceRef": "c08d1cdd24dca7a7d172cce44d8a88fd94ab4081",
   "version": "2.25.60",
   "pasos": [
     {
@@ -171,12 +171,27 @@
     {
       "afirmacion": "En Pedidos, una cuenta de «Pagar después» con un canje de esta caja no se cobra sin internet: «Esta cuenta tiene puntos canjeados: se cobra con conexión. Espera a que vuelva la red.»",
       "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/CobroDeCuentaScreen.kt",
-      "linea": 632
+      "linea": 693
     },
     {
       "afirmacion": "Sin red, «Recompensas» de Pedidos sale en gris con el texto sin conexión de Mesas",
       "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/CobroDeCuentaScreen.kt",
-      "linea": 514
+      "linea": 573
+    },
+    {
+      "afirmacion": "Cobrada en efectivo sin conexión: «Se cobró en efectivo sin conexión la cuenta de …: revisa en Pedidos que quedó pagada.»",
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/cart/AtajoDePuntos.kt",
+      "linea": 159
+    },
+    {
+      "afirmacion": "Cobro en efectivo sin conexión (o a media cobro) y cerrar: «La cuenta de … quedó en Pedidos: revisa ahí si el cobro quedó registrado.»",
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/cart/AtajoDePuntos.kt",
+      "linea": 164
+    },
+    {
+      "afirmacion": "Sin red, la cuenta abierta encima de Cobrar se porta como en Pedidos y se vuelve a leer al volver la red",
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CuentaDelAtajo.kt",
+      "linea": 69
     },
     {
       "afirmacion": "Sin conexión, la ventana de «Usar puntos» dice «Sin conexión: canjear puntos necesita internet…» y no sale Continuar",
@@ -253,27 +268,27 @@
     {
       "ruta": "Pedidos › cuenta de «Pagar después»: botón «Recompensas» debajo de Cobrar",
       "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/CobroDeCuentaScreen.kt",
-      "linea": 1163
+      "linea": 1237
     },
     {
       "ruta": "La cuenta en $0.00 se cierra con «Cerrar cuenta ($0.00)»",
       "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/CobroDeCuentaScreen.kt",
-      "linea": 685
+      "linea": 746
     },
     {
       "ruta": "Canje sin respuesta: «No se sabe si el canje entró…» y el botón «Reintentar el canje»",
       "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/CobroDeCuentaScreen.kt",
-      "linea": 628
+      "linea": 689
     },
     {
       "ruta": "Cobrar bloqueado con un canje sin terminar: «Hay un canje de puntos sin terminar en esta cuenta…»",
       "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/CobroDeCuentaScreen.kt",
-      "linea": 636
+      "linea": 697
     },
     {
       "ruta": "Sin permiso: «No tienes permiso para canjear puntos. Pídeselo a tu gerente.»",
       "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/CobroDeCuentaScreen.kt",
-      "linea": 639
+      "linea": 700
     },
     {
       "ruta": "Canje con un cobro con tarjeta en curso en la terminal",
@@ -308,12 +323,17 @@
     {
       "ruta": "Un descuento sin motivo pide su motivo antes de mandar",
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
-      "linea": 2520
+      "linea": 2543
     },
     {
       "ruta": "Sin cliente: «Agrega el cliente para usar sus puntos.»",
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/cart/AtajoDePuntos.kt",
       "linea": 24
+    },
+    {
+      "ruta": "Sin la lealtad en el plan o sin permiso (403 del SERVIDOR): «No se pueden leer los puntos: el plan del negocio o tus permisos no incluyen la lealtad.»",
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/cart/AtajoDePuntos.kt",
+      "linea": 76
     },
     {
       "ruta": "Sin permiso de dejar cuentas por cobrar",
@@ -338,27 +358,52 @@
     {
       "ruta": "Sólo importes tecleados: «No hay productos válidos para crear la orden»",
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/cart/CartViewModel.kt",
-      "linea": 3929
+      "linea": 4009
     },
     {
-      "ruta": "Creada: la caja va sola a Más › Pedidos con esa cuenta",
-      "archivo": "app/src/main/java/com/avoqado/pos/navigation/AvoqadoNavGraph.kt",
-      "linea": 489
+      "ruta": "Creada: la cuenta se abre encima de Cobrar (sin salir de la venta)",
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
+      "linea": 2527
     },
     {
-      "ruta": "En Pedidos, «Recompensas» se abre solo al quedar lista la cuenta (con la pantalla activa)",
-      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/CobroDeCuentaScreen.kt",
-      "linea": 1147
+      "ruta": "Al terminar el cobro, la cuenta se cierra sola y Cobrar queda para la siguiente venta",
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CuentaDelAtajo.kt",
+      "linea": 87
     },
     {
-      "ruta": "Si no se puede canjear, el aviso trae el folio: «La cuenta #… quedó en Pedidos: …»",
+      "ruta": "Cerrada sin cobrar: «La cuenta de … quedó por cobrar: está en Pedidos y en Cuentas por cobrar del panel web.»",
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/cart/AtajoDePuntos.kt",
       "linea": 149
     },
     {
+      "ruta": "Cobrada sin confirmar el saldo: «Se cobró la cuenta de … pero no se pudo confirmar que quedó en $0.00: revísala en Pedidos.»",
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/cart/AtajoDePuntos.kt",
+      "linea": 156
+    },
+    {
+      "ruta": "Con la cuenta abierta, el lector y las teclas de Cobrar no tocan la venta de abajo",
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
+      "linea": 1596
+    },
+    {
+      "ruta": "Salir de Cobrar (otra pestaña, girar) cierra la cuenta; queda en Pedidos",
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
+      "linea": 2524
+    },
+    {
+      "ruta": "«Recompensas» se abre solo al quedar lista la cuenta (con la pantalla activa)",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/CobroDeCuentaScreen.kt",
+      "linea": 1221
+    },
+    {
+      "ruta": "Si no se puede canjear, el aviso trae el folio: «La cuenta #… quedó en Pedidos: …»",
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/cart/AtajoDePuntos.kt",
+      "linea": 176
+    },
+    {
       "ruta": "Cuenta ya pagada o cancelada: «La cuenta #… ya no está abierta (pagada o cancelada): ya no admite puntos.»",
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/cart/AtajoDePuntos.kt",
-      "linea": 141
+      "linea": 168
     },
     {
       "ruta": "Cancelar la cuenta desde el panel web (Cuentas por cobrar › Cancelar orden): permiso para cancelar cuentas sin cobrar",

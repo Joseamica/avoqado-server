@@ -164,7 +164,7 @@
       "gateKind": "FEATURE"
     },
     "android/lealtad/canjear-puntos": {
-      "sha256": "5baab70f2aa0ae2d23fa81457e8547c31b197ab6ebaf8e293de3571422562a09",
+      "sha256": "63381975c63641c649fdab4f5b2aaf4954768a1968e99af2acbf6cdda37b10c1",
       "requiredPermissions": [
         "orders:update",
         "loyalty:read"

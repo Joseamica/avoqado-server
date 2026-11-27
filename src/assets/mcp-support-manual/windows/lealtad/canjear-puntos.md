@@ -12,7 +12,7 @@ gateKind: FEATURE
 money: true
 versionMin: 2.25.59
 sourceRepo: avoqado-android
-sourceRef: a8dc4b6f2b14a982fc3cc6b82f6fdc11d93fd295
+sourceRef: c08d1cdd24dca7a7d172cce44d8a88fd94ab4081
 keywords:
   - canjear puntos
   - canjear recompensa
@@ -41,7 +41,7 @@ keywords:
 
 ## Antes de empezar
 
-Los puntos se canjean en una cuenta de *Mesas* o en una cuenta de *Pagar después* (en *Pedidos*), con el cliente en la cuenta. En *Cobrar* (la venta de mostrador), *Usar puntos* deja la venta como cuenta de *Pagar después* y la abre en *Pedidos* para canjear (desde la versión 2.25.61; antes, en *Cobrar* sólo se ganaban). Desde la versión 2.25.59 el menú *⋯* del carrito ya no trae *Canjear recompensa*; en versiones anteriores esa opción sólo cerraba el menú.
+Los puntos se canjean en una cuenta de *Mesas* o en una cuenta de *Pagar después* (en *Pedidos*), con el cliente en la cuenta. En *Cobrar* (la venta de mostrador), *Usar puntos* deja la venta como cuenta de *Pagar después* y la abre encima de *Cobrar* para canjear y cobrar ahí mismo (desde la versión 2.25.61; antes, en *Cobrar* sólo se ganaban). Desde la versión 2.25.59 el menú *⋯* del carrito ya no trae *Canjear recompensa*; en versiones anteriores esa opción sólo cerraba el menú.
 
 Para canjear en *Mesas* hace falta:
 - el aparato en modo *Mesas* (*Más* › *Modo*; sin él no sale la pestaña *Mesas*) y el servicio de mesas en el plan (si falta, *Mesas* dice «Esta función es parte del plan PRO»);
@@ -75,9 +75,9 @@ Desde la versión 2.25.61. Hace falta lo mismo que en *Pagar después*, más el 
 1. En *Cobrar*, agrega los productos y el cliente (*Agregar cliente*).
 2. En el menú *⋯* del carrito, da clic en *Usar puntos*.
 3. Sale el cliente, el total de la venta y sus puntos disponibles, con el aviso «Se guardará una cuenta por cobrar a nombre de … y se abrirá en Pedidos para canjear…». Da clic en *Continuar*. Si un descuento de la venta pide su motivo, sale primero esa ventana.
-4. La venta queda como cuenta de *Pagar después* y se abre sola en *Más* › *Pedidos*, con *Recompensas* abierto. Sigue desde el paso 3 de «En una cuenta de «Pagar después»»: elige los puntos, da clic en *Canjear* y cóbrala.
+4. La venta queda como cuenta de *Pagar después* y se abre encima de *Cobrar*, con *Recompensas* abierto. Elige los puntos, da clic en *Canjear* y cóbrala ahí mismo con *Cobrar $…* (o *Cerrar cuenta ($0.00)* si los puntos la cubren). Al terminar el cobro, la cuenta se cierra y *Cobrar* queda listo para la siguiente venta.
 
-*Continuar* no gasta puntos: se descuentan al tocar *Canjear*. Si el cliente ya no quiere pagar, la cuenta sigue en *Pedidos*: se cobra normal (sin canjear) o se cancela en el panel web, en *Cuentas por cobrar*, con *Cancelar orden* en el menú de la cuenta (hace falta el permiso para cancelar cuentas sin cobrar y que no tenga nada pagado). Si ya se canjearon puntos, al cancelarla regresan. En el POS no se cancela.
+*Continuar* no gasta puntos: se descuentan al tocar *Canjear*. Si cierras la cuenta sin cobrar (con la flecha de regreso), sale «La cuenta de … quedó por cobrar: está en Pedidos y en Cuentas por cobrar del panel web.»: sigue en *Más* › *Pedidos* como cualquier cuenta de *Pagar después*. Si el cliente ya no quiere usar sus puntos, la cuenta se cobra normal (sin canjear); si ya no se va a cobrar, se cancela en el panel web, en *Cuentas por cobrar*, con *Cancelar orden* en el menú de la cuenta (hace falta el permiso para cancelar cuentas sin cobrar y que no tenga nada pagado). Si ya se canjearon puntos, al cancelarla regresan. En el POS no se cancela.
 
 ## Problemas frecuentes
 
@@ -89,7 +89,12 @@ Desde la versión 2.25.61. Hace falta lo mismo que en *Pagar después*, más el 
 - Si sale «Esta venta ya se mandó una vez a «Pagar después»…», termínala desde *Atajos* › *Pagar después* y canjea los puntos en *Más* › *Pedidos*.
 - Si sale «El cliente cambió: vuelve a tocar «Usar puntos».», no se guardó nada: revisa el cliente de la venta y vuelve a intentarlo.
 - Si sale «No hay productos válidos para crear la orden», la venta sólo trae importes tecleados: una cuenta para después necesita productos del catálogo.
-- Si *Pedidos* se abre pero *Recompensas* no, abajo dice por qué con el folio (por ejemplo «La cuenta #… quedó en Pedidos: …» o «La cuenta #… ya no está abierta (pagada o cancelada): ya no admite puntos.»). Si saliste de *Pedidos* antes de que cargara, abre la cuenta a mano y da clic en *Recompensas*.
+- Si la cuenta se abre pero *Recompensas* no, abajo dice por qué con el folio (por ejemplo «La cuenta #… quedó en Pedidos: …» o «La cuenta #… ya no está abierta (pagada o cancelada): ya no admite puntos.»).
+- Si cambias de pestaña (o giras la pantalla) con la cuenta abierta o mientras se guarda, la cuenta no se pierde: queda en *Más* › *Pedidos*; ábrela ahí y da clic en *Recompensas*.
+- Mientras la cuenta está abierta encima de *Cobrar*, el lector de códigos y las teclas de *Cobrar* no agregan nada a la venta de abajo.
+- Si la cuenta se cierra a media cobro (por ejemplo, al cambiar de pestaña), sale «La cuenta de … quedó en Pedidos: revisa ahí si el cobro quedó registrado.»: ábrela en *Más* › *Pedidos* y revisa si quedó pagada antes de volver a cobrarla.
+- Si la ventana de *Usar puntos* dice «No se pueden leer los puntos: el plan del negocio o tus permisos no incluyen la lealtad.», el plan del negocio no trae el programa de lealtad o tu usuario no puede ver puntos.
+- Si después de cobrar sale «Se cobró la cuenta de … pero no se pudo confirmar que quedó en $0.00: revísala en Pedidos.», el cobro sí se hizo: abre la cuenta en *Más* › *Pedidos* y confirma que quedó pagada antes de volver a cobrarla.
 - En *Pedidos*, si *Recompensas* está en gris, el texto de abajo dice por qué: sin internet, sin permiso («No tienes permiso para canjear puntos. Pídeselo a tu gerente.»), la cuenta sin cliente, un cobro de esta caja que todavía no sube, la cuenta en el carrito o pocos puntos.
 - Si sale «Hay un cobro con tarjeta en curso en la terminal para esta cuenta: espera a que termine para canjear puntos.», no se canjeó nada: termina o cancela ese cobro y vuelve a intentarlo.
 - Si al cobrar con terminal sale «La cuenta … tiene puntos canjeados: falta $…», la pantalla de cobro tenía el importe de antes del canje: sal del cobro, vuelve a abrir la cuenta y cobra lo que falta.
@@ -104,5 +109,6 @@ Desde la versión 2.25.61. Hace falta lo mismo que en *Pagar después*, más el 
 - Sin conexión, *Recompensas* sale en gris con «Sin conexión: canjear puntos necesita internet. Se puede en cuanto vuelva la red.», en *Mesas* y en *Pedidos*. No se canjea nada: vuelve a tocarlo cuando regrese la red.
 - Quitar la recompensa también necesita internet.
 - Sin conexión, la ventana de *Usar puntos* dice «Sin conexión: canjear puntos necesita internet. Se puede en cuanto vuelva la red.» y no sale *Continuar*; al volver la red vuelve a leer los puntos y sale *Continuar*.
+- Si se va la red con la cuenta abierta encima de *Cobrar*, se porta igual que en *Pedidos*. Si cobras en efectivo sin conexión y después la cierras, sale «La cuenta de … quedó en Pedidos: revisa ahí si el cobro quedó registrado.»: el pago guardado se sube solo al volver la red; revísalo en *Más* › *Pedidos*.
 - Si la red o el servidor fallan justo al tocar *Continuar*, sale «La cuenta de … quedó guardada en el aparato y se sube sola. Cuando suba, canjea los puntos en Más › Pedidos.». No la vuelvas a mandar: nunca se crea dos veces. Cuando suba, ábrela en *Pedidos* y canjea.
 - Una cuenta de *Pagar después* en la que esta caja canjeó (o intentó canjear) puntos no se cobra sin internet desde esta caja: en *Pedidos* sale «Esta cuenta tiene puntos canjeados: se cobra con conexión. Espera a que vuelva la red.». Sin red la caja no puede saber si la cuenta ya trae el descuento. Cóbrala cuando regrese la red.
