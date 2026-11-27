@@ -18,6 +18,7 @@ import { CASH_RECONCILIATION_FEATURE } from '../access/cashReconciliationAccess.
 import { venueHasFeatureAccess } from '../access/basePlan.service'
 import { withSerializableRetry } from '../../utils/serializableRetry'
 import { validarAjusteDeMotivos } from '../shared/motivoDelDescuento'
+import { candadoDeLaRegla } from '../shared/salidaOlvidada'
 
 /**
  * Default settings for new venues
@@ -53,6 +54,7 @@ export const DEFAULT_VENUE_SETTINGS = {
   maxShiftDurationEnabled: false, // Enable max shift duration enforcement
   maxShiftDurationHours: 12, // Max hours before auto clock-out
   salidaOlvidadaEnabled: true, // «Salida olvidada»: un turno sin salida se cierra solo al terminar su día (hz:f0a89d19:D3)
+  salidaOlvidadaCorte: null as string | null, // su hora de corte «HH:mm»; null = la de fábrica (04:00)
 
   // Reviews
   autoReplyReviews: false,
@@ -144,6 +146,10 @@ export async function updateVenueSettings(
   // vuelve a validar con el candado del negocio en la misma transacción que escribe (`revalidarMotivosConCandado`): dos administradores a
   // la vez (uno prende, otro quita el último) ya no pueden dejarlo prendido sin lista.
   const tocaMotivos = 'discountReasonRequired' in updates || 'discountReasons' in updates
+  // Lo que el cierre de una salida olvidada relee bajo el candado de la regla (Codex 26-nov r5 #2: también los turnos rotativos,
+  // que deciden su horario). ponytail: editar el cuadrante de una persona no toma el candado; un cierre que cruce esa edición
+  // queda «Salida olvidada · revisar» y el gerente lo corrige.
+  const tocaSalidaOlvidada = 'salidaOlvidadaCorte' in updates || 'salidaOlvidadaEnabled' in updates || 'rotatingShiftsEnabled' in updates
   if (tocaMotivos) {
     const guardado = await prisma.venueSettings.findUnique({
       where: { venueId },
@@ -183,6 +189,8 @@ export async function updateVenueSettings(
     maxShiftDurationHours: DEFAULT_VENUE_SETTINGS.maxShiftDurationHours,
     salidaOlvidadaEnabled:
       typeof updates.salidaOlvidadaEnabled === 'boolean' ? updates.salidaOlvidadaEnabled : DEFAULT_VENUE_SETTINGS.salidaOlvidadaEnabled,
+    salidaOlvidadaCorte:
+      typeof updates.salidaOlvidadaCorte === 'string' ? updates.salidaOlvidadaCorte : DEFAULT_VENUE_SETTINGS.salidaOlvidadaCorte,
     autoReplyReviews: DEFAULT_VENUE_SETTINGS.autoReplyReviews,
     notifyBadReviews: DEFAULT_VENUE_SETTINGS.notifyBadReviews,
     badReviewThreshold: DEFAULT_VENUE_SETTINGS.badReviewThreshold,
@@ -245,6 +253,7 @@ export async function updateVenueSettings(
         select: { id: true, cashReconciliationEnabled: true },
       })
       if (tocaMotivos) await revalidarMotivosConCandado(tx, venueId, updates)
+      if (tocaSalidaOlvidada) await candadoDeLaRegla(tx, venueId)
 
       const settings = await tx.venueSettings.upsert({
         where: { venueId },
@@ -275,16 +284,19 @@ export async function updateVenueSettings(
   const previous = (await prisma.venueSettings.findUnique({ where: { venueId } })) as Record<string, unknown> | null
 
   // Upsert settings (create if not exists, update if exists)
-  const settings = tocaMotivos
-    ? await prisma.$transaction(async tx => {
-        await revalidarMotivosConCandado(tx, venueId, updates)
-        return tx.venueSettings.upsert({ where: { venueId }, create: createData, update: updates })
-      })
-    : await prisma.venueSettings.upsert({
-        where: { venueId },
-        create: createData,
-        update: updates,
-      })
+  const settings =
+    tocaMotivos || tocaSalidaOlvidada
+      ? await prisma.$transaction(async tx => {
+          if (tocaMotivos) await revalidarMotivosConCandado(tx, venueId, updates)
+          // En fila con el cierre de una salida olvidada de esta sucursal (Codex 26-nov r2 #2 y r3 #9).
+          if (tocaSalidaOlvidada) await candadoDeLaRegla(tx, venueId)
+          return tx.venueSettings.upsert({ where: { venueId }, create: createData, update: updates })
+        })
+      : await prisma.venueSettings.upsert({
+          where: { venueId },
+          create: createData,
+          update: updates,
+        })
 
   const updatedFields = Object.keys(updates)
   logger.info(`Updated VenueSettings for venue: ${venueId}`, { updatedFields })

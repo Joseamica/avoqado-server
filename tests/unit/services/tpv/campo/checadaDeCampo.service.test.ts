@@ -37,7 +37,7 @@ let antesDeActualizar: (() => void) | null
 let cola: Promise<void>
 let zona: string
 /** El interruptor de «salida olvidada» de la sucursal (null = sin fila de ajustes = prendido). */
-let ajustes: { salidaOlvidadaEnabled: boolean; rotatingShiftsEnabled: boolean } | null
+let ajustes: { salidaOlvidadaEnabled: boolean; rotatingShiftsEnabled: boolean; salidaOlvidadaCorte?: string | null } | null
 /** El cuadrante de la persona (null = sin horario). */
 let cuadrante: Record<string, { enabled: boolean; ranges: { open: string; close: string }[] }> | null
 
@@ -46,12 +46,21 @@ const OPERADORES: Record<string, (valor: any, x: any) => boolean> = {
   in: (valor, x) => x.includes(valor),
   gt: (valor, x) => valor != null && valor > x,
   lt: (valor, x) => valor != null && valor < x,
+  lte: (valor, x) => valor != null && valor <= x,
   not: (valor, x) => !igual(valor, x),
 }
-/** El `where` de Prisma que usa el servicio: igualdad, `in`/`gt`/`lt`/`not` y llaves compuestas (`staffId_llaveEntrada`). */
+/**
+ * El `where` de Prisma que usa el servicio: igualdad, `in`/`gt`/`lt`/`lte`/`not`, llaves compuestas (`staffId_llaveEntrada`),
+ * `OR` y el filtro por los ajustes de la sucursal (`venue: { settings: … }`, contra [ajustes]).
+ */
 function coincide(f: Fila, where: Fila): boolean {
   return Object.entries(where).every(([k, w]) => {
     if (w === undefined) return true
+    if (k === 'OR') return (w as Fila[]).some(b => coincide(f, b))
+    if (k === 'venue' && !('venue' in f)) {
+      const deLosAjustes = (w as Fila).settings
+      return !deLosAjustes || (ajustes != null && coincide(ajustes as Fila, deLosAjustes))
+    }
     if (w && typeof w === 'object' && !(w instanceof Date)) {
       const ops = Object.keys(w)
       return ops.every(o => o in OPERADORES) ? ops.every(o => OPERADORES[o](f[k], w[o])) : coincide(f, w)
@@ -143,6 +152,8 @@ function armarBase() {
         ...db,
         $queryRaw: jest.fn(async (...args: unknown[]) => {
           db.$queryRaw(...args)
+          // Sólo el candado de la persona hace fila; el de la regla de la sucursal (Codex 26-nov r3 #9) no.
+          if (!String(args[1] ?? '').startsWith('checada:')) return
           const antes = cola
           cola = new Promise<void>(listo => (soltar = listo))
           await antes
@@ -972,6 +983,25 @@ describe('salida olvidada (D3)', () => {
     // La misma salida repetida (reintento del celular) devuelve lo mismo, sin otra nota, y sigue diciendo que no se usó (Codex r1 #5).
     const otra = await registrarSalidaDeCampo(q, { llave: LLAVE, timeEntryId: e.id, ocurrioAt: t('12:58', 9).toISOString() }, t('13:30', 9))
     expect(otra).toMatchObject({ repetida: true, salidaNoUsada: true })
+  })
+
+  it('26-nov r1 #1: el límite del cierre queda fijo; mover el corte después no deja que una salida tardía lo estire', async () => {
+    // Cerrada a las 22:00 en 0 h con el corte de las 22:00; el gerente movió el corte a las 23:00 antes de que subiera la salida.
+    ajustes = { salidaOlvidadaEnabled: true, rotatingShiftsEnabled: false, salidaOlvidadaCorte: '23:00' }
+    const e = entrada({
+      clockInTime: t('14:00', 3),
+      clockOutTime: t('14:00', 3),
+      status: 'CLOCKED_OUT',
+      totalHours: 0,
+      autoClockOut: true,
+      salidaOlvidada: true,
+      limiteOlvidada: t('22:00', 3),
+    })
+
+    const r = await registrarSalidaDeCampo(q, { llave: LLAVE, timeEntryId: e.id, ocurrioAt: t('22:40', 3).toISOString() }, t('22:45', 3))
+
+    expect(r).toMatchObject({ salidaNoUsada: true, totalHours: 0 })
+    expect(entradas[0]).toMatchObject({ clockOutTime: t('14:00', 3), totalHours: 0, autoClockOut: true })
   })
 
   it('Codex r1 #6: el gerente ya corrigió la salida olvidada y luego sube la salida sin red → se anota con su foto, no 409', async () => {

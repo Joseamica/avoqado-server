@@ -10,7 +10,7 @@ roles:
   - OWNER
   - ADMIN
   - MANAGER
-lastVerified: 2026-11-25
+lastVerified: 2026-11-26
 sourceRepo: avoqado-web-dashboard
 relatedArticles:
   - gestionar-clientes
@@ -33,7 +33,7 @@ También revisa si el programa aplica a todas las sucursales o solo a una. Las r
 
 ## Pasos
 
-1. Abre **Clientes > Lealtad**.
+1. Abre **Clientes > Programa de Lealtad**.
 2. Revisa si el programa está activo.
 3. Valida reglas de acumulación, canje, expiración y restricciones.
 4. Ajusta solo los campos necesarios.

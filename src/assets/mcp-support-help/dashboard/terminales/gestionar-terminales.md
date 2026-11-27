@@ -10,7 +10,7 @@ roles:
   - OWNER
   - ADMIN
   - MANAGER
-lastVerified: 2026-05-20
+lastVerified: 2026-11-26
 sourceRepo: avoqado-web-dashboard
 popular: true
 keywords:
@@ -30,7 +30,7 @@ Los datos siempre dependen del local activo. Si administras varias sucursales, c
 
 ## Pasos
 
-1. Abre **Terminales**.
+1. Abre **Dispositivos**.
 2. Busca la terminal por nombre, identificador o estado.
 3. Revisa si aparece activa, pendiente o con algún problema de conexión.
 4. Abre el detalle si necesitas validar información del dispositivo.

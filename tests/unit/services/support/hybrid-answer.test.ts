@@ -1671,9 +1671,9 @@ describe('T-F7 to T-F13: what the judge says is missing, by line number, sends t
       intro: null,
       steps: [
         {
-          text: 'Entra a *Configuración > Editar Local > Imágenes y contacto*.',
+          text: 'Entra a *Configuración > Información del local > Contacto e Imágenes*.',
           guideId: 'dashboard/configuracion/configurar-imagenes-contacto',
-          quote: 'Entra a **Configuración > Editar Local > Imágenes y contacto**.',
+          quote: 'Entra a **Configuración > Información del local > Contacto e Imágenes**.',
         },
         {
           text: 'Actualiza el logo según lo que permita la pantalla.',
@@ -2232,9 +2232,9 @@ describe('T-F10: the judge reads ONE copy of each guide: as it is, with the numb
             'Los datos siempre dependen del local activo. Si administras varias sucursales, cambia primero a la sucursal donde está la terminal.',
         },
         {
-          text: 'Abre *Terminales* y busca la terminal por nombre, identificador o estado.',
+          text: 'Abre *Dispositivos* y busca la terminal por nombre, identificador o estado.',
           guideId: id,
-          quote: 'Abre **Terminales**.\n2. Busca la terminal por nombre, identificador o estado.',
+          quote: 'Abre **Dispositivos**.\n2. Busca la terminal por nombre, identificador o estado.',
         },
         {
           text: 'Si sigue sin aparecer asignada, contacta a soporte.',
@@ -2253,7 +2253,7 @@ describe('T-F10: the judge reads ONE copy of each guide: as it is, with the numb
     for (const quote of quotesOf(draft)) expect(numbered.replace(/\[\d+\] /g, '')).toContain(quote)
     expect(quotesOf(draft).filter(q => !numbered.includes(q))).toEqual([draft.steps[0].quote, draft.steps[1].quote])
     expect(numbered).toContain('Los datos siempre dependen del local activo. [5] Si administras varias sucursales')
-    expect(numbered).toContain('Abre **Terminales**.\n[7] 2. Busca la terminal')
+    expect(numbered).toContain('Abre **Dispositivos**.\n[7] 2. Busca la terminal')
     // what the judge said was missing (line 5) is still that line; T-F13: the whole guide goes, with that line in its place
     expect(missingLineText([terminals], { guideId: id, line: 5 })).toBe(
       'Si administras varias sucursales, cambia primero a la sucursal donde está la terminal.',

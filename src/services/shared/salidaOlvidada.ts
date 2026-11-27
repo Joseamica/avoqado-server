@@ -13,8 +13,11 @@
  *
  * 1. **Cuándo.** Un turno abierto es «olvidado» cuando pasa su LÍMITE: el siguiente corte del día de negocio (04:00 en la
  *    zona de la sucursal, el mismo de la caja: `BUSINESS_DAY_START_HOUR`) y nunca antes de [HORAS_MINIMAS] desde la entrada,
- *    para no partir un turno nocturno (antro de 22:00 a 06:00). Lo cierra el job cada 15 min o, si llega antes, la siguiente
- *    checada de la persona (entrada o salida, en cualquier aparato).
+ *    para no partir un turno nocturno (antro de 22:00 a 06:00). Si la sucursal eligió su hora de corte
+ *    (`VenueSettings.salidaOlvidadaCorte`, founder 26-nov: «A», como Toast y Square), el límite es el siguiente corte que caiga
+ *    al menos [MIN_ANTES_DEL_CORTE_H] después de la entrada, sin el mínimo de 12 h: la sucursal dijo cuándo termina su día.
+ *    Lo cierra el job cada 15 min o, si llega antes, la siguiente checada de la persona (entrada o salida, en cualquier
+ *    aparato).
  * 2. **Con qué horas.** Si la persona tiene horario ese día (cuadrante, excepción o turno rotativo PUBLICADO: la misma
  *    precedencia que Asistencia, `resolveExpectedDay`), la salida es la de su horario, como Deputy. Si no, 0 horas
  *    (salida = entrada): en México no se inventan horas de nómina. Siempre queda «Salida olvidada · revisar»
@@ -39,12 +42,33 @@ import { BUSINESS_DAY_START_HOUR } from './cashDrawerAutoClose'
 
 /** Un turno nunca se da por olvidado antes de estas horas desde su entrada (turnos nocturnos que cruzan el corte). */
 export const HORAS_MINIMAS = 12
+/** Con hora de corte propia: entrar a menos de esto del corte cuenta para el corte del día siguiente. */
+export const MIN_ANTES_DEL_CORTE_H = 1
+/**
+ * Las abiertas que YA pudieron vencer: con la regla de fábrica, las de 12 h o más; en una sucursal con hora propia, las de
+ * 1 h o más (Codex r1 #9: las de fábrica no pagan la lectura de las de hora propia). Con `lte`: la que vence justo en el
+ * límite entra en esa misma pasada (r1 #6).
+ */
+const puedenHaberVencido = (ahora: Date): Prisma.TimeEntryWhereInput => ({
+  OR: [
+    { clockInTime: { lte: new Date(ahora.getTime() - HORAS_MINIMAS * 3_600_000) } },
+    {
+      clockInTime: { lte: new Date(ahora.getTime() - MIN_ANTES_DEL_CORTE_H * 3_600_000) },
+      venue: { settings: { salidaOlvidadaCorte: { not: null } } },
+    },
+  ],
+})
 /** Llegar hasta 4 h antes de la entrada de su horario todavía es ese turno. */
 const LLEGADA_ANTICIPADA_MIN = 4 * 60
 const MAX_HORAS = 999.99 // Decimal(5,2)
 /** Por pasada del job: lo viejo se va cerrando en tandas, nunca una lectura sin tope. */
 export const TOPE_POR_PASADA = 500
-/** Páginas por pasada del job (cada 15 min): hasta 2,500 revisadas; lo demás, en la siguiente. */
+/**
+ * Páginas por pasada del job (cada 15 min): hasta 2,500 revisadas; lo demás, en la siguiente.
+ * ponytail: con más de 2,500 turnos abiertos y aún vigentes por delante (hora de corte propia), uno ya vencido puede esperar
+ * varias pasadas (Codex 26-nov r2 #4); la siguiente checada de la persona lo cierra igual. Si llega a pasar, ordenar por
+ * límite precalculado.
+ */
 const PAGINAS_POR_PASADA = 5
 
 export const NOTA_SALIDA_OLVIDADA = '[Sistema] Salida olvidada · revisar'
@@ -57,15 +81,51 @@ const zonaDe = (tz: string | null | undefined) => (tz && isValidTimezone(tz) ? t
 const MARGEN_TRAS_SU_HORARIO_MS = 60 * 60_000
 
 /**
+ * Pone en fila, por sucursal, el cierre de una salida olvidada y el cambio de su regla (interruptor u hora de corte): uno
+ * espera a que el otro termine. Va dentro de la transacción de quien lo toma (se suelta al terminarla).
+ */
+export async function candadoDeLaRegla(db: Db, venueId: string): Promise<void> {
+  await db.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${`salida-olvidada:${venueId}`}))::text`
+}
+
+/** La hora de corte de la sucursal («HH:mm», 00:00–23:59) como [hora, minuto]; cualquier otra cosa es la de fábrica (null). */
+export function leerCorte(corte: string | null | undefined): [number, number] | null {
+  const m = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(corte ?? '')
+  return m ? [Number(m[1]), Number(m[2])] : null
+}
+
+/**
  * Hasta cuándo la entrada [clockIn] sigue siendo «su día»: el siguiente corte de las 04:00, nunca antes de 12 h y, si su
- * horario termina después (un nocturno de 21:00 a 10:00), hasta una hora después de su salida. Sin [finDeSuHorario] es el
+ * horario termina después (un nocturno de 21:00 a 10:00), hasta una hora después de su salida. Con [corte] de la sucursal,
+ * el siguiente corte que caiga al menos una hora después de la entrada, sin el mínimo de 12 h. Sin [finDeSuHorario] es el
  * límite BASE: el celular usa ése (no conoce el horario) y el job lo usa como filtro barato (el real nunca es menor).
  */
-export function limiteDelTurno(clockIn: Date, timezone: string | null | undefined, finDeSuHorario?: Date | null): Date {
-  const local = DateTime.fromJSDate(clockIn, { zone: zonaDe(timezone) })
-  let corte = local.set({ hour: BUSINESS_DAY_START_HOUR, minute: 0, second: 0, millisecond: 0 })
-  if (corte <= local) corte = corte.plus({ days: 1 })
-  const base = Math.max(corte.toMillis(), clockIn.getTime() + HORAS_MINIMAS * 3_600_000)
+export function limiteDelTurno(
+  clockIn: Date,
+  timezone: string | null | undefined,
+  finDeSuHorario?: Date | null,
+  corte?: string | null,
+): Date {
+  const zona = zonaDe(timezone)
+  const propio = leerCorte(corte)
+  if (propio) {
+    // El corte de cada día se arma con su fecha (no sumando días a una hora ya corrida): un día con cambio de horario no
+    // arrastra la hora corrida al día siguiente (Codex r1 #5).
+    const desde = clockIn.getTime() + MIN_ANTES_DEL_CORTE_H * 3_600_000
+    // Desde el inicio del día (`set` resuelve con su propio desfase, no con el reloj del proceso): una hora que se repite al
+    // regresar el horario de invierno da siempre la primera (Codex r2 #3).
+    const corteDe = (d: DateTime) => d.startOf('day').set({ hour: propio[0], minute: propio[1] }).toMillis()
+    const dia = DateTime.fromMillis(desde, { zone: zona })
+    const hoy = corteDe(dia)
+    const base = hoy >= desde ? hoy : corteDe(dia.plus({ days: 1 }))
+    // Su horario sólo lo alarga si termina DESPUÉS del corte (un turno que de verdad lo cruza); si termina antes, manda el
+    // corte que eligió la sucursal (Codex r1 #7).
+    return new Date(finDeSuHorario && finDeSuHorario.getTime() > base ? finDeSuHorario.getTime() + MARGEN_TRAS_SU_HORARIO_MS : base)
+  }
+  const local = DateTime.fromJSDate(clockIn, { zone: zona })
+  let c = local.set({ hour: BUSINESS_DAY_START_HOUR, minute: 0, second: 0, millisecond: 0 })
+  if (c <= local) c = c.plus({ days: 1 })
+  const base = Math.max(c.toMillis(), clockIn.getTime() + HORAS_MINIMAS * 3_600_000)
   return new Date(finDeSuHorario ? Math.max(base, finDeSuHorario.getTime() + MARGEN_TRAS_SU_HORARIO_MS) : base)
 }
 
@@ -122,7 +182,12 @@ const ENTRADA_SELECT = {
   status: true,
   notes: true,
   breaks: { select: { id: true, startTime: true, endTime: true } },
-  venue: { select: { timezone: true, settings: { select: { salidaOlvidadaEnabled: true, rotatingShiftsEnabled: true } } } },
+  venue: {
+    select: {
+      timezone: true,
+      settings: { select: { salidaOlvidadaEnabled: true, rotatingShiftsEnabled: true, salidaOlvidadaCorte: true } },
+    },
+  },
 } satisfies Prisma.TimeEntrySelect
 
 type EntradaAbierta = Prisma.TimeEntryGetPayload<{ select: typeof ENTRADA_SELECT }>
@@ -149,6 +214,8 @@ interface TurnoDeLaPersona {
   clockInTime: Date
   timezone: string | null | undefined
   rotativos: boolean
+  /** La hora de corte de la sucursal (`salidaOlvidadaCorte`); null = la de fábrica. */
+  corte: string | null | undefined
 }
 
 async function horarioDe(db: Db, e: TurnoDeLaPersona): Promise<HorarioDelDia[]> {
@@ -198,33 +265,48 @@ async function horarioDe(db: Db, e: TurnoDeLaPersona): Promise<HorarioDelDia[]> 
  */
 export async function limiteYSalidaDeSuHorario(db: Db, e: TurnoDeLaPersona): Promise<{ limite: Date; deSuHorario: Date | null }> {
   const fin = salidaDeSuHorario(e.clockInTime, e.timezone, await horarioDe(db, e))
-  return { limite: limiteDelTurno(e.clockInTime, e.timezone, fin), deSuHorario: fin }
+  return { limite: limiteDelTurno(e.clockInTime, e.timezone, fin, e.corte), deSuHorario: fin }
 }
 
 /**
- * El límite de un turno que YA cerró el sistema, fijo desde ese cierre (Codex r2 #3): el base, o una hora después de la salida
- * con la que se cerró (la de su horario). Cambiar el cuadrante después no lo mueve.
+ * El límite de un turno que YA cerró el sistema, fijo desde ese cierre (Codex r2 #3): el que se guardó al cerrarlo
+ * (`limiteOlvidada`). Los cierres de antes no lo traen: se juzgan con la regla de fábrica, la vigente cuando cerraron (el base,
+ * o una hora después de la salida con la que se cerró). Ni el cuadrante ni la hora de corte de después lo mueven (26-nov r1 #1).
  */
-export function limiteDeUnCierre(clockIn: Date, timezone: string | null | undefined, cierre: Date): Date {
-  return limiteDelTurno(clockIn, timezone, cierre)
+export function limiteDeUnCierre(
+  clockIn: Date,
+  timezone: string | null | undefined,
+  cierre: Date,
+  guardado: Date | null | undefined,
+): Date {
+  return guardado ?? limiteDelTurno(clockIn, timezone, cierre, null)
 }
 
 /** Cierra [e] como «salida olvidada» si ya pasó su límite y el negocio tiene la regla prendida. null = no tocó nada. */
 async function cerrarSiOlvidada(db: Db, e: EntradaAbierta, ahora: Date, disparador: Disparador): Promise<SalidaOlvidadaCerrada | null> {
   if (e.venue.settings?.salidaOlvidadaEnabled === false) return null
-  // Filtro barato: el límite real nunca es menor que el base, así que antes del base no hay nada que leer.
-  if (ahora < limiteDelTurno(e.clockInTime, e.venue.timezone)) return null
+  // Filtro barato con lo que se leyó en la página: el límite real nunca es menor que el base. La decisión, con lo releído.
+  if (ahora < limiteDelTurno(e.clockInTime, e.venue.timezone, null, e.venue.settings?.salidaOlvidadaCorte)) return null
+  // El interruptor y la hora de corte se releen dentro de la transacción (Codex r2 #11 y 26-nov r1 #2): el job leyó la página
+  // antes y el gerente pudo apagarla o mover el corte. Con el candado de la regla de la sucursal (26-nov r2 #2 y r3 #9): el
+  // cambio del gerente y este cierre van en fila, también cuando la sucursal aún no tiene fila de ajustes. Si el gerente
+  // ADELANTA el corte, el filtro de arriba (con lo de la página) puede saltarla en esta pasada: la cierra la siguiente.
+  await candadoDeLaRegla(db, e.venueId)
+  const ajuste = await db.venueSettings.findUnique({
+    where: { venueId: e.venueId },
+    select: { salidaOlvidadaEnabled: true, salidaOlvidadaCorte: true, rotatingShiftsEnabled: true },
+  })
+  if (ajuste?.salidaOlvidadaEnabled === false) return null
   const { limite, deSuHorario } = await limiteYSalidaDeSuHorario(db, {
     staffId: e.staffId,
     venueId: e.venueId,
     clockInTime: e.clockInTime,
     timezone: e.venue.timezone,
-    rotativos: e.venue.settings?.rotatingShiftsEnabled === true,
+    // También releído (Codex 26-nov r4 #6): no se mezcla un corte nuevo con el interruptor de turnos de la primera lectura.
+    rotativos: ajuste?.rotatingShiftsEnabled === true,
+    corte: ajuste?.salidaOlvidadaCorte ?? null,
   })
-  if (ahora < limite) return null // un nocturno largo con horario: todavía es su turno
-  // El interruptor se relee dentro de la transacción (Codex r2 #11): el job leyó la página antes y el gerente pudo apagarla.
-  const ajuste = await db.venueSettings.findUnique({ where: { venueId: e.venueId }, select: { salidaOlvidadaEnabled: true } })
-  if (ajuste?.salidaOlvidadaEnabled === false) return null
+  if (ahora < limite) return null // un nocturno largo con horario, o el corte se movió más tarde: todavía es su turno
 
   const salida = deSuHorario ?? e.clockInTime
   // Descansos: los terminados antes de la salida cuentan; uno abierto (o que pasa de la salida) termina en la salida.
@@ -253,6 +335,7 @@ async function cerrarSiOlvidada(db: Db, e: EntradaAbierta, ahora: Date, disparad
       breakMinutes: deSuHorario ? Math.round(minutosDescanso) : 0,
       autoClockOut: true,
       salidaOlvidada: true,
+      limiteOlvidada: limite,
       autoClockOutNote: nota,
     },
   })
@@ -283,11 +366,21 @@ export async function cerrarSalidasOlvidadasDe(
   disparador: Disparador,
 ): Promise<SalidaOlvidadaCerrada[]> {
   const abiertas = await db.timeEntry.findMany({
-    where: { staffId, status: ABIERTA, clockOutTime: null, clockInTime: { lt: new Date(ahora.getTime() - HORAS_MINIMAS * 3_600_000) } },
+    where: { staffId, status: ABIERTA, clockOutTime: null, ...puedenHaberVencido(ahora) },
     select: ENTRADA_SELECT,
     orderBy: { clockInTime: 'asc' },
     take: 20,
   })
+  // Los candados de la regla de TODAS sus sucursales, en orden de id, antes de cerrar (Codex 26-nov r4 #4): dos personas con
+  // turnos abiertos en A y B en distinto orden ya no se esperan en círculo. El de cada cierre después es el mismo (re-entrante).
+  // Sólo las sucursales con un turno que ya pasó su límite BASE (r5 #3): una salida normal de un turno vigente no hace fila.
+  // ponytail: un turno pasado el corte pero vigente por su horario sí lo toma; con muchas checadas así a la vez en UNA
+  // sucursal podrían esperar conexiones (Codex 26-nov r6 #5). Con 1-2 promotores por tienda no pasa; si crece, leer el
+  // horario antes del candado.
+  const vencidas = abiertas.filter(
+    e => ahora >= limiteDelTurno(e.clockInTime, e.venue.timezone, null, e.venue.settings?.salidaOlvidadaCorte),
+  )
+  for (const venueId of [...new Set(vencidas.map(e => e.venueId))].sort()) await candadoDeLaRegla(db, venueId)
   const cerradas: SalidaOlvidadaCerrada[] = []
   for (const e of abiertas) {
     const c = await cerrarSiOlvidada(db, e, ahora, disparador)
@@ -329,12 +422,12 @@ export async function cerrarSalidasOlvidadasPendientes(
   ahora = new Date(),
   db = defaultPrisma,
 ): Promise<{ cerradas: number; errores: number }> {
-  // Sólo pueden haber pasado su límite las que tienen más de HORAS_MINIMAS: la lectura usa el índice de status. Se recorre
+  // Sólo pueden haber pasado su límite las de [puedenHaberVencido]: la lectura usa el índice de status. Se recorre
   // por páginas con cursor (Codex r1 #11): unas que todavía no vencen (otra zona, un nocturno largo) no tapan a las que sí.
   const where: Prisma.TimeEntryWhereInput = {
     status: ABIERTA,
     clockOutTime: null,
-    clockInTime: { lt: new Date(ahora.getTime() - HORAS_MINIMAS * 3_600_000) },
+    AND: [puedenHaberVencido(ahora)],
     // Los negocios que la apagaron no ocupan la tanda (sin este filtro, 500 suyas taparían a todos los demás).
     venue: { OR: [{ settings: null }, { settings: { salidaOlvidadaEnabled: true } }] },
   }
@@ -357,7 +450,7 @@ export async function cerrarSalidasOlvidadasPendientes(
     revisadas += candidatas.length
     for (const e of candidatas) {
       // Sin transacción para las que ni el límite base han pasado (lo normal en una tanda de otra zona).
-      if (ahora < limiteDelTurno(e.clockInTime, e.venue.timezone)) continue
+      if (ahora < limiteDelTurno(e.clockInTime, e.venue.timezone, null, e.venue.settings?.salidaOlvidadaCorte)) continue
       try {
         const c = await db.$transaction(tx => cerrarSiOlvidada(tx, e, ahora, 'JOB'))
         if (c) {
@@ -388,7 +481,7 @@ export async function cerrarOlvidadasAntesDeChecar(
 ): Promise<SalidaOlvidadaCerrada[]> {
   // Lo normal es que no haya nada viejo abierto: una lectura barata y sin transacción.
   const viejas = await defaultPrisma.timeEntry.findMany({
-    where: { staffId, status: ABIERTA, clockOutTime: null, clockInTime: { lt: new Date(ahora.getTime() - HORAS_MINIMAS * 3_600_000) } },
+    where: { staffId, status: ABIERTA, clockOutTime: null, ...puedenHaberVencido(ahora) },
     select: { id: true },
     take: 1,
   })
@@ -437,6 +530,7 @@ export async function corregirSalidaOlvidada(params: {
         llaveSalida: true,
         notes: true,
         breaks: { select: { id: true, startTime: true, endTime: true } },
+        limiteOlvidada: true,
         venue: { select: { timezone: true, settings: { select: { rotatingShiftsEnabled: true } } } },
       },
     })
@@ -449,13 +543,19 @@ export async function corregirSalidaOlvidada(params: {
     }
     if (salida <= e.clockInTime) throw new BadRequestError('La salida tiene que ser después de la entrada.', 'SALIDA_ANTES_DE_ENTRADA')
     if (salida > ahora) throw new BadRequestError('La salida no puede estar en el futuro.', 'SALIDA_EN_EL_FUTURO')
-    const { limite } = await limiteYSalidaDeSuHorario(tx, {
-      staffId: e.staffId,
-      venueId: e.venueId,
-      clockInTime: e.clockInTime,
-      timezone: e.venue.timezone,
-      rotativos: e.venue.settings?.rotatingShiftsEnabled === true,
-    })
+    // El límite con el que se cerró, fijo (26-nov r1 #1); los cierres de antes, con la regla de fábrica y su horario, como hoy.
+    const limite =
+      e.limiteOlvidada ??
+      (
+        await limiteYSalidaDeSuHorario(tx, {
+          staffId: e.staffId,
+          venueId: e.venueId,
+          clockInTime: e.clockInTime,
+          timezone: e.venue.timezone,
+          rotativos: e.venue.settings?.rotatingShiftsEnabled === true,
+          corte: null,
+        })
+      ).limite
     if (salida > limite) {
       throw new BadRequestError(
         `La salida no puede pasar de ${DateTime.fromJSDate(limite, { zone: zonaDe(e.venue.timezone) }).toFormat('HH:mm')} del día siguiente: un turno no dura días.`,

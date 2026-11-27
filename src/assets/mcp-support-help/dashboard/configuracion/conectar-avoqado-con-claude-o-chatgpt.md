@@ -10,7 +10,7 @@ roles:
   - ADMIN
   - MANAGER
   - VIEWER
-lastVerified: 2026-11-05
+lastVerified: 2026-11-26
 sourceRepo: avoqado-web-dashboard
 relatedArticles:
   - asignar-permisos-roles
@@ -51,7 +51,7 @@ En ChatGPT los pasos son equivalentes desde su sección de aplicaciones o conect
 
 ## Problemas frecuentes
 
-- **«No encuentro una sucursal»:** la conexión sólo ve la organización que elegiste y las sucursales donde tu usuario tiene acceso. Revisa tus permisos en **Configuración > Permisos y roles** o desconecta y vuelve a conectar eligiendo la otra organización.
+- **«No encuentro una sucursal»:** la conexión sólo ve la organización que elegiste y las sucursales donde tu usuario tiene acceso. Revisa tus permisos en **Configuración > Roles y permisos** o desconecta y vuelve a conectar eligiendo la otra organización.
 - **«Me dice que necesito otro plan»:** la función depende del plan del negocio o de un módulo apagado. El mensaje indica cuál.
 - **«No me deja cambiar algo»:** tu rol en esa sucursal no tiene ese permiso. Pídeselo al dueño o administrador.
 - **Ventas en cero:** las cifras se calculan por la zona horaria de cada sucursal y sólo cuentan pagos completados.

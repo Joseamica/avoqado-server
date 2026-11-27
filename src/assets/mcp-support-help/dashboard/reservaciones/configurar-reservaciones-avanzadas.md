@@ -15,7 +15,7 @@ roles:
   - ADMIN
   - MANAGER
   - HOST
-lastVerified: 2026-11-22
+lastVerified: 2026-11-26
 sourceRepo: avoqado-web-dashboard
 relatedArticles:
   - gestionar-reservaciones
@@ -46,7 +46,7 @@ Antes de activar comunicaciones o invitaciones, define tono, responsable y datos
 
    **Guardar Cambios** guarda lo de las tres pestañas a la vez; un punto junto al nombre de una pestaña marca que tiene cambios sin guardar. Los horarios y la asignación de profesionistas se guardan con sus propios botones.
 2. Revisa **Comunicaciones** cuando la pantalla esté disponible para controlar mensajes relacionados con reservas.
-3. Entra a **Reservas online > Invitar clientes** si el local tiene habilitado el flujo de invitaciones.
+3. Entra a **Reservaciones > Reservas en línea > Invitar clientes** si el local tiene habilitado el flujo de invitaciones.
 4. Usa **Widget avanzado** para revisar opciones de personalización o instalación cuando esté habilitado.
 5. Valida cualquier cambio con una reservación de prueba antes de publicarlo.
 6. Avisa al equipo de host o gerencia si cambia un mensaje, canal o forma de reservar.

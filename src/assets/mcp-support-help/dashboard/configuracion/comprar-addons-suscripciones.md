@@ -10,7 +10,7 @@ dashboardRoutes:
 roles:
   - OWNER
   - ADMIN
-lastVerified: 2026-05-21
+lastVerified: 2026-11-26
 sourceRepo: avoqado-web-dashboard
 popular: true
 relatedArticles:
@@ -34,7 +34,7 @@ Para módulos como Reservaciones, no basta con comprar el add-on. También debes
 
 ## Pasos
 
-1. Abre **Configuración > Facturación y add-ons**.
+1. Abre **Configuración > Plan y facturación**.
 2. Revisa plan actual, suscripciones activas y métodos de pago.
 3. Identifica el add-on que quieres activar, por ejemplo **Reservaciones**.
 4. Revisa precio, alcance, condiciones y sucursal donde se aplicará.
@@ -46,7 +46,7 @@ Para módulos como Reservaciones, no basta con comprar el add-on. También debes
 El precio vigente de tu plan está en «Tu plan», en Facturación (precio, cuánto cuesta, mensualidad). El Plan Básico trae arqueo de caja, servicio de mesas y comandas, pantalla de cocina, reservaciones y citas y lealtad, con usuarios sin tope en una sucursal. Sólo aparece cuando Avoqado lo tiene publicado.
 
 - **Si lo elegiste en el alta:** tienes una prueba gratis con todo Pro. Al terminar no se cobra nada. Antes y ese día te llega un aviso con **Contratar Básico** y **Contratar Pro**. Se contrata con un clic, con la tarjeta que ya guardaste.
-- **Si no eliges nada:** el negocio pasa a Gratis sin perder datos. Los usuarios arriba del tope de Gratis se pausan hasta que contrates. Puedes contratar el Básico después en **Configuración > Facturación y add-ons**, en **Tu plan**, con **Contratar Básico**.
+- **Si no eliges nada:** el negocio pasa a Gratis sin perder datos. Los usuarios arriba del tope de Gratis se pausan hasta que contrates. Puedes contratar el Básico después en **Configuración > Plan y facturación**, en **Tu plan**, con **Contratar Básico**.
 - **Si tienes Pro con descuento:** en el último mes con descuento aparece **¿Prefieres el Básico?** con **Terminar mi Pro al acabar el periodo**. Tu Pro sigue hasta que acaba ese periodo, y ese día contratas el Básico.
 
 ## Problemas frecuentes

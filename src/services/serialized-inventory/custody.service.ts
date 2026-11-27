@@ -1010,6 +1010,7 @@ export class SimCustodyService {
                         rejectionReasons: true,
                         reviewNotes: true,
                         reviewedAt: true,
+                        createdAt: true,
                       },
                     },
                   },
@@ -1036,6 +1037,9 @@ export class SimCustodyService {
         rejectionReasons: verification?.rejectionReasons ?? null,
         reviewNotes: verification?.reviewNotes ?? null,
         reviewedAt: verification?.reviewedAt ?? null,
+        // La hora REAL de la venta (la verificación guarda la del celular, aunque haya subido después sin red; `soldAt` es la
+        // de subida). La app de campo agrupa «Mis ventas» por mes con ésta (Codex 26-nov r3 #8). Campo nuevo y opcional.
+        saleAt: verification?.createdAt ?? null,
       }
     })
   }
