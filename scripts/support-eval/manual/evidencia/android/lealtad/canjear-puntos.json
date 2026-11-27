@@ -1,7 +1,7 @@
 {
   "pagina": "android/lealtad/canjear-puntos",
   "sourceRepo": "avoqado-android",
-  "sourceRef": "98a114df07c2eb0a6a3e7d1c336e6c152de38a1b",
+  "sourceRef": "a8dc4b6f2b14a982fc3cc6b82f6fdc11d93fd295",
   "version": "2.25.60",
   "pasos": [
     {
@@ -127,6 +127,11 @@
       "permiso": "customers:read",
       "archivo": "avoqado-server/src/routes/mobile.routes.ts",
       "linea": 1630
+    },
+    {
+      "permiso": "orders:create",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 737
     }
   ],
   "plan": [
@@ -160,12 +165,27 @@
     {
       "afirmacion": "En Pedidos, una cuenta de «Pagar después» con un canje de esta caja no se cobra sin internet: «Esta cuenta tiene puntos canjeados: se cobra con conexión. Espera a que vuelva la red.»",
       "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/CobroDeCuentaScreen.kt",
-      "linea": 625
+      "linea": 632
     },
     {
       "afirmacion": "Sin red, «Recompensas» de Pedidos sale en gris con el texto sin conexión de Mesas",
       "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/CobroDeCuentaScreen.kt",
-      "linea": 507
+      "linea": 514
+    },
+    {
+      "afirmacion": "Sin conexión, la ventana de «Usar puntos» dice «Sin conexión: canjear puntos necesita internet…» y no sale Continuar",
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/cart/AtajoDePuntos.kt",
+      "linea": 66
+    },
+    {
+      "afirmacion": "Al volver la red, la ventana vuelve a leer los puntos",
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/UsarPuntosModal.kt",
+      "linea": 55
+    },
+    {
+      "afirmacion": "Si la red o el servidor fallan al mandar: «La cuenta de … quedó guardada en el aparato y se sube sola. Cuando suba, canjea los puntos en Más › Pedidos.»",
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/cart/AtajoDePuntos.kt",
+      "linea": 33
     }
   ],
   "rutas": [
@@ -227,27 +247,27 @@
     {
       "ruta": "Pedidos › cuenta de «Pagar después»: botón «Recompensas» debajo de Cobrar",
       "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/CobroDeCuentaScreen.kt",
-      "linea": 1120
+      "linea": 1163
     },
     {
       "ruta": "La cuenta en $0.00 se cierra con «Cerrar cuenta ($0.00)»",
       "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/CobroDeCuentaScreen.kt",
-      "linea": 678
+      "linea": 685
     },
     {
       "ruta": "Canje sin respuesta: «No se sabe si el canje entró…» y el botón «Reintentar el canje»",
       "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/CobroDeCuentaScreen.kt",
-      "linea": 621
+      "linea": 628
     },
     {
       "ruta": "Cobrar bloqueado con un canje sin terminar: «Hay un canje de puntos sin terminar en esta cuenta…»",
       "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/CobroDeCuentaScreen.kt",
-      "linea": 629
+      "linea": 636
     },
     {
       "ruta": "Sin permiso: «No tienes permiso para canjear puntos. Pídeselo a tu gerente.»",
       "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/CobroDeCuentaScreen.kt",
-      "linea": 632
+      "linea": 639
     },
     {
       "ruta": "Canje con un cobro con tarjeta en curso en la terminal",
@@ -263,13 +283,93 @@
       "ruta": "Cobro de una cuenta con canje que se queda sin respuesta: «No se sabe si el pago entró. Toca «Reintentar» con conexión…»; «Reintentar» no cobra dos veces",
       "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowViewModel.kt",
       "linea": 182
+    },
+    {
+      "ruta": "Cobrar: «Usar puntos» en el menú ⋯ del carrito, en gris con el carrito vacío",
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/cart/CartPanelView.kt",
+      "linea": 1212
+    },
+    {
+      "ruta": "Ventana de «Usar puntos»: «Se guardará una cuenta por cobrar a nombre de … y se abrirá en Pedidos para canjear…»",
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/cart/AtajoDePuntos.kt",
+      "linea": 38
+    },
+    {
+      "ruta": "«Usar puntos» con productos y cliente: Continuar",
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/UsarPuntosModal.kt",
+      "linea": 67
+    },
+    {
+      "ruta": "Un descuento sin motivo pide su motivo antes de mandar",
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
+      "linea": 2520
+    },
+    {
+      "ruta": "Sin cliente: «Agrega el cliente para usar sus puntos.»",
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/cart/AtajoDePuntos.kt",
+      "linea": 24
+    },
+    {
+      "ruta": "Sin permiso de dejar cuentas por cobrar",
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/cart/AtajoDePuntos.kt",
+      "linea": 27
+    },
+    {
+      "ruta": "Con cupón, premio de sellos o descuento que pide aprobación: usar «Pagar después»",
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/cart/AtajoDePuntos.kt",
+      "linea": 29
+    },
+    {
+      "ruta": "Venta ya mandada una vez a «Pagar después»",
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/cart/AtajoDePuntos.kt",
+      "linea": 26
+    },
+    {
+      "ruta": "«El cliente cambió: vuelve a tocar «Usar puntos».»",
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/cart/AtajoDePuntos.kt",
+      "linea": 31
+    },
+    {
+      "ruta": "Sólo importes tecleados: «No hay productos válidos para crear la orden»",
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/cart/CartViewModel.kt",
+      "linea": 3929
+    },
+    {
+      "ruta": "Creada: la caja va sola a Más › Pedidos con esa cuenta",
+      "archivo": "app/src/main/java/com/avoqado/pos/navigation/AvoqadoNavGraph.kt",
+      "linea": 489
+    },
+    {
+      "ruta": "En Pedidos, «Recompensas» se abre solo al quedar lista la cuenta (con la pantalla activa)",
+      "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/CobroDeCuentaScreen.kt",
+      "linea": 1147
+    },
+    {
+      "ruta": "Si no se puede canjear, el aviso trae el folio: «La cuenta #… quedó en Pedidos: …»",
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/cart/AtajoDePuntos.kt",
+      "linea": 149
+    },
+    {
+      "ruta": "Cuenta ya pagada o cancelada: «La cuenta #… ya no está abierta (pagada o cancelada): ya no admite puntos.»",
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/cart/AtajoDePuntos.kt",
+      "linea": 141
+    },
+    {
+      "ruta": "Cancelar la cuenta desde el panel web (Cuentas por cobrar › Cancelar orden): permiso para cancelar cuentas sin cobrar",
+      "archivo": "avoqado-server/src/routes/dashboard.routes.ts",
+      "linea": 3609
+    },
+    {
+      "ruta": "Al cancelar, los puntos canjeados regresan",
+      "archivo": "avoqado-server/src/services/mobile/order.mobile.service.ts",
+      "linea": 8107
     }
   ],
   "aparato": {
     "estado": "PROBADO",
     "aparato": "D3 del laboratorio Alien (D40625BRJ0469), Android, pantalla 1920×1080",
-    "version": "2.25.59-dev (com.avoqado.pos.d39, ANDROID 98a114df)",
-    "apkSha256": "8033b11961352361e6f3c356c81c2bd86748c85efecbecedabd2e1004c839d49",
+    "version": "2.25.59-dev (com.avoqado.pos.d39, ANDROID a8dc4b6f)",
+    "apkSha256": "2fd21fae672eeb0daeec9b5f502b1afaafa3ecb789d724741d45fa0dfb2b355e",
     "fecha": "2026-11-26",
     "fotos": [
       "docs/audit/2026-11-25-defectos-lealtad-referidos/d39/full-testing/d3/01-cuenta-pagar-despues-con-recompensas.png",
@@ -289,16 +389,35 @@
       "docs/audit/2026-11-25-defectos-lealtad-referidos/d39/full-testing/d3/15-perdida-reintento-mismo-canje.png",
       "docs/audit/2026-11-25-defectos-lealtad-referidos/pos/full-testing/05-mesa-cliente-asignado.png",
       "docs/audit/2026-11-25-defectos-lealtad-referidos/pos/full-testing/06-recompensas-dialogo.png",
-      "docs/audit/2026-11-25-defectos-lealtad-referidos/pos/full-testing/08-descuentos-aplicados.png"
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/pos/full-testing/08-descuentos-aplicados.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d39/full-testing/atajo/01-menu-con-usar-puntos.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d39/full-testing/atajo/02-sin-cliente.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d39/full-testing/atajo/03-con-cliente-continuar.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d39/full-testing/atajo/04-pedidos-con-recompensas-abierto.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d39/full-testing/atajo/05-canjeado.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d39/full-testing/atajo/06-cobrada.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d39/full-testing/atajo/07-b-pedidos-recompensas.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d39/full-testing/atajo/08-b-cerrado-sin-canjear.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d39/full-testing/atajo/09-b-sin-red.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d39/full-testing/atajo/10-b-vuelve-la-red.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d39/full-testing/atajo/11-r1-toque-viejo-en-mas-no-borra.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d39/full-testing/atajo/11a-importe-tecleado-no-se-deja-para-despues.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d39/full-testing/atajo/12-r4-salir-por-la-barra-no-salta-sola.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d39/full-testing/atajo/13-colgado-mandando.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d39/full-testing/atajo/14-colgado-aviso-neutro.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d39/full-testing/atajo/15-respuesta-perdida-aviso.png",
+      "docs/audit/2026-11-25-defectos-lealtad-referidos/d39/full-testing/atajo/16-con-pantalla-activa-se-abre-solo.png"
     ],
     "filasCreadas": [
       "Base desechable av-db-25-d39: cliente FULLTEST-D31 Puntos con +3,000 puntos (ADJUST «QA D39 full-testing (CPAD)»)",
       "ORD-…014 «Pagar después» $60: canje 1,000 pts (REDEEM −1000, OrderDiscount «Recompensas — 1000 puntos», versión 1→2, un recibo HTTP_OP_V1) y efectivo $50 (PAID); EARN +50",
       "ORD-…015 $20: canje 2,000 pts y «Cerrar cuenta ($0.00)» → efectivo $0.00, PAID",
       "ORD-…016 $25: canje 150 pts; sin red no se cobra; servidor colgado → canje 100 pts al reintentar (un REDEEM, un recibo); respuesta perdida → canje 100 pts aplicado una vez, el reintento devolvió el mismo",
-      "SAMSUNG 25-nov (Mesas): canje de 400 pts en la mesa M3, quitado desde Descuentos (ADJUST +400) y la cuenta anulada"
+      "SAMSUNG 25-nov (Mesas): canje de 400 pts en la mesa M3, quitado desde Descuentos (ADJUST +400) y la cuenta anulada",
+      "Atajo «Usar puntos»: ORD-…017 $30 canje 2,000 pts y efectivo $40 → cambio $10 (PAID, EARN +30); ORD-…018 abandonada sin canjear (puntos intactos); ORD-…019 tras tocar «Más» dos veces, «Recompensas» abierto solo",
+      "Atajo: ORD-…020 saliendo de Pedidos por la barra mientras cargaba (latencia de 6 s): abierta a mano, «Recompensas» no saltó; ORD-…021 con el SERVIDOR colgado al mandar: aviso neutro y una sola cuenta al volver; ORD-…022 con la respuesta perdida: el reenvío devolvió la misma («Duplicate … returning existing order»)"
     ],
-    "nota": "«Pagar después» se probó el 26-nov en la D3 (la SAMSUNG estaba desconectada del Alien) con red, sin red (alien-adb sin-red) y con el SERVIDOR colgado y con la respuesta perdida (Toxiproxy), contra el SERVIDOR de la rama sobre una base desechable. Salieron dos errores, arreglados con TDD antes de este APK: «Recompensas» se cancelaba con el scope del botón (b422c05d) y el cobro sin respuesta decía «No se pudo registrar el pago» aunque sí entró (98a114df). Mesas se probó el 25-nov en la SAMSUNG (06e80115); su diálogo no cambió desde entonces."
+    "nota": "«Pagar después» se probó el 26-nov en la D3 (la SAMSUNG estaba desconectada del Alien) con red, sin red (alien-adb sin-red) y con el SERVIDOR colgado y con la respuesta perdida (Toxiproxy), contra el SERVIDOR de la rama sobre una base desechable. Salieron dos errores, arreglados con TDD antes de este APK: «Recompensas» se cancelaba con el scope del botón (b422c05d) y el cobro sin respuesta decía «No se pudo registrar el pago» aunque sí entró (98a114df). Mesas se probó el 25-nov en la SAMSUNG (06e80115); su diálogo no cambió desde entonces. El atajo «Usar puntos» (Cobrar → «Pagar después» → Pedidos con «Recompensas») se probó el 26-nov en la misma D3 con los APK de 0488e5dd y 0788b1ab (colgado, respuesta perdida, salir por la barra, toque viejo en «Más») y el de a8dc4b6f (apertura sola con la pantalla activa)."
   },
   "codex": {
     "lote": 4,
