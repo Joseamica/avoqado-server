@@ -15,7 +15,16 @@ import { prismaMock } from '@tests/__helpers__/setup'
 
 jest.mock('@/services/terminal-payment.service', () => {
   const real = jest.requireActual('@/services/terminal-payment.service')
-  return { ...real, terminalPaymentService: { requestRefundOnTerminal: jest.fn(), releaseUnknownRequest: jest.fn() } }
+  return {
+    ...real,
+    terminalPaymentService: {
+      requestRefundOnTerminal: jest.fn(),
+      releaseUnknownRequest: jest.fn(),
+      // Cobro simple · paso 1 de B: la regla «no cobrado nunca sobre dinero conocido» se prueba contra Postgres real
+      // (`cobroSimple.lecturaRespetaElAprobado.integration.test.ts`); aquí, sin dinero conocido, es la proyección de siempre.
+      proyectarParaElPos: jest.fn(async (fila: Parameters<typeof real.proyectarEstado>[0]) => real.proyectarEstado(fila)),
+    },
+  }
 })
 
 /** Un ámbito con permisos completos sobre `venue-1`; sin `scopes` declarados (token de desarrollo), como el resto. */

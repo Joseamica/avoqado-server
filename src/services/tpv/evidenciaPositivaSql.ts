@@ -300,6 +300,18 @@ export function sinVetoDeDineroSql(p: { requestId: string; venueId: string; atte
         AND NOT ${hayDineroDeEstosIntentosSql(p.attemptIds)}`
 }
 
+/**
+ * 🔴 Cobro simple · paso 1 de B (26-nov): ¿CONSTA DINERO de esta solicitud? UNA definición para las dos lecturas que no pueden decir
+ * «no cobrado» sobre dinero conocido: la de la terminal (`resuelta`, Codex r6 P2-7 y r7 P2-2) y la del POS (`proyectarParaElPos`).
+ * Aviso APROBADO de un intento vinculado, Payment ligado, dinero con la llave de sus intentos (cualquier estado) o evidencia de
+ * conciliación pendiente.
+ */
+export function constaDineroDeLaSolicitudSql(requestId: string, venueId: string): Prisma.Sql {
+  return Prisma.sql`(${hayAprobadoVinculadoSql(requestId, venueId)} OR ${hayPagoLigadoSql(requestId, venueId)}
+           OR ${hayDineroDeSusIntentosSql(requestId, venueId)}
+           OR ${hayEvidenciaDeConciliacionSql(requestId, venueId)})`
+}
+
 /** Los Payments ligados a la solicitud (los que `sinPagoLigadoSql` vetaría), los más antiguos primero; acotado. */
 export async function pagosLigados(
   db: Pick<Prisma.TransactionClient, '$queryRaw'>,

@@ -19,7 +19,6 @@ import {
   UNRESOLVED_FINANCIAL_OUTCOME,
   desenlaceCanonico,
   fueSoltadaPorPolitica,
-  proyectarEstado,
   terminalPaymentService,
 } from '@/services/terminal-payment.service'
 import { invalidarVenuesEstrictos } from '@/services/terminal-payment-strictness'
@@ -561,9 +560,10 @@ export function registerTerminalTools(server: McpServer, scope: McpScope) {
       for (const [requestId, total] of totalPorSolicitud) {
         if (total > (vinculosPorSolicitud.get(requestId)?.length ?? 0)) truncadas.add(requestId)
       }
-      // La MISMA proyección que lee el POS (§8 C.1): el operador y el cajero no pueden ver dos verdades distintas.
-      const requests = rows.map(r => {
-        const estado = proyectarEstado(r)
+      // La MISMA proyección que lee el POS (§8 C.1): el operador y el cajero no pueden ver dos verdades distintas. Cobro simple · paso 1
+      // de B: también la regla «no cobrado nunca sobre dinero conocido» (`proyectarParaElPos`; sólo consulta en ese caso, raro).
+      const requests = await Promise.all(rows.map(async r => {
+        const estado = await terminalPaymentService.proyectarParaElPos(r)
         const attempts = vinculosPorSolicitud.get(r.requestId) ?? []
         const llaveGanadora = r.paymentId ? (llaveDelGanador.get(r.paymentId) ?? null) : null
         return {
@@ -605,7 +605,7 @@ export function registerTerminalTools(server: McpServer, scope: McpScope) {
           attemptsTotal: totalPorSolicitud.get(r.requestId) ?? attempts.length,
           createdAt: r.createdAt.toISOString(),
         }
-      })
+      }))
       // 🔴 Pieza B/C (22-sep): las declaraciones del cajero sobre un cobro **LOCAL** —un Pago rápido, iniciado EN la
       // terminal— no tienen solicitud, así que NUNCA aparecerían en la lista de arriba. Sin esto, «el cajero declaró
       // que no se cobró» sería invisible para el MCP en exactamente los cobros que más se atascan (medido en una N86:

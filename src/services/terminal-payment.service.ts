@@ -43,6 +43,7 @@ import {
   contradiccionDeProcedenciaSql,
   sinPagoLigadoSql,
   sinVetoDeDineroSql,
+  constaDineroDeLaSolicitudSql,
 } from './tpv/evidenciaPositivaSql'
 import { utcTs, utcTsOrNull } from '../utils/sqlDates'
 import { getContext, runOutsideContext, runWithContext } from '../observability/executionContext'
@@ -3961,7 +3962,39 @@ class TerminalPaymentService {
     if (!row) return null
     // Cobro simple · S1 (Review Focus 2): sin temporizador (publicación, reinicio), la primera lectura cierra la fila vencida.
     if (await this.cerrarSiVencio(row)) row = (await prisma.terminalPaymentRequest.findFirst({ where: { requestId, venueId } })) ?? row
-    return proyectarEstado(row)
+    return this.proyectarParaElPos(row)
+  }
+
+  /**
+   * 🔴 Cobro simple · paso 1 de B (26-nov; Codex A1 r1 #2 y r2 #2): lo que lee el POS (este GET, la respuesta de «Cancelar» y el MCP)
+   * NUNCA dice «no cobrado» si el SERVIDOR ya conoce dinero de esa solicitud: la afirmación de la terminal (`claimedSuccess`) o
+   * `constaDineroDeLaSolicitudSql` (la MISMA pregunta con la que la terminal no suelta su último aviso). Pasa en el hueco entre que la
+   * fila se soltó «no cobrada» y que el aprobado tardío la re-retiene o la cierra COMPLETED: la afirmación se funde en una escritura y la
+   * re-retención va en otra (diferible), y el aviso APROBADO de AngelPay se guarda antes de registrar el Payment. Se proyecta EN CURSO,
+   * la forma que ANDROID 2.22 e iOS 1.13 ya leen como «sigue» (igual que `enEsperaDelCierre`); al re-retenerla sale TIMED_OUT y al
+   * registrarla, COMPLETED. Sólo sobre liberaciones reversibles (las que un aprobado tardío re-retiene): un «no cobrado» acreditado por
+   * la terminal o una lápida no cambian. La consulta sólo corre en ese caso. Límite aceptado: un aprobado que llega DESPUÉS de la
+   * última lectura del POS (aprobado tardío con aviso al dueño, S1.6).
+   */
+  async proyectarParaElPos(row: FilaProyectable): Promise<TerminalPaymentStatus> {
+    const estado = proyectarEstado(row)
+    const reversible = esLiberacionReversible({ status: row.status, failureCode: row.failureCode ?? null, paymentId: row.paymentId ?? null })
+    if (estado.outcome !== 'NOT_CHARGED' || !reversible) return estado
+    if (!afirmacionDeLaTerminal(row.resultJson ?? null)) {
+      const [consta] = await prisma.$queryRaw<{ hay: boolean }[]>`SELECT ${constaDineroDeLaSolicitudSql(row.requestId, row.venueId)} AS "hay"`
+      if (consta?.hay !== true) return estado
+    }
+    const enCurso: TerminalPaymentStatus = {
+      ...estado,
+      status: TerminalPaymentRequestStatus.SENT,
+      cancelDisposition: null,
+      outcome: 'UNRESOLVED',
+      outcomeEvidence: null,
+      evidenceClass: null,
+    }
+    delete enCurso.errorMessage
+    delete enCurso.noChargeCause
+    return enCurso
   }
 
   /**
@@ -6813,7 +6846,7 @@ class TerminalPaymentService {
           // que las apps no podían distinguir — y ninguna de las tres se parece a las otras.
           const fila = await prisma.terminalPaymentRequest.findFirst({ where: { requestId, venueId } })
           return fila
-            ? { cancelIntent: 'ALREADY_FINAL', cancelEmitted: false, payment: proyectarEstado(fila) }
+            ? { cancelIntent: 'ALREADY_FINAL', cancelEmitted: false, payment: await this.proyectarParaElPos(fila) }
             : { cancelIntent: 'NOT_FOUND', cancelEmitted: false, payment: null }
         }
         await this.sellarPrimerCancel(requestId, venueId)
@@ -6853,7 +6886,7 @@ class TerminalPaymentService {
     // Se relee DESPUÉS del CAS y de la emisión: la terminal puede haber contestado ACCEPTED en ese hueco, y la
     // proyección tiene que decir la verdad de ESTE instante, no la que se supuso al escribir la intención.
     const fila = await prisma.terminalPaymentRequest.findFirst({ where: { requestId, venueId } })
-    return { cancelIntent: 'RECORDED', cancelEmitted, payment: fila ? proyectarEstado(fila) : null }
+    return { cancelIntent: 'RECORDED', cancelEmitted, payment: fila ? await this.proyectarParaElPos(fila) : null }
   }
 
   /**
@@ -7122,9 +7155,7 @@ class TerminalPaymentService {
     // la evidencia de conciliación pendiente: `hayPagoLigadoSql` sólo ve cobros COMPLETED, y un Payment PENDING del intento
     // —que S6 y el POST sí ven— salía `resuelta:true`.
     const [evidencia] = await prisma.$queryRaw<{ hay: boolean }[]>`
-      SELECT (${hayAprobadoVinculadoSql(requestId, input.venueId)} OR ${hayPagoLigadoSql(requestId, input.venueId)}
-           OR ${hayDineroDeSusIntentosSql(requestId, input.venueId)}
-           OR ${hayEvidenciaDeConciliacionSql(requestId, input.venueId)}) AS "hay"`
+      SELECT ${constaDineroDeLaSolicitudSql(requestId, input.venueId)} AS "hay"`
     return {
       request: { ...proyectarEstado(row), closedVia: row.closedVia ?? null },
       resuelta: sinDesenlace === 0 && evidencia?.hay !== true,
