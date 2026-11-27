@@ -5,9 +5,6 @@
     "android accion:extra:cuenta-con-saldo-por-cobrar/cobrar-saldo-de-la-cuenta: sin página",
     "android accion:extra:cuenta-con-saldo-por-cobrar/regresar-saldo-y-cancelar: sin página",
     "android accion:extra:inicio-de-sesion/crear-cuenta: sin página",
-    "android accion:extra:inicio-de-sesion/iniciar-sesion-con-biometria: sin página",
-    "android accion:extra:inicio-de-sesion/iniciar-sesion-con-correo: sin página",
-    "android accion:extra:inicio-de-sesion/recuperar-contrasena: sin página",
     "android accion:extra:kiosco-segunda-pantalla/buscar-por-telefono: sin página",
     "android accion:extra:kiosco-segunda-pantalla/comprar-paquete: sin página",
     "android accion:extra:kiosco-segunda-pantalla/confirmar-llegada: sin página",
@@ -172,7 +169,6 @@
     "android accion:nav:route = \"class-sessions/create?date={date}&time={time}\"/crear-sesion-de-clase: sin página",
     "android accion:nav:route = \"reservations/edit/{editingId}\"/guardar-reserva: sin página",
     "android extra:cuenta-con-saldo-por-cobrar: sin página",
-    "android extra:inicio-de-sesion: sin página",
     "android extra:kiosco-segunda-pantalla: sin página",
     "android extra:pin-de-gerente: sin página",
     "android extra:que-hara-este-aparato: sin página",
@@ -889,8 +885,6 @@
     "windows accion:nav:route = \"class-sessions/create?date={date}&time={time}\"/crear-sesion-de-clase: sin página",
     "windows accion:nav:route = \"reservations/edit/{editingId}\"/guardar-reserva: sin página",
     "windows accion:pantalla:Landing/crear-cuenta: sin página",
-    "windows accion:pantalla:Landing/iniciar-sesion: sin página",
-    "windows accion:pantalla:Landing/restablecer-contrasena: sin página",
     "windows extra:cuenta-con-saldo-por-cobrar: sin página",
     "windows extra:kiosco-segunda-pantalla: sin página",
     "windows extra:pin-de-gerente: sin página",
@@ -902,7 +896,6 @@
     "windows nav:MainTab.NOTIFICATIONS.route: sin página",
     "windows nav:route = \"class-sessions/create?date={date}&time={time}\": sin página",
     "windows nav:route = \"reservations/edit/{editingId}\": sin página",
-    "windows pantalla:Landing: sin página",
     "windows tab:NOTIFICATIONS: sin página"
   ]
 }

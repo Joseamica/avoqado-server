@@ -1,8 +1,8 @@
 {
   "version": 1,
-  "approvedBy": "Jose Antonio Amieva",
-  "approvedAt": "2026-11-27T01:21:56.072Z",
-  "approvedHash": "2e9221edbdda526cf90baad519a0818bd4552ddda87abcf7f59797aefb74fcaf",
+  "approvedBy": null,
+  "approvedAt": null,
+  "approvedHash": null,
   "retired": {},
   "guides": {
     "android/ayuda/ver-version-de-la-app": {
@@ -238,6 +238,10 @@
     },
     "android/personal/checar-entrada-y-salida": {
       "sha256": "f5b565762bb942e46527809804ddc0756cc1192c5c49a3edac754abac39ddc6d",
+      "requiredPermissions": []
+    },
+    "android/personal/iniciar-sesion": {
+      "sha256": "cd853345a5297614f9637aeb175a2cbd91b0a39e401bba35c75821c658ab76ba",
       "requiredPermissions": []
     },
     "android/promociones/crear-editar-o-eliminar-cupones-y-descuentos": {
@@ -1541,6 +1545,10 @@
     },
     "windows/personal/checar-entrada-y-salida": {
       "sha256": "4bd6ea1f12850938c044895e1b7464cd46541425a36f1f6f93e147e5b44eb5c7",
+      "requiredPermissions": []
+    },
+    "windows/personal/iniciar-sesion": {
+      "sha256": "3803b942f7bd3c0cd2e05ef43fd237f7de2f3a8aa6ed1551a15335ce4dfa7f0a",
       "requiredPermissions": []
     },
     "windows/promociones/crear-editar-o-eliminar-cupones-y-descuentos": {
