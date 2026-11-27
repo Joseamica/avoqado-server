@@ -283,10 +283,16 @@ export function limiteDeUnCierre(
   return guardado ?? limiteDelTurno(clockIn, timezone, cierre, null)
 }
 
-/** La última nota de una salida tardía que no se usó (la hora real que mandó el aparato), o null. */
+/** Las anotaciones que deja el SERVIDOR cuando una salida tardía no se usó (celular, TPV o POS), con la hora real. */
+const SALIDA_NO_USADA = /^Salida (del celular de las|de la .+ a las) .+: llegó después .+ no se usó\./
+
+/**
+ * Las salidas tardías que no se usaron (la hora real que mandó cada aparato), una por línea, o null. Sólo las anotaciones del
+ * sistema: una nota libre de la persona no sale aunque diga lo mismo (Codex D3 r2 #3).
+ */
 export function notaDeSalidaNoUsada(notes: string | null | undefined): string | null {
-  const lineas = (notes ?? '').split('\n').filter(l => l.includes('no se usó'))
-  return lineas.length ? lineas[lineas.length - 1] : null
+  const lineas = (notes ?? '').split('\n').filter(l => SALIDA_NO_USADA.test(l))
+  return lineas.length ? lineas.join('\n') : null
 }
 
 /** Cierra [e] como «salida olvidada» si ya pasó su límite y el negocio tiene la regla prendida. null = no tocó nada. */

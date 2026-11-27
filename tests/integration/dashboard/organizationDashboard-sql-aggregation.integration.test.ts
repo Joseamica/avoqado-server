@@ -762,7 +762,10 @@ describe('getStaffAttendance — efectivo por checada agregado en Postgres', () 
   it('marca la checada que el sistema cerró como «Salida olvidada», con su nota, para que el gerente la corrija (hz:0433f0cb:D3)', async () => {
     const e2 = await prisma.timeEntry.findFirstOrThrow({ where: { staffId: ana, clockInTime: E2_IN } })
     const tardia = 'Salida del celular de las 22:40: llegó después del día del turno y no se usó. Revisa la hora real.'
-    const notas = `Salida olvidada: no marcó salida y no tiene horario ese día; quedó en 0 horas hasta que el gerente la corrija.\n${tardia}`
+    const deLaTpv = 'Salida de la TPV a las 22:45: llegó después del cierre de salida olvidada y no se usó. Revisa la hora real.'
+    // Una nota libre de la persona con esas palabras no sale (Codex D3 r2 #3); las dos salidas tardías del sistema, sí.
+    const libre = 'El camión que no se usó llegó tarde'
+    const notas = `${libre}\nSalida olvidada: no marcó salida y no tiene horario ese día; quedó en 0 horas hasta que el gerente la corrija.\n${tardia}\n${deLaTpv}`
     await prisma.timeEntry.update({ where: { id: e2.id }, data: { salidaOlvidada: true, autoClockOut: true, notes: notas } })
     try {
       const { staff } = await svc.getStaffAttendance(orgId, DIA)
@@ -770,7 +773,7 @@ describe('getStaffAttendance — efectivo por checada agregado en Postgres', () 
       expect(a.venueTimezone).toBeTruthy() // la hora que teclea el gerente es la de la sucursal de la checada (Codex D3 r1 #1)
       const [olvidada, normal] = a.allTimeEntries // la más reciente primero
       // Sólo la línea de la salida tardía, nunca las notas completas (las ve quien sólo puede leer la bitácora; Codex D3 r1 #3).
-      expect(olvidada).toMatchObject({ id: e2.id, salidaOlvidada: true, notaSalidaOlvidada: tardia })
+      expect(olvidada).toMatchObject({ id: e2.id, salidaOlvidada: true, notaSalidaOlvidada: `${tardia}\n${deLaTpv}` })
       expect(olvidada.notes).toBeUndefined()
       expect(normal).toMatchObject({ salidaOlvidada: false, notaSalidaOlvidada: null })
     } finally {
