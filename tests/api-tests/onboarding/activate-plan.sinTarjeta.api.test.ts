@@ -42,6 +42,15 @@ const mockInvList = jest.fn()
 const mockIpList = jest.fn()
 const mockBalTx = jest.fn()
 const mockCnList = jest.fn()
+// B4 Task 2: el nombre del plan que dicen el correo y el aviso se lee en segundo plano; aquí se simula para que esta prueba cuente
+// sólo las lecturas de la ruta y del servicio, sin depender del orden de esos envíos.
+jest.mock('@/services/billing/nombresDeLosPlanes', () => ({
+  nombresDeLosPlanes: jest.fn(async () => ({ FREE: 'Gratis', PRO: 'Pro', PREMIUM: 'Premium' })),
+  nombreDeLaFeatureParaAvisos: jest.fn(async (f: { name: string }) => f.name),
+  diasDeLaPrueba: jest.fn((a?: number | null, b?: number | null) =>
+    typeof a === 'number' && typeof b === 'number' && b > a ? Math.ceil((b - a) / 86400) : undefined,
+  ),
+}))
 jest.mock('stripe', () =>
   jest.fn().mockImplementation(() => ({
     subscriptions: { create: mockSubCreate, retrieve: mockSubRetrieve, list: mockSubList },

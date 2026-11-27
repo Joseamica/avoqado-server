@@ -109,7 +109,7 @@ describe('B2 Task 10 · la lista de precios lee una sola foto de la versión', (
     vigente(2, definicionDePrueba({ ids: idsDeLaVersion('v2') }), { PRO, PREMIUM })
     const list = await getPublicPriceList()
     expect(list.offerVersion).toBe(2)
-    expect(list.plans).toEqual([
+    expect(list.plans).toMatchObject([
       { tier: 'PRO', name: 'Pro', price: 1158.84 },
       { tier: 'PREMIUM', name: 'Premium', price: 1970.84 },
     ])
@@ -130,6 +130,40 @@ describe('B2 Task 10 · la lista de precios lee una sola foto de la versión', (
     expect(priceSelection(list, PRO, 2)).toEqual(hoy)
   })
 
+  it('B4 T1: con la v2 cada plan trae además sus términos (nombre, mensual y anual en centavos, prueba, tarjeta, venta), name y price como hoy', async () => {
+    vigente(
+      2,
+      definicionDePrueba({
+        ids: idsDeLaVersion('v2'),
+        nombres: { PRO: 'Plus' },
+        netos: { 'PRO:monthly': 79900, 'PRO:annual': 850000 },
+        planes: { PRO: { trialDays: 14, requiresCard: false } },
+      }),
+      { PRO, PREMIUM },
+    )
+    const list = await getPublicPriceList()
+    expect(list.plans[0]).toEqual({
+      tier: 'PRO',
+      name: 'Plus',
+      price: 926.84,
+      displayName: 'Plus',
+      monthly: { netCents: 79900, grossCents: 92684 },
+      annual: { netCents: 850000, grossCents: 986000 },
+      trialDays: 14,
+      requiresCard: false,
+      onSale: true,
+    })
+    expect(JSON.stringify(list)).not.toContain('stripePriceId')
+  })
+
+  it('B4 T1: sin versión del editor los planes son EXACTAMENTE los de hoy, sin campos nuevos', async () => {
+    const list = await getPublicPriceList()
+    expect(list.plans).toStrictEqual([
+      { tier: 'PRO', name: 'Pro', price: 1158.84 },
+      { tier: 'PREMIUM', name: 'Premium', price: 1970.84 },
+    ])
+  })
+
   it('🔴 b2-r1 #12: con la v3 vigente y el tablero híbrido todavía con el precio de la v2, el GET da el precio de la v3 con offerVersion 3 y la composición de sus publicaciones', async () => {
     // El tablero sigue en $1,158.84 (la v2); la v3 baja Pro a $899 + IVA = $1,042.84 y su lista de Pro ya trae CFDI.
     vigente(3, definicionDePrueba({ ids: idsDeLaVersion('v3'), netos: { 'PRO:monthly': 89900 } }), {
@@ -138,7 +172,7 @@ describe('B2 Task 10 · la lista de precios lee una sola foto de la versión', (
     })
     const list = await getPublicPriceList()
     expect(list.offerVersion).toBe(3)
-    expect(list.plans).toEqual([
+    expect(list.plans).toMatchObject([
       { tier: 'PRO', name: 'Pro', price: 1042.84 },
       { tier: 'PREMIUM', name: 'Premium', price: 1970.84 },
     ])

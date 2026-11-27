@@ -587,6 +587,19 @@ describe('B2: el fin de prueba del comprobante y los descuentos explícitos', ()
     ])
   })
 
+  it('B4: la descripción lleva el nombre de la versión («Plan Avoqado Plus - <negocio>»); sin él, Pro / Premium como hoy', async () => {
+    await createPlanSubscription(base({ trialEnd: FIN, venueName: 'Negocio', planDisplayName: 'Plus' }))
+    expect(mockSubCreate.mock.calls[0][0].description).toBe('Plan Avoqado Plus - Negocio')
+
+    mockSubCreate.mockClear()
+    await createPlanSubscription(base({ trialEnd: FIN, venueName: 'Negocio' }))
+    expect(mockSubCreate.mock.calls[0][0].description).toBe('Plan Avoqado Pro - Negocio')
+
+    mockSubCreate.mockClear()
+    await createPlanSubscription(base({ trialEnd: FIN, planDisplayName: 'Plus' }))
+    expect(mockSubCreate.mock.calls[0][0].description).toBe('Plan Avoqado Plus')
+  })
+
   it('con trialEnd no manda payment_behavior ni intenta el 2.º create de autenticación', async () => {
     await createPlanSubscription(base({ trialEnd: FIN }))
     expect(mockSubCreate.mock.calls[0][0].payment_behavior).toBeUndefined()

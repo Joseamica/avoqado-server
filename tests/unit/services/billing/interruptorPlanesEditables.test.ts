@@ -1,13 +1,13 @@
 import { prismaMock } from '@tests/__helpers__/setup'
 import { definicionDePrueba, idsDeLaVersion } from '@tests/__helpers__/planOfferFixtures'
 
-const listos = { SERVIDOR_LISTO_PARA_PLANES_EDITABLES: false, cuponDeIntroduccionRetirado: () => false }
+const listos = { SERVIDOR_LISTO_PARA_PLANES_EDITABLES: false, cuponExcluido: () => true }
 jest.mock('@/services/billing/planesEditablesListos', () => ({
   __esModule: true,
   get SERVIDOR_LISTO_PARA_PLANES_EDITABLES() {
     return listos.SERVIDOR_LISTO_PARA_PLANES_EDITABLES
   },
-  cuponDeIntroduccionRetirado: () => listos.cuponDeIntroduccionRetirado(),
+  cuponDeIntroduccionExcluidoConVersion: () => listos.cuponExcluido(),
 }))
 
 import {
@@ -34,7 +34,8 @@ const conVigente = (def: unknown) =>
 beforeEach(() => {
   __resetInterruptorPlanesParaPruebas()
   listos.SERVIDOR_LISTO_PARA_PLANES_EDITABLES = false
-  listos.cuponDeIntroduccionRetirado = () => false
+  listos.cuponExcluido = () => true
+  ;(prismaMock.launchCampaign.count as jest.Mock).mockResolvedValue(0)
   ;(prismaMock.planOfferPointer.findUnique as jest.Mock).mockResolvedValue(null)
 })
 
@@ -61,7 +62,6 @@ describe('lectura', () => {
 describe('requisitos y prender', () => {
   it('🔴 con el código de B1 no se puede prender: 409 PLAN_EDIT_PREREQUISITE con SERVIDOR_LISTO y no escribe', async () => {
     conVigente(definicionDePrueba({ ids: idsDeLaVersion('a') }))
-    listos.cuponDeIntroduccionRetirado = () => true
     await expect(prenderPlanesEditables('s1')).rejects.toMatchObject({
       statusCode: 409,
       code: 'PLAN_EDIT_PREREQUISITE',
@@ -71,11 +71,11 @@ describe('requisitos y prender', () => {
     expect(prismaMock.activityLog.create).not.toHaveBeenCalled()
   })
 
-  it('🔴 el módulo REAL: en B1 SERVIDOR_LISTO es false y el cupón de introducción sigue vivo (poner true en un commit rompe esto)', () => {
+  it('🔴 el módulo REAL: en B1 SERVIDOR_LISTO es false y SERVIDOR_LISTO sigue en false (poner true en un commit rompe esto)', () => {
     const real = jest.requireActual('@/services/billing/planesEditablesListos')
     expect(real.SERVIDOR_LISTO_PARA_PLANES_EDITABLES).toBe(false)
-    // Con B0, `standardPlanQuote().legacyIntro` sigue existiendo: el requisito real también falta.
-    expect(real.cuponDeIntroduccionRetirado()).toBe(false)
+    // B4: con una versión del editor el cupón nunca se aplica (B2 §12.2), así que el requisito se cumple por eso.
+    expect(real.cuponDeIntroduccionExcluidoConVersion()).toBe(true)
   })
 
   it('un vigente roto (503 PLAN_NOT_CONFIGURED) cuenta como VERSION_1; un error de la base se propaga', async () => {
@@ -119,18 +119,43 @@ describe('requisitos y prender', () => {
     expect(fila().findUnique).toHaveBeenCalledTimes(2)
   })
 
-  it('faltan VERSION_1 sin vigente o con una ranura sin priceId; CUPON_DE_INTRODUCCION mientras legacyIntro exista', async () => {
-    await expect(requisitosFaltantes()).resolves.toEqual(['VERSION_1', 'CUPON_DE_INTRODUCCION', 'SERVIDOR_LISTO'])
+  it('faltan VERSION_1 sin vigente o con una ranura sin priceId; el cupón ya no es requisito', async () => {
+    await expect(requisitosFaltantes()).resolves.toEqual(['VERSION_1', 'SERVIDOR_LISTO'])
     conVigente(definicionDePrueba({ ids: { ...idsDeLaVersion('a'), 'PRO:annual': null } }))
     await expect(requisitosFaltantes()).resolves.toContain('VERSION_1')
     conVigente(definicionDePrueba({ ids: idsDeLaVersion('a') }))
-    await expect(requisitosFaltantes()).resolves.toEqual(['CUPON_DE_INTRODUCCION', 'SERVIDOR_LISTO'])
+    await expect(requisitosFaltantes()).resolves.toEqual(['SERVIDOR_LISTO'])
+  })
+
+  it('CAMPANAS_ACTIVAS: una campaña ACTIVE de Pro o Premium lo exige; pausada ya no; usa el db recibido', async () => {
+    conVigente(definicionDePrueba({ ids: idsDeLaVersion('a') }))
+    const count = prismaMock.launchCampaign.count as jest.Mock
+    count.mockResolvedValue(1)
+    await expect(requisitosFaltantes()).resolves.toEqual(['CAMPANAS_ACTIVAS', 'SERVIDOR_LISTO'])
+    expect(count).toHaveBeenCalledWith({ where: { status: 'ACTIVE', planTier: { in: ['PRO', 'PREMIUM'] } } })
+    count.mockResolvedValue(0)
+    await expect(requisitosFaltantes()).resolves.toEqual(['SERVIDOR_LISTO'])
+    const tx = { launchCampaign: { count: jest.fn().mockResolvedValue(2) }, planOfferPointer: prismaMock.planOfferPointer }
+    await expect(requisitosFaltantes(tx as never)).resolves.toContain('CAMPANAS_ACTIVAS')
+    expect(tx.launchCampaign.count).toHaveBeenCalledTimes(1)
+  })
+
+  it('prender con una campaña ACTIVE → 409 PLAN_EDIT_PREREQUISITE con CAMPANAS_ACTIVAS', async () => {
+    conVigente(definicionDePrueba({ ids: idsDeLaVersion('a') }))
+    listos.SERVIDOR_LISTO_PARA_PLANES_EDITABLES = true
+    ;(prismaMock.launchCampaign.count as jest.Mock).mockResolvedValue(1)
+    fila().findUnique.mockResolvedValue(null)
+    await expect(prenderPlanesEditables('s1')).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'PLAN_EDIT_PREREQUISITE',
+      details: { faltan: ['CAMPANAS_ACTIVAS'] },
+    })
+    expect(raw()).not.toHaveBeenCalled()
   })
 
   it('con todo listo escribe desde con clock_timestamp después de tomar plan-offer-publish y deja bitácora PLAN_OFFER_SWITCH_ON', async () => {
     conVigente(definicionDePrueba({ ids: idsDeLaVersion('a') }))
     listos.SERVIDOR_LISTO_PARA_PLANES_EDITABLES = true
-    listos.cuponDeIntroduccionRetirado = () => true
     fila().findUnique.mockResolvedValue(null)
     const desde = new Date('2026-11-25T12:00:00Z')
     raw().mockResolvedValue([{ desde }])

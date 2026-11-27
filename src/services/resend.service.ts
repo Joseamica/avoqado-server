@@ -794,7 +794,7 @@ export interface PlanActivatedNoticeData {
   venueId: string
   venueName: string
   ownerEmail: string | null
-  planName: 'Pro' | 'Premium'
+  planName: string
   /** true = cobró hoy; false = prueba gratis con tarjeta. */
   payNow: boolean
   /** Lo que se cobra (o se cobrará) primero, en centavos con IVA. */

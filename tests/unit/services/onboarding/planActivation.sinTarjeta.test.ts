@@ -310,6 +310,21 @@ describe('B2 Task 6: el alta sin tarjeta abre su prueba en Stripe', () => {
     })
   })
 
+  it('B4 (M6): con la v2 «Plus» la bienvenida de la prueba sin tarjeta y el aviso al equipo dicen Plus', async () => {
+    conVigente(
+      definicionDePrueba({
+        ids: idsDeLaVersion('v2'),
+        netos: { 'PRO:monthly': 79900 },
+        nombres: { PRO: 'Plus' },
+        planes: { PRO: { requiresCard: false, trialDays: 14 } },
+      }),
+    )
+    await pedir({ quoteToken: comprobante() })
+    await sinPendientes()
+    expect((emailService.sendPlanFreeTrialEndingEmail as jest.Mock).mock.calls[0][1]).toMatchObject({ empezo: true, planName: 'Plus' })
+    expect(resendService.sendPlanActivatedNotice).toHaveBeenCalledWith(expect.objectContaining({ planName: 'Plus' }))
+  })
+
   it('🔴 §18 + b2-r8: la bienvenida dice el precio de la versión (926.84) con la nota del saldo y, con tarjeta guardada, su ••••last4; sin tarjeta, «pon tu tarjeta…»; nunca sendPlanConfirmationEmail', async () => {
     // El cliente ya guardó una tarjeta (para Premium): Stripe la cobrará al terminar. Se dice, no se impide.
     mockCustomerRetrieve.mockResolvedValue({ id: 'cus_1', object: 'customer', invoice_settings: { default_payment_method: 'pm_premium' } })

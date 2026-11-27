@@ -58,6 +58,7 @@ import {
   type PlanPagado,
 } from '../billing/planOffer'
 import { basicoDeLaBienvenida } from '../billing/avisosDelBasico'
+import { diasDeLaPrueba, nombresDeLosPlanes } from '../billing/nombresDeLosPlanes'
 import { DIA_MS, ofertaCambio, planFueraDeVenta, revisarComprobante } from '../billing/opcionesDeCompra'
 import { verificarCotizacion, type CotizacionFirmada } from '../billing/comprobanteDeCotizacion'
 import {
@@ -402,7 +403,7 @@ async function cotizar(
 
   if (input.offer.offerVersion !== campaign.offerVersion || campaign.advertisedPriceCents !== input.offer.expectedFirstChargeCents) {
     throw new ConflictError('La oferta cambió. Revísala antes de pagar.', 'OFFER_CHANGED', {
-      launchOffer: buildLaunchOfferView(toOfferRow(campaign), now),
+      launchOffer: buildLaunchOfferView(toOfferRow(campaign), now, await nombresDeLosPlanes()),
     })
   }
 
@@ -444,7 +445,13 @@ async function verificarPlanConfigurado(tier: PaidPlanTier): Promise<void> {
  * relee como `LUGAR` (Codex B1 #2); la `LLAVE`, nunca: se relee como B0.
  */
 type OrigenDelPrecio = 'VERSION' | 'LLAVE' | 'LUGAR' | 'SUSCRIPCION'
-type PrecioVerificado = { priceId: string; unitAmount: number; origen: OrigenDelPrecio }
+type PrecioVerificado = {
+  priceId: string
+  unitAmount: number
+  origen: OrigenDelPrecio
+  /** B4 Task 2: el nombre del plan en la versión del editor que dio este precio (sólo texto: descripción de Stripe y avisos). */
+  nombreDelPlan?: string
+}
 
 /**
  * B0, tal cual: el precio de la LLAVE del plan, con su 409 `PLAN_PRICE_MISMATCH` también cuando la lista viene vacía (nunca
@@ -612,6 +619,7 @@ async function precioDeLaCampana(
   const esperado = campaign.listPriceCentsSnapshot as number
   const version = await versionQueCobra()
   if (!version) return { ...(await verificarPrecioPorLlave(tier, 'monthly', esperado)), origen: 'LLAVE' }
+  const conNombre = (p: PrecioVerificado): PrecioVerificado => ({ ...p, nombreDelPlan: version.definition[tier].displayName })
 
   const lugar = await prisma.launchCampaignRedemption.findFirst({
     where: { organizationId, campaignId: campaign.id, offerVersion: campaign.offerVersion, status: REDEMPTION_STATUS.RESERVED },
@@ -627,7 +635,10 @@ async function precioDeLaCampana(
       if (stripeAfirmaQueNoExiste(error)) throw precioNoCoincide({ ...contexto, origen: 'LUGAR' }, esperado, null, 'NO_EXISTE')
       throw error
     }
-    return { ...exigirPrecioDeCampana(price, esperado, await productoDelPlan(tier), { ...contexto, origen: 'LUGAR' }), origen: 'LUGAR' }
+    return conNombre({
+      ...exigirPrecioDeCampana(price, esperado, await productoDelPlan(tier), { ...contexto, origen: 'LUGAR' }),
+      origen: 'LUGAR',
+    })
   }
 
   if (lugar && progress.planStripeSubscriptionId) {
@@ -642,20 +653,20 @@ async function precioDeLaCampana(
     }
     if (sub && sub.metadata?.launchRedemptionId === lugar.id) {
       const price = sub.items?.data?.[0]?.price as Stripe.Price | undefined
-      return {
+      return conNombre({
         ...exigirPrecioDeCampana(price, esperado, await productoDelPlan(tier), {
           ...contexto,
           origen: 'SUSCRIPCION',
           subscriptionId: sub.id,
         }),
         origen: 'SUSCRIPCION',
-      }
+      })
     }
   }
 
-  if (lugar) return { ...(await verificarPrecioPorLlave(tier, 'monthly', esperado)), origen: 'LLAVE' }
+  if (lugar) return conNombre({ ...(await verificarPrecioPorLlave(tier, 'monthly', esperado)), origen: 'LLAVE' })
 
-  return verificarPrecioDeLaVersion(version, tier, 'monthly', esperado, { productoDelPlan: await productoDelPlan(tier) })
+  return conNombre(await verificarPrecioDeLaVersion(version, tier, 'monthly', esperado, { productoDelPlan: await productoDelPlan(tier) }))
 }
 
 /**
@@ -811,6 +822,8 @@ async function apartarLugar(
   /** El precio verificado en el PASO 4: el lugar nuevo lo guarda y, retomado después de publicar otra versión, cobra con él. */
   stripePriceId: string,
 ): Promise<{ id: string; reused: boolean; stripePriceId: string | null }> {
+  // B4: los nombres para el 409 OFFER_CHANGED se leen ANTES de la transacción (nunca otra conexión con la transacción abierta)
+  const nombres = await nombresDeLosPlanes()
   return prisma.$transaction(async tx => {
     const vivo = await tx.launchCampaignRedemption.findFirst({
       where: { organizationId, status: { not: REDEMPTION_STATUS.RELEASED } },
@@ -826,7 +839,7 @@ async function apartarLugar(
       // snapshot es lo que el cliente consintió y NUNCA se reescribe.
       if (vivo.campaignId !== campaign.id || vivo.offerVersion !== campaign.offerVersion) {
         throw new ConflictError('La oferta cambió. Revísala antes de pagar.', 'OFFER_CHANGED', {
-          launchOffer: buildLaunchOfferView(toOfferRow(campaign), now),
+          launchOffer: buildLaunchOfferView(toOfferRow(campaign), now, nombres),
         })
       }
       return { id: vivo.id, reused: true, stripePriceId: vivo.stripePriceId ?? null }
@@ -1705,6 +1718,9 @@ export async function activatePlan(
 
   let subscriptionId: string
   let reused = false
+  // B4 Task 2: el nombre del plan de la versión que cita ESTA compra (la del comprobante o la que dio el precio de la campaña): lo
+  // usan la descripción de Stripe y también el correo y el aviso al equipo. Sin versión (o al recuperar), `undefined`.
+  let nombreCitado: string | undefined
   /** El cobro de esta pasada salió del 2.º create de D2 (`default_incomplete`): su primer cobro se exige pagado. */
   let conAutenticacion = false
   if (suscripcionRecuperada) {
@@ -1774,6 +1790,9 @@ export async function activatePlan(
               })
               throw ofertaCambio('VERSION', releida?.number ?? 1)
             }
+            nombreCitado = releida.definition[input.tier].displayName
+          } else if (verificado.nombreDelPlan) {
+            nombreCitado = verificado.nombreDelPlan
           }
           const vigente = conComprobante
             ? null
@@ -1807,6 +1826,7 @@ export async function activatePlan(
             // B2 Task 6: la prueba sin tarjeta, sin método de pago y con el fin de su comprobante (metadata `sinTarjeta: 'true'`).
             ...(sinTarjetaPedido ? { sinTarjeta: true } : {}),
             tierCode,
+            ...(nombreCitado ? { planDisplayName: nombreCitado } : {}),
             interval: input.interval,
             priceId: verificado.priceId,
             // Con campaña SIEMPRE se paga el primer ciclo: la oferta no tiene prueba gratis.
@@ -2201,6 +2221,7 @@ export async function activatePlan(
       nextChargeAt,
       campaign: null,
       terminaSinCobro,
+      nombreDelPlan: nombreCitado,
     })
     void resolvePlanNotificationTarget(venue.id)
       .then(target =>
@@ -2257,6 +2278,7 @@ export async function activatePlan(
       timeZone: venueRecord?.timezone,
       trialEnd: typeof sub.trial_end === 'number' ? new Date(sub.trial_end * 1000) : new Date(nextChargeAt),
       montoAlTerminarCents: conComprobante && !recuperada ? conComprobante.precioCents : montoDelPlanCents,
+      nombreDelPlan: nombreCitado,
     }
     void Promise.resolve(avisoSinTarjeta)
       // Codex b2-code #6: también si habrá cobro (una cancelación programada: el correo no anuncia ni la tarjeta ni el monto).
@@ -2277,6 +2299,8 @@ export async function activatePlan(
       nextChargeAt,
       timeZone: venueRecord?.timezone,
       terminaSinCobro,
+      trialDays: diasDeLaPrueba(sub.trial_start, sub.trial_end),
+      nombreDelPlan: nombreCitado,
       ...(montoDelPlanCents !== undefined ? { montoDelPlanCents } : {}),
     }).catch(error =>
       logger.warn('activate-plan: no se pudo enviar el correo de confirmación', {
@@ -2297,6 +2321,7 @@ export async function activatePlan(
     nextChargeAt,
     campaign,
     terminaSinCobro,
+    nombreDelPlan: nombreCitado,
     ...(montoDelPlanCents !== undefined ? { montoDelPlanCents } : {}),
     ...(pruebaSinTarjeta ? { sinTarjeta: true } : {}),
   })
@@ -2569,6 +2594,8 @@ function avisarActivacion(a: {
   montoDelPlanCents?: number
   /** B2 Task 6: la prueba empezó sin tarjeta (el aviso lo dice). */
   sinTarjeta?: boolean
+  /** B4 Task 2: el nombre del plan de la versión que cita la compra. Sin él, el de la vigente (una lectura). */
+  nombreDelPlan?: string
 }): void {
   const primerCobro = a.terminaSinCobro
     ? 0
@@ -2577,13 +2604,13 @@ function avisarActivacion(a: {
       : a.campaign
         ? (a.campaign.listPriceCentsSnapshot as number)
         : (a.montoDelPlanCents ?? STANDARD_PLAN_GROSS_CENTS[a.tier][a.interval])
-  void resolvePlanNotificationTarget(a.venueId)
-    .then(target =>
+  void Promise.all([resolvePlanNotificationTarget(a.venueId), nombresDeLosPlanes()])
+    .then(([target, nombres]) =>
       resendService.sendPlanActivatedNotice({
         venueId: a.venueId,
         venueName: a.venueName ?? target.venueName,
         ownerEmail: target.email,
-        planName: a.tier === 'PREMIUM' ? 'Premium' : 'Pro',
+        planName: a.nombreDelPlan ?? nombres[a.tier],
         payNow: a.payNow,
         firstChargeCents: primerCobro,
         nextChargeAt: a.nextChargeAt,
@@ -2616,6 +2643,10 @@ async function enviarConfirmacion(args: {
   timeZone?: string
   /** Plan Básico: la suscripción REAL termina sin cobrar. El correo no anuncia el cobro de Pro. */
   terminaSinCobro?: boolean
+  /** B4 Task 2: los días de la prueba de ESA suscripción (de Stripe). Sin ellos, el correo dice 30, como hoy. */
+  trialDays?: number
+  /** B4 Task 2: el nombre del plan de la versión que cita la compra. Sin él, el de la vigente (una lectura). */
+  nombreDelPlan?: string
   /**
    * Planes editables (B2, §10.5): con una versión del editor, el precio de la suscripción leída en el PASO 9. Con él nunca hay
    * introducción legacy (esa compra no lleva `INTRO_PRO_3M`). Sin él, las constantes de hoy.
@@ -2631,7 +2662,8 @@ async function enviarConfirmacion(args: {
   await emailService.sendPlanConfirmationEmail(target.email, {
     locale: input.language ?? target.locale,
     venueName: target.venueName,
-    planName: input.tier === 'PREMIUM' ? 'Premium' : 'Pro',
+    planName: args.nombreDelPlan ?? (await nombresDeLosPlanes())[input.tier],
+    ...(args.trialDays !== undefined ? { trialDays: args.trialDays } : {}),
     payNow: campaign ? true : input.payNow,
     interval: input.interval,
     // 🔴 La fecha de Stripe, no «hoy + 30 días»: un alta del 18-oct decía 17-nov y Stripe cobra el 18-nov (y en el anual
@@ -2675,14 +2707,18 @@ async function enviarBienvenidaSinTarjeta(args: {
   tarjeta?: TarjetaVisible | null
   /** Codex b2-code #6: al terminar Stripe no cobrará (cancelación programada). `undefined` = no se leyó: el correo de hoy. */
   noHabraCobro?: boolean
+  /** B4 Task 2: el nombre del plan de la versión que cita la compra. Sin él, el de la vigente (una lectura). */
+  nombreDelPlan?: string
 }): Promise<void> {
   const target = await resolvePlanNotificationTarget(args.venueId)
   if (!target.email) return
+  const nombres = await nombresDeLosPlanes()
   await emailService.sendPlanFreeTrialEndingEmail(target.email, {
     locale: args.language ?? target.locale,
     venueName: target.venueName,
     endDate: args.trialEnd,
-    planName: args.tier === 'PREMIUM' ? 'Premium' : 'Pro',
+    planName: args.nombreDelPlan ?? nombres[args.tier],
+    freeName: nombres.FREE,
     timeZone: args.timeZone,
     idempotencyKey: `plan-trial-no-card-start:${args.subscriptionId}`,
     billingUrl: billingPageUrl(args.venueSlug),

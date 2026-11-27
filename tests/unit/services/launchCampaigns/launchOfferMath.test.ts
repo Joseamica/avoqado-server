@@ -221,6 +221,20 @@ describe('buildLaunchOfferView — exactamente lo que ven la landing y el dashbo
     expect(v.available && v.planName).toBe('Premium')
   })
 
+  it('B4 (final, I3): con los nombres de una versión del editor, planName es el de la versión («Plus»); sin ellos, «Pro» / «Premium»', () => {
+    const nombres = { PRO: 'Plus', PREMIUM: 'Max' }
+    const pro = buildLaunchOfferView(POS22, AHORA, nombres)
+    expect(pro.available && pro.planName).toBe('Plus')
+    const premium = buildLaunchOfferView(
+      con({ planTier: 'PREMIUM', listPriceCentsSnapshot: 197084, discountAmountCents: 194884 }),
+      AHORA,
+      nombres,
+    )
+    expect(premium.available && premium.planName).toBe('Max')
+    const sin = buildLaunchOfferView(POS22, AHORA)
+    expect(sin.available && sin.planName).toBe('Pro')
+  })
+
   it('🔴 lo que se cobra HOY es el precio promocional, nunca el de lista', () => {
     const v = buildLaunchOfferView(POS22, AHORA)
     expect(v.available && v.firstChargeCents).toBe(2200)

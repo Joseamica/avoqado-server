@@ -87,6 +87,29 @@ describe('Subscription lifecycle plan emails', () => {
       expect(JSON.stringify(spy.mock.calls.at(-1))).toContain('Tu primer cobro será de <strong>$1,158.84</strong>')
     })
 
+    it('B4: la prueba de una suscripción de 14 días dice «14 días» y el plan «Plus» (es y en); sin trialDays, 30', async () => {
+      const base = {
+        venueName: 'Bar',
+        payNow: false,
+        interval: 'monthly' as const,
+        firstChargeDate: new Date('2026-12-17T18:00:00Z'),
+        firstChargeAmountCents: 115884,
+        billingPortalUrl: 'u',
+      }
+      await emailService.sendPlanConfirmationEmail('a@x.com', { ...base, locale: 'es', planName: 'Plus', trialDays: 14 })
+      const es = spy.mock.calls.at(-1)![0]
+      expect(es.subject).toBe('Tu prueba de Avoqado Plus empezó')
+      expect(es.html).toContain('Tu prueba de 14 días está activa.')
+      expect(es.text).toContain('Tu prueba de 14 días está activa.')
+      expect(es.html).not.toContain('30 días')
+      await emailService.sendPlanConfirmationEmail('a@x.com', { ...base, locale: 'en', planName: 'Plus', trialDays: 14 })
+      const en = spy.mock.calls.at(-1)![0]
+      expect(en.html).toContain('Your 14-day trial is active.')
+      expect(en.text).toContain('Your 14-day trial is active.')
+      await emailService.sendPlanConfirmationEmail('a@x.com', { ...base, locale: 'es' })
+      expect(spy.mock.calls.at(-1)![0].html).toContain('Tu prueba de 30 días está activa.')
+    })
+
     it('🔴 D13: el monto lleva coma de miles aunque el Intl del servidor no la ponga (prod escribió «$1970.84»)', async () => {
       const original = Intl.NumberFormat
       ;(Intl as any).NumberFormat = jest.fn(() => ({ format: () => 'SIN-COMA' }))
@@ -234,6 +257,70 @@ describe('Subscription lifecycle plan emails', () => {
       expect(arg.idempotencyKey).toBe('k1')
     })
 
+    it('B4 (final, S1): con una versión del editor («Plus») el asunto, el cuerpo y el botón dicen Plus, escapado en el HTML', async () => {
+      await emailService.sendPlanTrialEndsFreeEmail('a@x.com', {
+        locale: 'es',
+        venueName: 'Bar',
+        trialEndsAt: new Date('2026-12-17T18:00:00Z'),
+        timeZone: 'America/Mexico_City',
+        billingUrl: 'u',
+        basicPlanPriceWithoutTaxCents: 49900,
+        planName: 'Plus',
+      })
+      const arg = spy.mock.calls[0][0]
+      expect(arg.subject).toBe('Tu prueba de Avoqado Plus termina el 17 de diciembre de 2026')
+      expect(arg.html).toContain('Tu prueba de Plus termina')
+      expect(arg.html).toContain('quedarte en Plus desde hoy')
+      expect(arg.html).toContain('Quedarme en Plus')
+      expect(arg.text).toContain('Quedarme en Plus: u')
+      expect(`${arg.subject}${arg.html}${arg.text}`).not.toMatch(/\bPro\b/)
+    })
+
+    it('B4 (final, S1): el nombre del plan va escapado en el HTML y crudo en el texto', async () => {
+      await emailService.sendPlanTrialEndsFreeEmail('a@x.com', {
+        locale: 'en',
+        venueName: 'Bar',
+        trialEndsAt: new Date('2026-12-17T18:00:00Z'),
+        billingUrl: 'u',
+        planName: 'A&B <x>',
+      })
+      const arg = spy.mock.calls[0][0]
+      expect(arg.html).toContain('A&amp;B &lt;x&gt;')
+      expect(arg.html).not.toContain('<x>')
+      expect(arg.text).toContain('Stay on A&B <x>: u')
+    })
+
+    it('B4 (final, S1): sin planName, el correo de hoy («Pro»), asunto y botón idénticos', async () => {
+      await emailService.sendPlanTrialEndsFreeEmail('a@x.com', {
+        locale: 'en',
+        venueName: 'Bar',
+        trialEndsAt: new Date('2026-12-17T18:00:00Z'),
+        timeZone: 'America/Mexico_City',
+        billingUrl: 'u',
+      })
+      const arg = spy.mock.calls[0][0]
+      expect(arg.subject).toBe('Your Avoqado Pro trial ends on December 17, 2026')
+      expect(arg.html).toContain('Stay on Pro')
+      expect(arg.text).toContain('If you want to stay on Pro, you can do it from «Your plan».')
+    })
+
+    it('B4 (final, S2): el plan Gratis renombrado («Inicial») sale en «Tu prueba terminó» y en la prueba regalada; sin él, «Gratis» / «Free»', async () => {
+      const base = { venueName: 'Bar', billingUrl: 'u' }
+      await emailService.sendPlanEndedEmail('a@x.com', { ...base, locale: 'es', kind: 'PRO', freeName: 'Inicial' })
+      expect(spy.mock.calls[0][0].text).toContain('sigue funcionando con el plan Inicial')
+      await emailService.sendPlanEndedEmail('a@x.com', { ...base, locale: 'es', kind: 'PRO' })
+      expect(spy.mock.calls[1][0].text).toContain('sigue funcionando con el plan Gratis')
+      await emailService.sendPlanEndedEmail('a@x.com', { ...base, locale: 'en', kind: 'TRIAL' })
+      expect(spy.mock.calls[2][0].text).toContain('keeps working on the Free plan')
+      const fin = { ...base, endDate: new Date('2026-12-17T18:00:00Z') }
+      await emailService.sendPlanFreeTrialEndingEmail('a@x.com', { ...fin, locale: 'es', freeName: 'Inicial' })
+      expect(spy.mock.calls[3][0].text).toContain('con el plan Inicial')
+      await emailService.sendPlanFreeTrialEndingEmail('a@x.com', { ...fin, locale: 'es' })
+      expect(spy.mock.calls[4][0].text).toContain('con el plan Gratis')
+      await emailService.sendPlanFreeTrialEndingEmail('a@x.com', { ...fin, locale: 'es', tarjeta: null, freeName: 'Inicial' })
+      expect(spy.mock.calls[5][0].text).toContain('sigues en Inicial.')
+    })
+
     it('sin Básico publicado: sin el bloque del Básico, y nunca un precio inventado', async () => {
       await emailService.sendPlanTrialEndsFreeEmail('a@x.com', {
         locale: 'es',
@@ -266,6 +353,36 @@ describe('Subscription lifecycle plan emails', () => {
       expect(arg.html).toContain('Contratar Básico')
       expect(arg.html).toContain('Contratar Pro')
       expect(arg.headers?.['List-Unsubscribe']).toBe(`<${baja.url}>`)
+    })
+
+    it('B4: con el nombre del editor («Plus») el correo de fin de plan dice Plus; sin él, Pro como hoy', async () => {
+      await emailService.sendPlanEndedEmail('a@x.com', { locale: 'es', venueName: 'Bar', kind: 'TRIAL', billingUrl: 'u', planName: 'Plus' })
+      const es = spy.mock.calls.at(-1)![0]
+      expect(es.subject).toBe('Tu prueba de Avoqado Plus terminó')
+      expect(es.html).toContain('Tu prueba de Plus terminó y no se te cobró nada.')
+      expect(es.html).toContain('Puedes volver a Plus cuando quieras.')
+      expect(es.html).toContain('Contratar Plus')
+      expect(es.html).not.toContain('Pro')
+      await emailService.sendPlanEndedEmail('a@x.com', { locale: 'en', venueName: 'Bar', kind: 'PRO', billingUrl: 'u', planName: 'Plus' })
+      const en = spy.mock.calls.at(-1)![0]
+      expect(en.subject).toBe('Your Avoqado Plus plan has ended')
+      expect(en.html).toContain('Get Plus')
+      expect(en.html).not.toContain('Pro')
+    })
+
+    it('M4: un nombre con caracteres de HTML sale escapado en el título, el botón y el cuerpo (texto plano, tal cual)', async () => {
+      await emailService.sendPlanEndedEmail('a@x.com', {
+        locale: 'es',
+        venueName: 'Bar',
+        kind: 'PRO',
+        billingUrl: 'u',
+        planName: 'Plus <b>&',
+      })
+      const arg = spy.mock.calls.at(-1)![0]
+      expect(arg.html).not.toContain('<b>')
+      expect(arg.html).toContain('Plus &lt;b&gt;&amp;')
+      expect(arg.html).toContain('Contratar Plus &lt;b&gt;&amp;')
+      expect(arg.text).toContain('Contratar Plus <b>&:')
     })
 
     it('«Tu Pro terminó» sin Básico publicado: sólo «Contratar Pro»', async () => {
@@ -322,6 +439,14 @@ describe('Subscription lifecycle plan emails', () => {
 
   // --- Task 8: sendPlanWinbackEmail ---
   describe('sendPlanWinbackEmail', () => {
+    it('M4: el nombre del plan va escapado en el título y el cuerpo HTML, y tal cual en el texto', async () => {
+      await emailService.sendPlanWinbackEmail('a@x.com', { locale: 'es', venueName: 'Bar', reactivateUrl: 'u', planName: 'Plus <b>' })
+      const arg = spy.mock.calls.at(-1)![0]
+      expect(arg.html).not.toContain('<b>')
+      expect(arg.html).toContain('Plus &lt;b&gt;')
+      expect(arg.text).toContain('Plus <b>')
+    })
+
     it('winback: en subject, free-month copy + CTA url, no emoji', async () => {
       await emailService.sendPlanWinbackEmail('a@x.com', {
         locale: 'en',

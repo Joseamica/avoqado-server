@@ -8,6 +8,7 @@
  */
 import { NextFunction, Request, Response } from 'express'
 import { buildLaunchOfferView } from '../../services/launchCampaigns/launchOfferMath'
+import { nombresDeLosPlanes } from '../../services/billing/nombresDeLosPlanes'
 import { findBySlug, findFeaturedByVertical, toOfferRow } from '../../services/launchCampaigns/launchCampaign.service'
 import { CAMPAIGN_STATUS } from '../../services/launchCampaigns/launchCampaignEnums'
 import { NotFoundError } from '../../errors/AppError'
@@ -32,7 +33,7 @@ export async function getLaunchOffer(req: Request, res: Response, next: NextFunc
     }
 
     res.set('Cache-Control', CACHE_DISPONIBLE)
-    res.status(200).json({ success: true, data: buildLaunchOfferView(toOfferRow(campaign), new Date()) })
+    res.status(200).json({ success: true, data: buildLaunchOfferView(toOfferRow(campaign), new Date(), await nombresDeLosPlanes()) })
   } catch (error) {
     next(error)
   }
@@ -58,7 +59,7 @@ export async function getFeaturedLaunchOffer(req: Request, res: Response, next: 
     }
 
     res.set('Cache-Control', CACHE_DISPONIBLE)
-    res.status(200).json({ success: true, data: buildLaunchOfferView(toOfferRow(campaign), new Date()) })
+    res.status(200).json({ success: true, data: buildLaunchOfferView(toOfferRow(campaign), new Date(), await nombresDeLosPlanes()) })
   } catch (error) {
     next(error)
   }

@@ -92,7 +92,7 @@ jest.mock('@/services/launchCampaigns/hybridPrices', () => ({
 // Los requisitos de código para prender el interruptor: listos (en B1 el SERVIDOR no deja; se prueba en plan-offer.api).
 jest.mock('@/services/billing/planesEditablesListos', () => ({
   SERVIDOR_LISTO_PARA_PLANES_EDITABLES: true,
-  cuponDeIntroduccionRetirado: () => true,
+  cuponDeIntroduccionExcluidoConVersion: () => true,
 }))
 
 import jwt from 'jsonwebtoken'

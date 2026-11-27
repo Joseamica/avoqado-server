@@ -254,9 +254,9 @@ describe('syncFeaturesToStripe y el nombre de los planes', () => {
     await syncFeaturesToStripe()
 
     const orden = llamadas.map((l: unknown[]) => (l[0] === 'candado' ? `candado:${l[2]}` : (l[0] as string)))
-    // Pro (la v2 es dueña de su nombre): candado → vigente → update bajo el candado → observación. Premium (la v2 no lo nombra):
-    // candado → vigente → el update de B0 sin candado → la revisión posterior (candado → vigente; sigue sin nombre propio: no toca
-    // Stripe). Las demás funciones, sin candado.
+    // Pro (la v2 es dueña de su nombre): candado → vigente → update bajo el candado → observación. Premium (la v2 no lo nombra, pero
+    // es una versión del editor, B4 T5): candado → vigente → número de la vigente → el update del catálogo BAJO el candado, con el tope
+    // de 10 s, y sin revisión posterior. Las demás funciones, sin candado.
     expect(orden).toEqual([
       'candado:plan-offer-nombre',
       'lee la vigente',
@@ -264,9 +264,8 @@ describe('syncFeaturesToStripe y el nombre de los planes', () => {
       'lee la observación',
       'candado:plan-offer-nombre',
       'lee la vigente',
-      'products.update',
-      'candado:plan-offer-nombre',
       'lee la vigente',
+      'products.update',
       'prices.create',
       'products.update',
       'products.create',
@@ -279,8 +278,13 @@ describe('syncFeaturesToStripe y el nombre de los planes', () => {
       { name: 'Plan Avoqado Pro Plus', description: 'Todo Pro' },
       { timeout: 10_000 },
     ])
-    // El update de Premium es el de B0: sin opciones de petición.
-    expect(llamadas[6]).toStrictEqual(['products.update', 'prod_premium', { name: 'Plan Premium', description: undefined }])
+    // El update de Premium (v2 sin nombre propio) corre bajo el candado, con las opciones de petición de las demás escrituras.
+    expect(llamadas[7]).toStrictEqual([
+      'products.update',
+      'prod_premium',
+      { name: 'Plan Premium', description: undefined },
+      { timeout: 10_000 },
+    ])
     // La vigente se leyó con la transacción del candado, no con el cliente de afuera.
     expect(tx.planOfferPointer.findUnique).toHaveBeenCalledTimes(4)
     expect(tx.planOfferPointer.update).toHaveBeenCalledWith({
@@ -288,11 +292,10 @@ describe('syncFeaturesToStripe y el nombre de los planes', () => {
       data: { nombresEnStripe: { PRO: { esperado: 'Plan Avoqado Pro Plus', enStripe: 'Plan Avoqado Pro Plus', estado: 'RENOMBRADO' } } },
     })
     expect(prismaMock.planOfferPointer.findUnique).not.toHaveBeenCalled()
-    // Decidir (y escribir el nombre propio) cabe en la transacción de la sincronización; la revisión, en la del job.
+    // Cada plan decide y escribe su nombre (propio o el del catálogo) en la transacción de la sincronización; sin revisión posterior.
     expect(prismaMock.$transaction.mock.calls.map((c: unknown[]) => c[1])).toEqual([
       { maxWait: 15_000, timeout: 150_000 },
       { maxWait: 15_000, timeout: 150_000 },
-      { maxWait: 15_000, timeout: 30_000 },
     ])
   })
 

@@ -1,5 +1,6 @@
 import { registerActivityLogTools } from '../../../src/mcp/tools/activity-log'
 import type { McpScope } from '../../../src/mcp/scope'
+import { z } from 'zod'
 
 const mockFindMany = jest.fn()
 
@@ -27,6 +28,7 @@ jest.mock('@/utils/prismaClient', () => ({
 
 const handlers = new Map<string, (a: Record<string, unknown>, e: unknown) => Promise<{ content: Array<{ text: string }> }>>()
 const descriptions = new Map<string, string>()
+const shapes = new Map<string, z.ZodRawShape>()
 // v1 has activity:read; v2 is in scope but LACKS it (canRead:false).
 const scope = {
   staffId: 's1',
@@ -45,6 +47,7 @@ beforeAll(() => {
     {
       tool: (...a: unknown[]) => {
         descriptions.set(a[0] as string, a[1] as string)
+        shapes.set(a[0] as string, a[2] as z.ZodRawShape)
         handlers.set(a[0] as string, a[a.length - 1] as never)
       },
     } as never,
@@ -117,6 +120,17 @@ describe('get_activity_log', () => {
     expect(whereArg.createdAt.lte).toBeInstanceOf(Date)
     // America/Mexico_City is UTC-6 → 2026-06-01 local 00:00 = 06:00Z (NOT 00:00Z, which the old bare-date bug produced)
     expect(whereArg.createdAt.gte.toISOString()).toBe('2026-06-01T06:00:00.000Z')
+  })
+
+  // 26-nov: the same hole as landing_leads. A full ISO datetime got a second time glued on → Invalid Date → Prisma threw.
+  // The SDK validates with this schema before the handler runs, so a bad date now comes back as a fixable error.
+  it('rejects a datetime or an impossible day in the schema, before reaching the database', () => {
+    const args = z.object(shapes.get('get_activity_log')!)
+    for (const bad of ['2026-11-20T00:00:00Z', '2026-02-30', '2026/11/20']) {
+      expect(args.safeParse({ startDate: bad }).success).toBe(false)
+      expect(args.safeParse({ endDate: bad }).success).toBe(false)
+    }
+    expect(args.safeParse({ startDate: '2026-06-01', endDate: '2026-06-15' }).success).toBe(true)
   })
 
   it('throws for an explicit venueId the caller cannot audit (out-of-scope OR no activity:read)', async () => {

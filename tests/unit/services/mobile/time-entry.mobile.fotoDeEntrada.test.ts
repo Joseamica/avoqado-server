@@ -132,11 +132,13 @@ describe('clockIn — un solo «¿ya tiene entrada? → crearla» a la vez por p
 
     await clockIn({ venueId: 'venue-1', pin: '1234' })
 
-    expect(orden).toEqual(['candado', 'revisa', 'crea'])
+    expect(orden).toEqual(['candado', 'candado', 'revisa', 'crea'])
     expect(prismaMock.$transaction).toHaveBeenCalledTimes(1)
-    const sql = (prismaMock.$queryRaw as jest.Mock).mock.calls[0]
-    expect(sql[0].join('?')).toContain('pg_advisory_xact_lock')
-    expect(sql[1]).toBe('time-entry-clock-in:venue-1:staff-1')
+    const calls = (prismaMock.$queryRaw as jest.Mock).mock.calls
+    expect(calls[0][0].join('?')).toContain('pg_advisory_xact_lock')
+    // La de la persona (la que espera la corrección de una salida olvidada) y, después, la de antes con la sucursal, que
+    // todavía toma la versión anterior mientras conviven en un despliegue (Codex 26-nov sobre #659, r4).
+    expect(calls.map((c: unknown[]) => c[1])).toEqual(['time-entry-clock-in:staff-1', 'time-entry-clock-in:venue-1:staff-1'])
   })
 })
 
