@@ -314,6 +314,15 @@ function encabezadosDeBaja(unsubscribe?: PlanNoticeUnsubscribe): Record<string, 
   return unsubscribe ? { 'List-Unsubscribe': `<${unsubscribe.url}>`, 'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click' } : undefined
 }
 
+/**
+ * El nombre del plan gratis en un aviso. «Gratis» es su nombre de hoy en español (`nombresDeLosPlanes()` lo da sin versión del
+ * editor, y los llamadores lo pasan siempre): en inglés se dice «Free». Un nombre del editor distinto («Inicial») sale tal cual.
+ */
+function nombreDelGratis(freeName: string | undefined, en: boolean): string {
+  if (!freeName || (en && freeName === 'Gratis')) return en ? 'Free' : 'Gratis'
+  return freeName
+}
+
 /** «$499» / «$499.50»: el precio del Básico sin IVA para escribir «+ IVA». */
 function precioSinIva(cents: number): string {
   return formatMoney(cents).replace(/\.00$/, '')
@@ -5519,7 +5528,7 @@ ${en ? 'Avoqado Team' : 'Equipo de Avoqado'}`
             `${prueba ? `Tu prueba de ${p} terminó y no se te cobró nada.` : `Tu plan ${p} terminó.`} Tu negocio sigue funcionando con el plan ${libre} y tus datos se quedan igual.`,
             precio ? `Puedes contratar el Básico (${precio} + IVA) con un clic, o volver a ${p}.` : `Puedes volver a ${p} cuando quieras.`,
           ]
-    const libre = data.freeName ?? (en ? 'Free' : 'Gratis')
+    const libre = nombreDelGratis(data.freeName, en)
     const parrafos = parrafosDe(planName, libre)
     const parrafosHtml = parrafosDe(escapeHtml(planName), escapeHtml(libre))
     const greeting = en ? 'Hi,' : 'Hola,'
@@ -5568,7 +5577,7 @@ ${en ? 'Avoqado Team' : 'Equipo de Avoqado'}`
     }
     const en = data.locale === 'en'
     const planName = data.planName ?? 'Pro'
-    const libre = escapeHtml(data.freeName ?? (en ? 'Free' : 'Gratis'))
+    const libre = escapeHtml(nombreDelGratis(data.freeName, en))
     const fecha = data.endDate.toLocaleDateString(en ? 'en-US' : 'es-MX', {
       year: 'numeric',
       month: 'long',
@@ -5633,7 +5642,7 @@ ${en ? 'Avoqado Team' : 'Equipo de Avoqado'}`
   private async sendPlanNoCardTrialEmail(email: string, data: PlanFreeTrialEndingEmailData): Promise<boolean> {
     const en = data.locale === 'en'
     const planName = data.planName ?? 'Pro'
-    const libre = escapeHtml(data.freeName ?? (en ? 'Free' : 'Gratis'))
+    const libre = escapeHtml(nombreDelGratis(data.freeName, en))
     const fecha = data.endDate.toLocaleDateString(en ? 'en-US' : 'es-MX', {
       year: 'numeric',
       month: 'long',
