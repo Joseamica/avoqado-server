@@ -8,7 +8,7 @@
  * - Passkey (WebAuthn) authentication for passwordless login
  */
 
-import { AuthMethod, type VenueStatus, type Session } from '@prisma/client'
+import { AuthMethod, type Prisma, type VenueStatus, type Session } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import { withDeadlockRetry } from '../../utils/serializableRetry'
 import crypto from 'crypto'
@@ -561,6 +561,46 @@ export async function deletePasskey(staffId: string, passkeyId: string) {
 // EMAIL/PASSWORD AUTHENTICATION
 // ============================================================================
 
+/** Lo que el login del POS lee del Staff (contraseña y Google comparten la forma de armar la sesión). */
+export const STAFF_DEL_LOGIN_POS = {
+  id: true,
+  email: true,
+  emailVerified: true,
+  firstName: true,
+  lastName: true,
+  password: true,
+  active: true,
+  photoUrl: true,
+  phone: true,
+  lockedUntil: true,
+  failedLoginAttempts: true,
+  createdAt: true,
+  lastLoginAt: true,
+  venues: {
+    where: { active: true },
+    include: {
+      permissionSet: true,
+      venue: {
+        select: {
+          id: true,
+          name: true,
+          slug: true,
+          logo: true,
+          status: true,
+          kycStatus: true,
+          organizationId: true,
+          type: true,
+          timezone: true,
+          organization: ALTA_DEL_ASISTENTE,
+        },
+      },
+    },
+  },
+  googleId: true,
+} satisfies Prisma.StaffSelect
+
+export type StaffDelLoginPos = Prisma.StaffGetPayload<{ select: typeof STAFF_DEL_LOGIN_POS }>
+
 /**
  * Login with email and password
  * Returns tokens in response body (mobile apps can't read httpOnly cookies)
@@ -576,41 +616,7 @@ export async function loginWithEmail(email: string, password: string, rememberMe
   // 1. Find staff with all active venues
   const staff = await prisma.staff.findUnique({
     where: { email: email.toLowerCase() },
-    select: {
-      id: true,
-      email: true,
-      emailVerified: true,
-      firstName: true,
-      lastName: true,
-      password: true,
-      active: true,
-      photoUrl: true,
-      phone: true,
-      lockedUntil: true,
-      failedLoginAttempts: true,
-      createdAt: true,
-      lastLoginAt: true,
-      venues: {
-        where: { active: true },
-        include: {
-          permissionSet: true,
-          venue: {
-            select: {
-              id: true,
-              name: true,
-              slug: true,
-              logo: true,
-              status: true,
-              kycStatus: true,
-              organizationId: true,
-              type: true,
-              timezone: true,
-              organization: ALTA_DEL_ASISTENTE,
-            },
-          },
-        },
-      },
-    },
+    select: STAFF_DEL_LOGIN_POS,
   })
 
   if (!staff || !staff.password) {
@@ -656,6 +662,19 @@ export async function loginWithEmail(email: string, password: string, rememberMe
     throw new ForbiddenError('Por favor verifica tu correo electrónico antes de iniciar sesión.')
   }
 
+  return emitirSesionDelPos(staff, 'password', rememberMe, deviceId)
+}
+
+/**
+ * Pasos 5–9 del login del POS: venue operativo, Session, tokens, primer RefreshGrant, última entrada,
+ * bitácora y respuesta. `metodo` decide AuthMethod y lo que se limpia (hz:6bfcd3a1:D1).
+ */
+export async function emitirSesionDelPos(
+  staff: StaffDelLoginPos,
+  metodo: 'password' | 'google',
+  rememberMe: boolean | undefined,
+  deviceId: string | undefined,
+) {
   // 5. Check venue access
   const selectedVenue = pickOperationalVenueForLogin(staff.venues, 'NO_VENUE_ACCESS')
 
@@ -664,7 +683,7 @@ export async function loginWithEmail(email: string, password: string, rememberMe
   const session = await createSession({
     staffId: staff.id,
     venueId: selectedVenue.venueId,
-    authMethod: AuthMethod.PASSWORD,
+    authMethod: metodo === 'google' ? AuthMethod.GOOGLE : AuthMethod.PASSWORD,
     // El aparato donde nació la sesión. Es lo que permite «sacar esta tablet» sin echar a la
     // persona de su teléfono: se revoca por aparato, no por persona.
     deviceId,
@@ -691,8 +710,8 @@ export async function loginWithEmail(email: string, password: string, rememberMe
     where: { id: staff.id },
     data: {
       lastLoginAt: new Date(),
-      failedLoginAttempts: 0,
-      lockedUntil: null,
+      // Sólo la contraseña lleva cuenta de intentos fallidos.
+      ...(metodo === 'password' ? { failedLoginAttempts: 0, lockedUntil: null } : {}),
     },
   })
 
@@ -703,7 +722,7 @@ export async function loginWithEmail(email: string, password: string, rememberMe
     action: 'STAFF_LOGIN',
     entity: 'Staff',
     entityId: staff.id,
-    data: { source: 'mobile', method: 'password', role: selectedVenue.role },
+    data: { source: 'mobile', method: metodo, role: selectedVenue.role },
   })
 
   // 8. Fetch custom role permissions
@@ -749,7 +768,7 @@ export async function loginWithEmail(email: string, password: string, rememberMe
       }),
   }
 
-  logger.info(`🔐 [MOBILE AUTH] Login successful for: ${staff.email}`)
+  logger.info(`🔐 [MOBILE AUTH] Login successful (${metodo}) for: ${staff.email}`)
 
   return {
     accessToken,

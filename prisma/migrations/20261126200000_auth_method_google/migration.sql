@@ -1,0 +1,1 @@
+ALTER TYPE "AuthMethod" ADD VALUE 'GOOGLE';
