@@ -6,6 +6,7 @@ const mockLogAction = jest.fn()
 jest.mock('@/services/dashboard/activity-log.service', () => ({ logAction: (...a: unknown[]) => mockLogAction(...(a as [])) }))
 
 import { prismaMock } from '@tests/__helpers__/setup'
+import { Settings } from 'luxon'
 import {
   anotarSalidaQueNoSeUso,
   cerrarOlvidadasAntesDeChecar,
@@ -75,6 +76,20 @@ describe('limiteDelTurno con la hora de corte de la sucursal', () => {
     // Codex r1 #7: un horario que termina a las 21:30 o a las 22:00 no corre el corte de la sucursal.
     expect(limiteDelTurno(mx('2026-11-03T14:00:00'), MX, mx('2026-11-03T21:30:00'), '22:00')).toEqual(mx('2026-11-03T22:00:00'))
     expect(limiteDelTurno(mx('2026-11-03T14:00:00'), MX, mx('2026-11-03T22:00:00'), '22:00')).toEqual(mx('2026-11-03T22:00:00'))
+  })
+
+  it('Codex r2 #3: una hora que se repite (regreso al horario de invierno) da siempre la primera, sin importar el reloj', () => {
+    // Tijuana, 1-nov-2026: las 01:xx pasan dos veces. Entrada 00:10 PDT, corte 01:30: la primera 01:30 (PDT) = 08:30Z.
+    const entrada = new Date('2026-11-01T00:10:00-07:00')
+    const original = Settings.now
+    try {
+      for (const reloj of ['2026-07-01T12:00:00Z', '2026-12-01T12:00:00Z']) {
+        Settings.now = () => new Date(reloj).getTime()
+        expect(limiteDelTurno(entrada, 'America/Tijuana', null, '01:30')).toEqual(new Date('2026-11-01T08:30:00Z'))
+      }
+    } finally {
+      Settings.now = original
+    }
   })
 
   it('Codex r1 #5: el día del cambio de horario no corre el corte del día siguiente (Tijuana, 8-mar-2026)', () => {

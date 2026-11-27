@@ -63,7 +63,12 @@ const LLEGADA_ANTICIPADA_MIN = 4 * 60
 const MAX_HORAS = 999.99 // Decimal(5,2)
 /** Por pasada del job: lo viejo se va cerrando en tandas, nunca una lectura sin tope. */
 export const TOPE_POR_PASADA = 500
-/** Páginas por pasada del job (cada 15 min): hasta 2,500 revisadas; lo demás, en la siguiente. */
+/**
+ * Páginas por pasada del job (cada 15 min): hasta 2,500 revisadas; lo demás, en la siguiente.
+ * ponytail: con más de 2,500 turnos abiertos y aún vigentes por delante (hora de corte propia), uno ya vencido puede esperar
+ * varias pasadas (Codex 26-nov r2 #4); la siguiente checada de la persona lo cierra igual. Si llega a pasar, ordenar por
+ * límite precalculado.
+ */
 const PAGINAS_POR_PASADA = 5
 
 export const NOTA_SALIDA_OLVIDADA = '[Sistema] Salida olvidada · revisar'
@@ -99,8 +104,9 @@ export function limiteDelTurno(
     // El corte de cada día se arma con su fecha (no sumando días a una hora ya corrida): un día con cambio de horario no
     // arrastra la hora corrida al día siguiente (Codex r1 #5).
     const desde = clockIn.getTime() + MIN_ANTES_DEL_CORTE_H * 3_600_000
-    const corteDe = (d: DateTime) =>
-      DateTime.fromObject({ year: d.year, month: d.month, day: d.day, hour: propio[0], minute: propio[1] }, { zone: zona }).toMillis()
+    // Desde el inicio del día (`set` resuelve con su propio desfase, no con el reloj del proceso): una hora que se repite al
+    // regresar el horario de invierno da siempre la primera (Codex r2 #3).
+    const corteDe = (d: DateTime) => d.startOf('day').set({ hour: propio[0], minute: propio[1] }).toMillis()
     const dia = DateTime.fromMillis(desde, { zone: zona })
     const hoy = corteDe(dia)
     const base = hoy >= desde ? hoy : corteDe(dia.plus({ days: 1 }))
@@ -274,7 +280,10 @@ async function cerrarSiOlvidada(db: Db, e: EntradaAbierta, ahora: Date, disparad
   // Filtro barato con lo que se leyó en la página: el límite real nunca es menor que el base. La decisión, con lo releído.
   if (ahora < limiteDelTurno(e.clockInTime, e.venue.timezone, null, e.venue.settings?.salidaOlvidadaCorte)) return null
   // El interruptor y la hora de corte se releen dentro de la transacción (Codex r2 #11 y 26-nov r1 #2): el job leyó la página
-  // antes y el gerente pudo apagarla o mover el corte.
+  // antes y el gerente pudo apagarla o mover el corte. Con FOR SHARE (26-nov r2 #2): un cambio del gerente espera a que este
+  // cierre termine, así nunca se confirma un corte nuevo mientras se cierra con el viejo. Si el gerente ADELANTA el corte, el
+  // filtro de arriba (con lo de la página) puede saltarla en esta pasada: la cierra la siguiente, a más tardar en 15 min.
+  await db.$queryRaw`SELECT 1 FROM "VenueSettings" WHERE "venueId" = ${e.venueId} FOR SHARE`
   const ajuste = await db.venueSettings.findUnique({
     where: { venueId: e.venueId },
     select: { salidaOlvidadaEnabled: true, salidaOlvidadaCorte: true },
