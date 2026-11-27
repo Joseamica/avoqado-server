@@ -338,6 +338,27 @@ describe('el escritor (escribirNombreDelPlan)', () => {
     expect(tx.planOfferPointer.update).not.toHaveBeenCalled()
   })
 
+  it('B4 T5 (revisión): con esa v2, si leer el número de la vigente falla, se dice en un warn y se escribe el nombre del catálogo como hoy', async () => {
+    const soloPrecio = definicionDePrueba({ ids: idsDeLaVersion('v2'), netos: { 'PRO:monthly': 79900 } })
+    const conLecturaQueFalla = crearTx(punteroA('cv2', 2, soloPrecio))
+    const puntero = await conLecturaQueFalla.planOfferPointer.findUnique()
+    conLecturaQueFalla.planOfferPointer.findUnique
+      .mockReset()
+      .mockResolvedValueOnce(puntero)
+      .mockRejectedValueOnce(Object.assign(new Error('Connection terminated'), { code: 'P1017' }))
+      .mockResolvedValue(puntero)
+    usarTx(conLecturaQueFalla)
+    mockUpdate.mockReset().mockResolvedValue({ id: 'prod_sync', name: 'Plan Pro' })
+    ;(logger.warn as jest.Mock).mockClear()
+
+    await escribirNombreDelPlan('PRO', 'SYNC', { nombre: 'Plan Pro', descripcion: 'Todo Pro', productId: 'prod_sync' })
+
+    expect((logger.warn as jest.Mock).mock.calls.map((c: unknown[]) => c[0])).toContain(
+      'Renombre de los planes: no se pudo leer el número de la vigente — se escribe el nombre del catálogo, como antes de los planes editables',
+    )
+    expect(mockUpdate.mock.calls[0]).toStrictEqual(['prod_sync', { name: 'Plan Pro', description: 'Todo Pro' }])
+  })
+
   it('B4 T5: con esa v2, si Stripe rechaza el update bajo el candado el error sube tal cual y no se reintenta sin candado', async () => {
     const soloPrecio = definicionDePrueba({ ids: idsDeLaVersion('v2'), netos: { 'PRO:monthly': 79900 } })
     usarTx(crearTx(punteroA('cv2', 2, soloPrecio)))

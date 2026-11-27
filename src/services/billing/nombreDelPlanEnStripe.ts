@@ -251,7 +251,17 @@ async function escribirEnLaSincronizacion(
       // versiones, `return null`: el paso 3 de B0 tal cual.
       const delCatalogo = !propio
       if (delCatalogo) {
-        const numero = await numeroDeLaVigente(tx)
+        let numero: number | null
+        try {
+          numero = await numeroDeLaVigente(tx)
+        } catch (error) {
+          // Sin el número no se sabe si hay una versión del editor: lo de hoy (el paso 3 de B0), pero dicho.
+          logger.warn(
+            'Renombre de los planes: no se pudo leer el número de la vigente — se escribe el nombre del catálogo, como antes de los planes editables',
+            { tier, error: comoTexto(error) },
+          )
+          throw error
+        }
         if (numero === null || numero < 2) return null
       }
       const nombreAEscribir = propio ?? nombre
