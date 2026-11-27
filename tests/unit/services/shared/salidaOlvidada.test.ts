@@ -616,6 +616,82 @@ describe('corregirSalidaOlvidada (el gerente, en Asistencia)', () => {
     ).rejects.toMatchObject({ statusCode: 400, code: 'SALIDA_DESPUES_DEL_DIA' })
   })
 
+  // Codex 26-nov sobre #659 (#2): el tope de fábrica sale de lo que había AL CERRAR (su salida de horario), no del horario de
+  // hoy: un turno publicado después para esa fecha no alarga una checada vieja.
+  it('un horario puesto después del cierre no alarga el tope de la corrección', async () => {
+    prismaMock.timeEntry.findFirst.mockResolvedValueOnce({ staffId: 'staff-1' } as any).mockResolvedValueOnce(
+      olvidada({
+        clockInTime: mx('2026-11-03T14:00:00'),
+        clockOutTime: mx('2026-11-03T14:00:00'),
+        limiteOlvidada: mx('2026-11-04T04:00:00'),
+      }) as any,
+    )
+    prismaMock.staffVenue.findFirst.mockResolvedValue({
+      workSchedule: { weekly: { tuesday: { enabled: true, ranges: [{ open: '14:00', close: '10:00' }] } } },
+      workScheduleExceptions: [],
+    } as any)
+
+    await expect(
+      corregirSalidaOlvidada({
+        venueId: 'venue-1',
+        timeEntryId: 'te-1',
+        clockOutTime: mx('2026-11-04T10:30:00'),
+        actorStaffId: 'gerente',
+        ahora,
+      }),
+    ).rejects.toMatchObject({ statusCode: 400, code: 'SALIDA_DESPUES_DEL_DIA' })
+  })
+
+  // Codex 26-nov sobre #659 (#3): con corte a las 06:00 y horario hasta las 06:00, el cierre congela las 06:00; el tope de
+  // fábrica con ESE horario es las 07:00, aunque después le quiten el horario.
+  it('quitar el horario después del cierre no baja el tope de fábrica de la corrección', async () => {
+    prismaMock.timeEntry.findFirst
+      .mockResolvedValueOnce({ staffId: 'staff-1' } as any)
+      .mockResolvedValueOnce(
+        olvidada({
+          clockInTime: mx('2026-11-03T14:00:00'),
+          clockOutTime: mx('2026-11-04T06:00:00'),
+          limiteOlvidada: mx('2026-11-04T06:00:00'),
+        }) as any,
+      )
+      .mockResolvedValueOnce(null)
+    prismaMock.timeEntry.updateMany.mockResolvedValue({ count: 1 })
+
+    const r = await corregirSalidaOlvidada({
+      venueId: 'venue-1',
+      timeEntryId: 'te-1',
+      clockOutTime: mx('2026-11-04T06:40:00'),
+      actorStaffId: 'gerente',
+      ahora,
+    })
+
+    expect(r.totalHours).toBe(16.67)
+  })
+
+  // Codex 26-nov sobre #659 (#1): la entrada de la TPV y del POS toma otro candado; la corrección también lo toma antes de
+  // buscar la siguiente entrada, para no encimarse con una que se está guardando en ese instante.
+  it('toma el candado de la entrada de la TPV y del POS antes de buscar la siguiente entrada', async () => {
+    prismaMock.timeEntry.findFirst
+      .mockResolvedValueOnce({ staffId: 'staff-1' } as any)
+      .mockResolvedValueOnce(olvidada() as any)
+      .mockResolvedValueOnce(null)
+    prismaMock.timeEntry.updateMany.mockResolvedValue({ count: 1 })
+
+    await corregirSalidaOlvidada({
+      venueId: 'venue-1',
+      timeEntryId: 'te-1',
+      clockOutTime: mx('2026-11-03T18:00:00'),
+      actorStaffId: 'gerente',
+      ahora,
+    })
+
+    const calls = (prismaMock.$queryRaw as jest.Mock).mock.calls
+    const i = calls.findIndex((c: unknown[]) => String(c[1]) === 'time-entry-clock-in:venue-1:staff-1')
+    expect(i).toBeGreaterThanOrEqual(0)
+    const orden = (prismaMock.$queryRaw as jest.Mock).mock.invocationCallOrder[i]
+    expect(orden).toBeLessThan(prismaMock.timeEntry.findFirst.mock.invocationCallOrder[2])
+  })
+
   it('pone la salida real, recalcula horas, quita la marca y lo anota con el antes y el después', async () => {
     prismaMock.timeEntry.findFirst
       .mockResolvedValueOnce({ staffId: 'staff-1' } as any)

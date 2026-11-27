@@ -11,7 +11,12 @@ import prisma from '../../utils/prismaClient'
  */
 export function conCandadoDeEntrada<T>(venueId: string, staffId: string, fn: (tx: Prisma.TransactionClient) => Promise<T>): Promise<T> {
   return prisma.$transaction(async tx => {
-    await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`time-entry-clock-in:${venueId}:${staffId}`}, 0))::text`
+    await tomarCandadoDeEntrada(tx, venueId, staffId)
     return fn(tx)
   })
+}
+
+/** El mismo candado dentro de una transacción que ya existe (la corrección de una salida olvidada, para no encimarse). */
+export async function tomarCandadoDeEntrada(tx: Prisma.TransactionClient, venueId: string, staffId: string): Promise<void> {
+  await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`time-entry-clock-in:${venueId}:${staffId}`}, 0))::text`
 }
