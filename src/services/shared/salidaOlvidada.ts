@@ -39,6 +39,7 @@ import { DEFAULT_TIMEZONE, isValidTimezone } from '../../utils/datetime'
 import defaultPrisma from '../../utils/prismaClient'
 import { retry, shouldRetryDbConnectionError } from '../../utils/retry'
 import { BUSINESS_DAY_START_HOUR } from './cashDrawerAutoClose'
+import { tomarCandadoDeEntrada } from '../tpv/candadoDeEntrada'
 
 /** Un turno nunca se da por olvidado antes de estas horas desde su entrada (turnos nocturnos que cruzan el corte). */
 export const HORAS_MINIMAS = 12
@@ -517,6 +518,9 @@ export async function corregirSalidaOlvidada(params: {
     if (!dueno) throw new NotFoundError('No encontramos esa checada.', 'ENTRADA_NO_ENCONTRADA')
     // El mismo candado que la checada del celular (Codex r1 #7): una entrada que sube a la vez no se encima con esta salida.
     await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${`checada:${dueno.staffId}`}))::text`
+    // Y el de la entrada de la TPV y del POS, que es de la persona (Codex 26-nov sobre #659): una entrada que se guarda en ese
+    // instante, en cualquiera de sus sucursales, ya se ve al buscar la siguiente.
+    await tomarCandadoDeEntrada(tx, dueno.staffId)
     const e = await tx.timeEntry.findFirst({
       where: { id: timeEntryId, venueId },
       select: {
@@ -531,7 +535,7 @@ export async function corregirSalidaOlvidada(params: {
         notes: true,
         breaks: { select: { id: true, startTime: true, endTime: true } },
         limiteOlvidada: true,
-        venue: { select: { timezone: true, settings: { select: { rotatingShiftsEnabled: true } } } },
+        venue: { select: { timezone: true } },
       },
     })
     if (!e) throw new NotFoundError('No encontramos esa checada.', 'ENTRADA_NO_ENCONTRADA')
@@ -543,19 +547,15 @@ export async function corregirSalidaOlvidada(params: {
     }
     if (salida <= e.clockInTime) throw new BadRequestError('La salida tiene que ser después de la entrada.', 'SALIDA_ANTES_DE_ENTRADA')
     if (salida > ahora) throw new BadRequestError('La salida no puede estar en el futuro.', 'SALIDA_EN_EL_FUTURO')
-    // El límite con el que se cerró, fijo (26-nov r1 #1); los cierres de antes, con la regla de fábrica y su horario, como hoy.
-    const limite =
-      e.limiteOlvidada ??
-      (
-        await limiteYSalidaDeSuHorario(tx, {
-          staffId: e.staffId,
-          venueId: e.venueId,
-          clockInTime: e.clockInTime,
-          timezone: e.venue.timezone,
-          rotativos: e.venue.settings?.rotatingShiftsEnabled === true,
-          corte: null,
-        })
-      ).limite
+    // El gerente puede poner la salida REAL hasta el límite de fábrica (el siguiente 04:00, nunca antes de 12 h, o su horario):
+    // un turno no dura días. La hora de corte propia decide cuándo el SISTEMA da el turno por olvidado, no hasta cuándo se
+    // reconocen horas trabajadas (revisión de apps viejas, Codex 26-nov: con corte a las 22:00, quien salió a las 22:40 se
+    // quedaba en 0 h sin forma de corregirlo). Se mide con lo que había AL CERRAR (su salida de horario quedó como la salida
+    // del cierre), no con el horario de hoy (Codex 26-nov sobre #659, #2 y #3). El límite guardado del cierre sólo lo amplía.
+    // ponytail: usa la zona de hoy de la sucursal (si la cambiaron, el tope se corre con ella) y, si la salida real del celular
+    // la regresó a revisar tras otra corrección, mide desde esa corrección (hasta 1 h más). Exacto: guardar el tope al cerrar.
+    const deFabrica = limiteDeUnCierre(e.clockInTime, e.venue.timezone, e.clockOutTime, null)
+    const limite = e.limiteOlvidada && e.limiteOlvidada > deFabrica ? e.limiteOlvidada : deFabrica
     if (salida > limite) {
       throw new BadRequestError(
         `La salida no puede pasar de ${DateTime.fromJSDate(limite, { zone: zonaDe(e.venue.timezone) }).toFormat('HH:mm')} del día siguiente: un turno no dura días.`,
