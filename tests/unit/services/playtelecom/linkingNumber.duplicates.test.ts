@@ -97,7 +97,7 @@ describe('findDuplicatesForSales', () => {
         expect.objectContaining({ kind: 'SALE', verificationId: 'f', status: 'FAILED' }),
       ],
     })
-    expect(out.get('x')?.ported).toBeUndefined()
+    expect(out.get('x')).not.toHaveProperty('ported')
     // Busca el número en los dos campos de las otras ventas, sin filtrar por estado.
     const sql = sqlOf()
     expect(sql).toContain('sv."linkingNumber" = ANY(')
@@ -254,7 +254,7 @@ describe('el número portado puede repetirse', () => {
     const out = await findDuplicatesForSales(ORG, [sale({ key: 'x', verificationId: 'x', iccid: 'I1', linkingNumber: N, portedNumber: P })])
 
     expect(out.get('x')?.linking?.total).toBe(1)
-    expect(out.get('x')?.ported).toBeUndefined()
+    expect(out.get('x')).not.toHaveProperty('ported')
     expect(valuesOf()).toContainEqual([N])
     expect(JSON.stringify(valuesOf())).not.toContain(P)
     expect(sqlOf()).toContain('sv."portedNumber" = ANY(')
