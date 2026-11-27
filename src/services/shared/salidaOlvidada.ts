@@ -294,7 +294,7 @@ async function cerrarSiOlvidada(db: Db, e: EntradaAbierta, ahora: Date, disparad
   await candadoDeLaRegla(db, e.venueId)
   const ajuste = await db.venueSettings.findUnique({
     where: { venueId: e.venueId },
-    select: { salidaOlvidadaEnabled: true, salidaOlvidadaCorte: true },
+    select: { salidaOlvidadaEnabled: true, salidaOlvidadaCorte: true, rotatingShiftsEnabled: true },
   })
   if (ajuste?.salidaOlvidadaEnabled === false) return null
   const { limite, deSuHorario } = await limiteYSalidaDeSuHorario(db, {
@@ -302,7 +302,8 @@ async function cerrarSiOlvidada(db: Db, e: EntradaAbierta, ahora: Date, disparad
     venueId: e.venueId,
     clockInTime: e.clockInTime,
     timezone: e.venue.timezone,
-    rotativos: e.venue.settings?.rotatingShiftsEnabled === true,
+    // También releído (Codex 26-nov r4 #6): no se mezcla un corte nuevo con el interruptor de turnos de la primera lectura.
+    rotativos: ajuste?.rotatingShiftsEnabled === true,
     corte: ajuste?.salidaOlvidadaCorte ?? null,
   })
   if (ahora < limite) return null // un nocturno largo con horario, o el corte se movió más tarde: todavía es su turno
@@ -370,6 +371,9 @@ export async function cerrarSalidasOlvidadasDe(
     orderBy: { clockInTime: 'asc' },
     take: 20,
   })
+  // Los candados de la regla de TODAS sus sucursales, en orden de id, antes de cerrar (Codex 26-nov r4 #4): dos personas con
+  // turnos abiertos en A y B en distinto orden ya no se esperan en círculo. El de cada cierre después es el mismo (re-entrante).
+  for (const venueId of [...new Set(abiertas.map(e => e.venueId))].sort()) await candadoDeLaRegla(db, venueId)
   const cerradas: SalidaOlvidadaCerrada[] = []
   for (const e of abiertas) {
     const c = await cerrarSiOlvidada(db, e, ahora, disparador)

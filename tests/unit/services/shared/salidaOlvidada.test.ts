@@ -451,6 +451,23 @@ describe('anotarSalidaQueNoSeUso (PAX y POS tras el cierre)', () => {
   })
 })
 
+describe('cerrarSalidasOlvidadasDe: candados en orden (Codex 26-nov r4 #4)', () => {
+  it('toma el candado de la regla de cada sucursal una vez y en orden de id, antes de cerrar', async () => {
+    const { cerrarSalidasOlvidadasDe } = jest.requireActual('@/services/shared/salidaOlvidada')
+    prismaMock.timeEntry.findMany.mockResolvedValue([
+      abierta({ id: 'te-b', venueId: 'venue-b' }),
+      abierta({ id: 'te-a', venueId: 'venue-a' }),
+      abierta({ id: 'te-b2', venueId: 'venue-b' }),
+    ] as any)
+    prismaMock.venueSettings.findUnique.mockResolvedValue({ salidaOlvidadaEnabled: false } as any)
+
+    await cerrarSalidasOlvidadasDe(prismaMock, 'staff-1', mx('2026-11-04T10:00:00'), 'ENTRADA')
+
+    const candados = prismaMock.$queryRaw.mock.calls.map(c => String(c[1])).filter(k => k.startsWith('salida-olvidada:'))
+    expect(candados.slice(0, 2)).toEqual(['salida-olvidada:venue-a', 'salida-olvidada:venue-b'])
+  })
+})
+
 describe('cerrarOlvidadasAntesDeChecar (PAX y POS)', () => {
   it('sin nada viejo abierto no abre transacción', async () => {
     prismaMock.timeEntry.findMany.mockResolvedValue([])
