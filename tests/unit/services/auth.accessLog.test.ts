@@ -163,7 +163,10 @@ describe('all four login paths write to the access log', () => {
     // which one was used.
     const source = read('services/mobile/auth.mobile.service.ts')
     expect(source).toContain("method: 'passkey'")
-    expect(source).toContain("method: 'password'")
+    // Password and Google share one writer (emitirSesionDelPos), which logs the method it receives;
+    // loginWithEmail must pass 'password'.
+    expect(source).toContain("emitirSesionDelPos(staff, 'password'")
+    expect(source).toContain('method: metodo')
   })
 
   it('PIN login records the terminal serial number', () => {

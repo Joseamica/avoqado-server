@@ -1,0 +1,98 @@
+{
+  "pagina": "android/personal/iniciar-sesion",
+  "sourceRepo": "avoqado-android",
+  "sourceRef": "fa0624481213de8ea62d12f8bae02ba00843c3b6",
+  "version": "2.25.42",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/auth/presentation/SignInFlowScreen.kt",
+      "linea": 201,
+      "cita": "label = { Text(\"Correo electrónico\") },"
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/auth/presentation/SignInFlowScreen.kt",
+      "linea": 242,
+      "cita": "text = \"Siguiente\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/auth/presentation/SignInFlowScreen.kt",
+      "linea": 332,
+      "cita": "label = { Text(\"Contraseña\") },"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/auth/presentation/SignInFlowScreen.kt",
+      "linea": 191,
+      "cita": "text = \"Iniciar sesión\","
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/auth/presentation/SignInFlowScreen.kt",
+      "linea": 369,
+      "cita": "text = \"¿Olvidaste tu contraseña?\","
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/auth/presentation/SignInFlowScreen.kt",
+      "linea": 270,
+      "cita": "Text(text = \"Continuar con Google\", style = MaterialTheme.typography.titleMedium)"
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/auth/presentation/SignInViewModel.kt",
+      "linea": 233,
+      "cita": "entrarConGoogle.pedirPase(activity, config)"
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/auth/data/EntrarConGoogle.kt",
+      "linea": 25,
+      "cita": "TEXTO_SIN_CHROME ="
+    },
+    {
+      "paso": 5,
+      "archivo": "app/src/main/java/com/avoqado/pos/auth/data/EntrarConGoogle.kt",
+      "linea": 28,
+      "cita": "TEXTO_CAJA_BLOQUEADA ="
+    }
+  ],
+  "permisos": [],
+  "plan": [],
+  "sinInternet": [
+    {
+      "afirmacion": "Si aparece «Sin conexión: conéctate a internet para entrar con Google.»: entrar con Google necesita internet",
+      "archivo": "app/src/main/java/com/avoqado/pos/auth/data/AuthRepository.kt",
+      "linea": 485
+    }
+  ],
+  "rutas": [
+    {
+      "ruta": "Entrar con Google comparte el intento con contraseña y huella",
+      "archivo": "app/src/main/java/com/avoqado/pos/auth/presentation/SignInViewModel.kt",
+      "linea": 215
+    },
+    {
+      "ruta": "Si aparece: entrar con Google no disponible en este aparato",
+      "archivo": "app/src/main/java/com/avoqado/pos/auth/data/EntrarConGoogle.kt",
+      "linea": 23
+    },
+    {
+      "ruta": "Antes: huella o rostro",
+      "archivo": "app/src/main/java/com/avoqado/pos/auth/presentation/SignInFlowScreen.kt",
+      "linea": 217
+    }
+  ],
+  "aparato": {
+    "estado": "NO PROBADO EN APARATO",
+    "fotos": [],
+    "filasCreadas": []
+  },
+  "codex": {
+    "lote": 7,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

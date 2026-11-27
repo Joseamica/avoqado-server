@@ -39,6 +39,9 @@ jest.mock('google-auth-library', () => ({
   })),
 }))
 
+// Un servidor con Google configurado: sin GOOGLE_CLIENT_ID el panel rechaza todo token (hz:6bfcd3a1:D1).
+process.env.GOOGLE_CLIENT_ID = 'cliente-del-panel'
+
 const sufijo = `gi${Date.now()}`
 const ids: { orgs: string[]; venues: string[]; staff: string[] } = { orgs: [], venues: [], staff: [] }
 let orgId: string

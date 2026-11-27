@@ -64,6 +64,7 @@ jest.mock('../../../src/utils/prismaClient', () => ({
       findUnique: jest.fn(() => Promise.resolve(state.existingStaff)),
       findUniqueOrThrow: jest.fn(() => Promise.resolve(state.staffAfterCreate)),
       update: jest.fn().mockResolvedValue({}),
+      updateMany: jest.fn().mockResolvedValue({ count: 1 }),
     },
     invitation: {
       findFirst: jest.fn(() => Promise.resolve(state.invitation)),
@@ -124,6 +125,9 @@ jest.mock('../../../src/services/staffOrganization.service', () => ({
 }))
 
 import { loginWithGoogle } from '../../../src/services/dashboard/googleOAuth.service'
+
+// Un servidor con Google configurado: sin GOOGLE_CLIENT_ID el panel rechaza todo token (hz:6bfcd3a1:D1).
+process.env.GOOGLE_CLIENT_ID = 'cliente-del-panel'
 
 // --- Fixture builders -----------------------------------------------------------------------
 const ORG_VENUE = {

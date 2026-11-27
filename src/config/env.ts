@@ -352,6 +352,14 @@ const envSchema = z.object({
   GOOGLE_REDIRECT_URI: z.string().url().optional(),
   GOOGLE_API_KEY: z.string().optional(),
   GOOGLE_BP_REDIRECT_URI: z.string().url().optional(),
+  // Entrar con Google en el POS (hz:6bfcd3a1:D1). ANDROID: cliente WEB propio con secreto y la vuelta por el SERVIDOR
+  // (`…/api/v1/mobile/auth/google/vuelta`); se prende sólo con las tres. Sin `.url()` a propósito: una mal escrita haría
+  // `process.exit` de TODA la API (como las demás opcionales de abajo).
+  GOOGLE_POS_WEB_CLIENT_ID: z.string().optional(),
+  GOOGLE_POS_WEB_CLIENT_SECRET: z.string().optional(),
+  GOOGLE_POS_REDIRECT_URI: z.string().optional(),
+  GOOGLE_POS_DESKTOP_CLIENT_ID: z.string().optional(),
+  GOOGLE_POS_DESKTOP_CLIENT_SECRET: z.string().optional(),
 
   // Firebase
   FIREBASE_SERVICE_ACCOUNT_BASE64: z.string().optional(),

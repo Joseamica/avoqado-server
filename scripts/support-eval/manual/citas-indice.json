@@ -91,8 +91,22 @@
         "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
       },
       {
+        "pagina": "android/personal/iniciar-sesion",
+        "sourceRef": "fa0624481213de8ea62d12f8bae02ba00843c3b6"
+      },
+      {
         "pagina": "windows/personal/cambiar-de-usuario",
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+      },
+      {
+        "pagina": "windows/personal/iniciar-sesion",
+        "sourceRef": "fa0624481213de8ea62d12f8bae02ba00843c3b6"
+      }
+    ],
+    "avoqado-android:app/src/main/java/com/avoqado/pos/auth/data/EntrarConGoogle.kt": [
+      {
+        "pagina": "android/personal/iniciar-sesion",
+        "sourceRef": "fa0624481213de8ea62d12f8bae02ba00843c3b6"
       }
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/auth/presentation/AppState.kt": [
@@ -119,6 +133,26 @@
       {
         "pagina": "windows/mesas/mover-o-unir-cuentas",
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
+      }
+    ],
+    "avoqado-android:app/src/main/java/com/avoqado/pos/auth/presentation/SignInFlowScreen.kt": [
+      {
+        "pagina": "android/personal/iniciar-sesion",
+        "sourceRef": "fa0624481213de8ea62d12f8bae02ba00843c3b6"
+      },
+      {
+        "pagina": "windows/personal/iniciar-sesion",
+        "sourceRef": "fa0624481213de8ea62d12f8bae02ba00843c3b6"
+      }
+    ],
+    "avoqado-android:app/src/main/java/com/avoqado/pos/auth/presentation/SignInViewModel.kt": [
+      {
+        "pagina": "android/personal/iniciar-sesion",
+        "sourceRef": "fa0624481213de8ea62d12f8bae02ba00843c3b6"
+      },
+      {
+        "pagina": "windows/personal/iniciar-sesion",
+        "sourceRef": "fa0624481213de8ea62d12f8bae02ba00843c3b6"
       }
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/cashdrawer/data/CashDrawerRepository.kt": [
@@ -5577,6 +5611,12 @@
       {
         "pagina": "windows/ordenes/cambiar-o-quitar-articulos-del-carrito",
         "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
+      }
+    ],
+    "avoqado-android:desktop/pos/src/main/kotlin/com/avoqado/pos/auth/data/EntrarConGoogle.kt": [
+      {
+        "pagina": "windows/personal/iniciar-sesion",
+        "sourceRef": "fa0624481213de8ea62d12f8bae02ba00843c3b6"
       }
     ],
     "avoqado-android:desktop/pos/src/main/kotlin/com/avoqado/pos/core/di/DatabaseModule.kt": [

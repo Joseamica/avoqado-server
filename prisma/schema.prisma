@@ -20715,6 +20715,7 @@ enum AuthMethod {
   PASSWORD
   PIN
   BIOMETRIC
+  GOOGLE
 }
 
 /// Una sesión autenticada — el `sid` que el JWT lleva adentro. Revocarla es lo que hace que

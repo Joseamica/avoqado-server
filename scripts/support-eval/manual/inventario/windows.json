@@ -2541,7 +2541,7 @@
       "nombre": "Iniciar sesión",
       "origen": "desktop/pos/src/main/kotlin/com/avoqado/pos/auth/presentation/LandingScreen.kt:50",
       "quienLaVe": "Todos los que abren la app sin sesión iniciada: app/src/main/java/com/avoqado/pos/navigation/AvoqadoNavGraph.kt:196 la pinta cuando isLoggedIn es falso. En Windows es el reemplazo de escritorio (fondo fijo en vez de video, desktop/pos/src/main/kotlin/com/avoqado/pos/auth/presentation/LandingScreen.kt:41).",
-      "paginas": []
+      "paginas": ["windows/personal/iniciar-sesion"]
     },
     {
       "id": "accion:pantalla:Landing/iniciar-sesion",
@@ -2549,7 +2549,7 @@
       "nombre": "Iniciar sesión",
       "origen": "app/src/main/java/com/avoqado/pos/auth/presentation/SignInFlowScreen.kt:346",
       "quienLaVe": "Todos los que entran: correo y contraseña, sin permiso previo (desktop/pos/src/main/kotlin/com/avoqado/pos/auth/presentation/LandingScreen.kt:108 abre SignInFlowScreen; el botón se activa con la contraseña de 4 caracteres o más, app/src/main/java/com/avoqado/pos/auth/presentation/SignInFlowScreen.kt:348). La biometría no existe en Windows (desktop/pos/src/main/kotlin/com/avoqado/pos/auth/data/BiometricAuthManager.kt:13).",
-      "paginas": []
+      "paginas": ["windows/personal/iniciar-sesion"]
     },
     {
       "id": "accion:pantalla:Landing/restablecer-contrasena",
@@ -2557,7 +2557,7 @@
       "nombre": "¿Olvidaste tu contraseña?",
       "origen": "app/src/main/java/com/avoqado/pos/auth/presentation/SignInFlowScreen.kt:327",
       "quienLaVe": "Todos los que llegan al paso de la contraseña (app/src/main/java/com/avoqado/pos/auth/presentation/SignInFlowScreen.kt:332); muestra el aviso «Restablecer contraseña» exista o no la cuenta (app/src/main/java/com/avoqado/pos/auth/presentation/SignInFlowScreen.kt:152).",
-      "paginas": []
+      "paginas": ["windows/personal/iniciar-sesion"]
     },
     {
       "id": "accion:pantalla:Landing/crear-cuenta",

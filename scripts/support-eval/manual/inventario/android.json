@@ -2640,7 +2640,7 @@
       "nombre": "Iniciar sesión",
       "origen": "app/src/main/java/com/avoqado/pos/auth/presentation/SignInFlowScreen.kt:186",
       "quienLaVe": "Quien abre la app sin sesión iniciada: la portada (app/src/main/java/com/avoqado/pos/auth/presentation/LandingScreen.kt:51, «Empezó en tu barrio.», :139) sale en lugar de las pestañas (app/src/main/java/com/avoqado/pos/navigation/AvoqadoNavGraph.kt:195-198) y su botón «Iniciar sesión» (app/src/main/java/com/avoqado/pos/auth/presentation/LandingScreen.kt:167) abre el correo y la contraseña (app/src/main/java/com/avoqado/pos/auth/presentation/LandingScreen.kt:63-64). El extractor no la ve porque no está en el NavHost.",
-      "paginas": []
+      "paginas": ["android/personal/iniciar-sesion"]
     },
     {
       "id": "accion:extra:inicio-de-sesion/iniciar-sesion-con-correo",
@@ -2648,7 +2648,7 @@
       "nombre": "Iniciar sesión",
       "origen": "app/src/main/java/com/avoqado/pos/auth/presentation/SignInFlowScreen.kt:346",
       "quienLaVe": "Quien no tiene sesión: «Correo electrónico» y «Siguiente» (app/src/main/java/com/avoqado/pos/auth/presentation/SignInFlowScreen.kt:196, 237), luego «Contraseña» (app/src/main/java/com/avoqado/pos/auth/presentation/SignInFlowScreen.kt:290).",
-      "paginas": []
+      "paginas": ["android/personal/iniciar-sesion"]
     },
     {
       "id": "accion:extra:inicio-de-sesion/iniciar-sesion-con-biometria",
@@ -2656,7 +2656,7 @@
       "nombre": "Iniciar con biometría",
       "origen": "app/src/main/java/com/avoqado/pos/auth/presentation/SignInFlowScreen.kt:212",
       "quienLaVe": "Quien ya entró antes en este aparato y dejó guardado el acceso con huella o rostro (biometricRefreshToken, app/src/main/java/com/avoqado/pos/auth/presentation/SignInViewModel.kt:55; canUseBiometric, app/src/main/java/com/avoqado/pos/auth/presentation/SignInFlowScreen.kt:208).",
-      "paginas": []
+      "paginas": ["android/personal/iniciar-sesion"]
     },
     {
       "id": "accion:extra:inicio-de-sesion/recuperar-contrasena",
@@ -2664,7 +2664,7 @@
       "nombre": "¿Olvidaste tu contraseña?",
       "origen": "app/src/main/java/com/avoqado/pos/auth/presentation/SignInFlowScreen.kt:327",
       "quienLaVe": "Quien está en el paso de la contraseña; pide la liga para restablecerla (app/src/main/java/com/avoqado/pos/auth/presentation/SignInViewModel.kt:99) y avisa con «Restablecer contraseña» (app/src/main/java/com/avoqado/pos/auth/presentation/SignInFlowScreen.kt:155).",
-      "paginas": []
+      "paginas": ["android/personal/iniciar-sesion"]
     },
     {
       "id": "accion:extra:inicio-de-sesion/crear-cuenta",

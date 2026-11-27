@@ -32,14 +32,14 @@ jest.mock('google-auth-library', () => ({
 }))
 
 const staffFindUnique = jest.fn()
-const staffUpdate = jest.fn().mockResolvedValue({})
+const staffUpdate = jest.fn().mockResolvedValue({ count: 1 })
 const invitationFindFirst = jest.fn()
 const invitationFindMany = jest.fn().mockResolvedValue([])
 
 jest.mock('../../../src/utils/prismaClient', () => ({
   __esModule: true,
   default: {
-    staff: { findUnique: (...a: any[]) => staffFindUnique(...a), update: (...a: any[]) => staffUpdate(...a) },
+    staff: { findUnique: (...a: any[]) => staffFindUnique(...a), updateMany: (...a: any[]) => staffUpdate(...a) },
     invitation: { findFirst: (...a: any[]) => invitationFindFirst(...a), findMany: (...a: any[]) => invitationFindMany(...a) },
     $transaction: jest.fn(() => {
       throw new Error('el camino de la cuenta provisional no debe crear otra cuenta')
@@ -70,6 +70,9 @@ jest.mock('../../../src/services/staffOrganization.service', () => ({
 }))
 
 import { loginWithGoogle } from '../../../src/services/dashboard/googleOAuth.service'
+
+// Un servidor con Google configurado: sin GOOGLE_CLIENT_ID el panel rechaza todo token (hz:6bfcd3a1:D1).
+process.env.GOOGLE_CLIENT_ID = 'cliente-del-panel'
 
 const ORG = { id: 'org-equipo', name: 'Avoqado · Equipo de ventas', email: 'otro@avoqado.io', onboardingCompletedAt: new Date() }
 const VENUE = {
@@ -140,7 +143,10 @@ describe('loginWithGoogle — cuenta provisional de una invitación', () => {
     // «true»: la invitación ya quedó aceptada; la página no debe volver a /invite/:token («ya utilizada»).
     expect(result.isNewUser).toBe(true)
     expect(staffUpdate).toHaveBeenCalledWith(
-      expect.objectContaining({ where: { id: 'staff-rafa' }, data: expect.objectContaining({ googleId: 'google-uid-rafa' }) }),
+      expect.objectContaining({
+        where: expect.objectContaining({ id: 'staff-rafa' }),
+        data: expect.objectContaining({ googleId: 'google-uid-rafa' }),
+      }),
     )
   })
 

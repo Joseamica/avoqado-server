@@ -67,6 +67,9 @@ import * as sessionService from '@/services/auth/session.service'
 import { loginStaff, switchVenueForStaff } from '../../../../src/services/dashboard/auth.service'
 import { loginWithGoogle } from '../../../../src/services/dashboard/googleOAuth.service'
 
+// Un servidor con Google configurado: sin GOOGLE_CLIENT_ID el panel rechaza todo token (hz:6bfcd3a1:D1).
+process.env.GOOGLE_CLIENT_ID = 'cliente-del-panel'
+
 const mockPrisma = prisma as any
 const mockJwt = jwtService as jest.Mocked<typeof jwtService>
 const createSessionMock = sessionService.createSession as jest.Mock
@@ -89,6 +92,7 @@ describe('Parte A — el dashboard web emite sesiones revocables', () => {
     mockJwt.generateRefreshToken = jest.fn().mockReturnValue('refresh')
     createSessionMock.mockResolvedValue({ id: SESSION_ID })
     mockPrisma.staff.update = jest.fn().mockResolvedValue({})
+    mockPrisma.staff.updateMany = jest.fn().mockResolvedValue({ count: 1 })
     mockPrisma.invitation = { findMany: jest.fn().mockResolvedValue([]) }
     mockPrisma.venueRoleConfig = { findMany: jest.fn().mockResolvedValue([]), findUnique: jest.fn().mockResolvedValue(null) }
     mockPrisma.venueRolePermission = { findMany: jest.fn().mockResolvedValue([]) }
