@@ -263,7 +263,7 @@ describe('cerrarSalidasOlvidadasPendientes (el job)', () => {
 
     await cerrarSalidasOlvidadasPendientes(mx('2026-11-04T10:00:00'))
 
-    const candado = prismaMock.$queryRaw.mock.calls.find(c => String(c[1]) === 'salida-olvidada:venue-1')
+    const candado = prismaMock.$queryRaw.mock.calls.find((c: unknown[]) => String(c[1]) === 'salida-olvidada:venue-1')
     expect(candado).toBeDefined()
     expect((candado![0] as unknown as string[]).join('?')).toContain('pg_advisory_xact_lock')
     expect(prismaMock.$queryRaw.mock.invocationCallOrder[prismaMock.$queryRaw.mock.calls.indexOf(candado!)]).toBeLessThan(
@@ -463,7 +463,9 @@ describe('cerrarSalidasOlvidadasDe: candados en orden (Codex 26-nov r4 #4)', () 
 
     await cerrarSalidasOlvidadasDe(prismaMock, 'staff-1', mx('2026-11-04T10:00:00'), 'ENTRADA')
 
-    const candados = prismaMock.$queryRaw.mock.calls.map(c => String(c[1])).filter(k => k.startsWith('salida-olvidada:'))
+    const candados = prismaMock.$queryRaw.mock.calls
+      .map((c: unknown[]) => String(c[1]))
+      .filter((k: string) => k.startsWith('salida-olvidada:'))
     expect(candados.slice(0, 2)).toEqual(['salida-olvidada:venue-a', 'salida-olvidada:venue-b'])
   })
 
@@ -473,7 +475,7 @@ describe('cerrarSalidasOlvidadasDe: candados en orden (Codex 26-nov r4 #4)', () 
 
     await cerrarSalidasOlvidadasDe(prismaMock, 'staff-1', mx('2026-11-04T17:00:00'), 'SALIDA')
 
-    expect(prismaMock.$queryRaw.mock.calls.filter(c => String(c[1]).startsWith('salida-olvidada:'))).toHaveLength(0)
+    expect(prismaMock.$queryRaw.mock.calls.filter((c: unknown[]) => String(c[1]).startsWith('salida-olvidada:'))).toHaveLength(0)
   })
 })
 
