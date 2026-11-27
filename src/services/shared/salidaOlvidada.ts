@@ -283,6 +283,12 @@ export function limiteDeUnCierre(
   return guardado ?? limiteDelTurno(clockIn, timezone, cierre, null)
 }
 
+/** La última nota de una salida tardía que no se usó (la hora real que mandó el aparato), o null. */
+export function notaDeSalidaNoUsada(notes: string | null | undefined): string | null {
+  const lineas = (notes ?? '').split('\n').filter(l => l.includes('no se usó'))
+  return lineas.length ? lineas[lineas.length - 1] : null
+}
+
 /** Cierra [e] como «salida olvidada» si ya pasó su límite y el negocio tiene la regla prendida. null = no tocó nada. */
 async function cerrarSiOlvidada(db: Db, e: EntradaAbierta, ahora: Date, disparador: Disparador): Promise<SalidaOlvidadaCerrada | null> {
   if (e.venue.settings?.salidaOlvidadaEnabled === false) return null

@@ -761,14 +761,18 @@ describe('getStaffAttendance — efectivo por checada agregado en Postgres', () 
 
   it('marca la checada que el sistema cerró como «Salida olvidada», con su nota, para que el gerente la corrija (hz:0433f0cb:D3)', async () => {
     const e2 = await prisma.timeEntry.findFirstOrThrow({ where: { staffId: ana, clockInTime: E2_IN } })
-    const nota = 'Salida olvidada: no marcó salida y no tiene horario ese día; quedó en 0 horas hasta que el gerente la corrija.'
-    await prisma.timeEntry.update({ where: { id: e2.id }, data: { salidaOlvidada: true, autoClockOut: true, notes: nota } })
+    const tardia = 'Salida del celular de las 22:40: llegó después del día del turno y no se usó. Revisa la hora real.'
+    const notas = `Salida olvidada: no marcó salida y no tiene horario ese día; quedó en 0 horas hasta que el gerente la corrija.\n${tardia}`
+    await prisma.timeEntry.update({ where: { id: e2.id }, data: { salidaOlvidada: true, autoClockOut: true, notes: notas } })
     try {
       const { staff } = await svc.getStaffAttendance(orgId, DIA)
       const a = (staff as Array<any>).find(r => r.id === ana)!
+      expect(a.venueTimezone).toBeTruthy() // la hora que teclea el gerente es la de la sucursal de la checada (Codex D3 r1 #1)
       const [olvidada, normal] = a.allTimeEntries // la más reciente primero
-      expect(olvidada).toMatchObject({ id: e2.id, salidaOlvidada: true, notes: nota })
-      expect(normal).toMatchObject({ salidaOlvidada: false, notes: null })
+      // Sólo la línea de la salida tardía, nunca las notas completas (las ve quien sólo puede leer la bitácora; Codex D3 r1 #3).
+      expect(olvidada).toMatchObject({ id: e2.id, salidaOlvidada: true, notaSalidaOlvidada: tardia })
+      expect(olvidada.notes).toBeUndefined()
+      expect(normal).toMatchObject({ salidaOlvidada: false, notaSalidaOlvidada: null })
     } finally {
       await prisma.timeEntry.update({ where: { id: e2.id }, data: { salidaOlvidada: false, autoClockOut: false, notes: null } })
     }
