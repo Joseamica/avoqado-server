@@ -23,6 +23,7 @@ import type { PlanOfferVersionStatus, Prisma, PrismaClient } from '@prisma/clien
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import AppError, { ConflictError, NotFoundError } from '../../errors/AppError'
+import { nombreQueElBotPuedeDecir } from '../support/data/planText'
 import { STANDARD_PLAN_GROSS_CENTS, STANDARD_PLAN_NET_CENTS, TRIAL_DAYS } from '../access/planPricing.constants'
 
 export type PlanPagado = 'PRO' | 'PREMIUM'
@@ -202,7 +203,8 @@ const NOMBRE_VALIDO = /^[\p{L}\p{N}][\p{L}\p{N} .+\-]*$/u
  * - Prueba: con tarjeta, 0 días (paga hoy) o de 10 a 90 (así siempre hay un aviso previo del job diario); sin tarjeta, de
  *   1 a 90.
  * - Precio: con IVA, entre $10.00 (mínimo de Stripe) y $100,000.00 (máximo del híbrido), en cada periodicidad.
- * - Nombres: recortados, de 2 a 24 caracteres, letras, números, espacios y `. + -` (empezando con letra o número), y los
+ * - Nombres: recortados, de 2 a 24 caracteres, letras, números, espacios y `. + -` (empezando con letra o número), que el
+ *   asistente de WhatsApp pueda decir (`nombreQueElBotPuedeDecir`: sin precios, monedas, «IVA», números largos, ligas ni correos), y los
  *   tres distintos sin importar mayúsculas (el repetido se señala en el segundo).
  */
 export function problemasDeLaOferta(entrada: PlanOfferInput): { path: string; message: string }[] {
@@ -221,6 +223,14 @@ export function problemasDeLaOferta(entrada: PlanOfferInput): { path: string; me
       problemas.push({
         path,
         message: 'El nombre sólo lleva letras, números, espacios y los signos . + - , y empieza con una letra o un número.',
+      })
+      continue
+    }
+    // B4: ni HTML en un correo (`< > & "`), ni un nombre que el asistente de WhatsApp no podría decir (mismo camino que el bot)
+    if (/[<>&"]/.test(nombre) || !nombreQueElBotPuedeDecir(nombre)) {
+      problemas.push({
+        path,
+        message: 'Este nombre no lo puede decir el asistente de WhatsApp: quita precios, monedas, «IVA», números largos, ligas o correos.',
       })
       continue
     }

@@ -831,7 +831,7 @@ describe('draftSupportAnswer', () => {
     expect(DRAFT_INSTRUCTIONS).toMatch(/asteriscos/)
     expect(DRAFT_INSTRUCTIONS).toMatch(/no empieces con sí o no salvo que la guía lo diga explícitamente/i)
     expect(DRAFT_INSTRUCTIONS).toContain(
-      'Si das un precio de Avoqado, cópialo como viene en la guía y agrégale «+ IVA» (por ejemplo, «$999 al mes + IVA»). Nunca sumes el IVA ni des un total.',
+      'Si das un precio de Avoqado, cópialo como viene en la guía y agrégale «+ IVA» (por ejemplo, «$200 + IVA»). Nunca sumes el IVA ni des un total.',
     )
   })
 
@@ -2194,27 +2194,20 @@ describe('T-F10: the judge reads ONE copy of each guide: as it is, with the numb
     steps: p.steps.map(s => ({ ...s, guideId: p.guideId })),
   })
 
-  it('j21: «El plan Pro cuesta $999 al mes + IVA.» reaches the judge with its quote whole, the whole Pro row and both «+ IVA» rules', async () => {
+  it('j21: the referral to «Tu plan» reaches the judge with its quote whole and the guide without any plan price', async () => {
     const pair = pairs.find(p => p.id === 'j21')!
     const draft = draftOfPair(pair)
     const overview = real('general/overview')
     expect(reason(draft, [overview])).toBe('ok')
     const { request, input } = await judgeRequest(pair.question, draft, [overview])
     const [sent] = input.guides
-    // one copy: the guide with its numbers; the quote keeps its padding («**Pro**        | $999 / mes»), as the draft copied it
+    // one copy: the guide with its numbers
     expect(Object.keys(sent)).toEqual(['id', 'title', 'body'])
     expect(sent.body).toBe(numberedGuide(overview.body).numbered)
     expect(sent.body.replace(/\[\d+\] /g, '')).toBe(overview.body)
-    expect(sent.body).toContain('**Pro**        | $999 / mes')
-    expect(sent.body).toMatch(/\[\d+\] \| \*\*Pro\*\* {8}\| \$999 \/ mes/)
-    // a table row is ONE line, whole, and «sin IVA» is a line of its own
-    const lines = numberedGuide(overview.body).lines
-    const pro = lines.filter(l => l.includes('$999 / mes'))
-    expect(pro).toHaveLength(1)
-    // T-F21: the price cell carries «+ IVA» (c06 of b-tf19-r1); the quote of j21 is still its start
-    expect(pro[0]).toMatch(/^\| \*\*Pro\*\* \| \$999 \/ mes \+ IVA \| Todo Free \+ .+ \|$/)
-    expect(lines).toContain('Precios de referencia en pesos mexicanos, sin IVA.')
-    // the house rule reaches the judge: «+ IVA» next to a price the guide gives «sin IVA» is fine; a price without it is false
+    expect(sent.body).toContain('El precio vigente de tu plan está en «Tu plan», en Facturación.')
+    expect(sent.body).not.toMatch(/\$\s?(?:499|999|1,?699)/)
+    // the house rule about «+ IVA» still reaches the judge (it applies to any price Avoqado gives)
     const [fine, bad] = String(request.instructions).split('ES FALSO')
     expect(fine).toContain('- Escribir «+ IVA» junto a un precio que la guía da «sin IVA».')
     expect(bad).toContain('da un precio con el IVA sumado o dado como total, o da un precio (con $, «pesos» o «MXN») sin «+ IVA» junto.')
@@ -2291,15 +2284,14 @@ describe('T-F10: the judge reads ONE copy of each guide: as it is, with the numb
     }
     // T-F10b: j15 and j16 quote the price sentence as T-F10.2 left it in general/overview, without its link (and j16 keeps its
     // altered amount, $899)
-    const price =
-      'Precios de referencia en pesos mexicanos, sin IVA. Confirma siempre el precio vigente en la página de precios de Avoqado.'
+    const price = 'El precio vigente de tu plan está en «Tu plan», en Facturación.'
     for (const id of ['j15', 'j16']) expect([id, quotesOf(draftOfPair(pairs.find(p => p.id === id)!)).includes(price)]).toEqual([id, true])
     expect(pairs.find(p => p.id === 'j16')!.steps[0].text).toBe('El plan Pro cuesta $899 al mes.')
     expect(JSON.stringify(pairs)).not.toContain('avoqado.io/pricing')
     // measured on 17-nov: with T-F8's copy 34 of the 46 quotes were whole; now 38 (the 8 that are not cross a sentence: j05, j06,
     // j15, j16, j19 and j20). T-F13 adds 8 pairs (49 quotes, 41 whole: the 8 others cross a sentence of their step). Encargo 553f45
     // (24-nov): j26 also quotes the new step 4 of crear-producto (the pieces), one more whole quote.
-    expect([whole, total]).toEqual([80, 96])
+    expect([whole, total]).toEqual([82, 96]) // B4 (27-nov): j15 and j16 now quote a sentence of the referral, whole (80 before)
   })
 
   // T-F13 (ruling T-F13.3): the mini-exam measured only `supported`. These pairs measure `missing`: every claim is true, every step
@@ -2330,16 +2322,16 @@ describe('T-F10: the judge reads ONE copy of each guide: as it is, with the numb
   // T-F10.2 (c06): the drafter copied «Confirma siempre el precio vigente en `avoqado.io/pricing`.» as a step and the fixed review
   // stopped it (review-contact). The sentence says the same without the link; a draft that copies it now passes. T-F13: if the judge
   // gives it as missing, the literal goes, and general/overview does not fit whole: its card, never its «Planes» section.
-  it('c06: the price sentence of general/overview has no link; a draft that copies it passes the fixed review', () => {
+  it('c06: general/overview no price of a plan: it refers to «Tu plan» (no link); a draft that copies it passes the fixed review', () => {
     const overview = real('general/overview')
-    const sentence = 'Confirma siempre el precio vigente en la página de precios de Avoqado.'
-    expect(overview.body).toContain(`Precios de referencia en pesos mexicanos, sin IVA. ${sentence}`)
+    const sentence = 'El precio vigente de tu plan está en «Tu plan», en Facturación.'
+    expect(overview.body).toContain(sentence)
     expect(overview.body).not.toContain('avoqado.io/pricing')
+    expect(overview.body).not.toMatch(/\$\s?(?:499|999|1,?699)/)
     const draft: SupportDraft = {
       covered: true,
-      // T-F21: the Pro row as it is now, with «+ IVA» in its price cell
-      intro: { text: 'El plan Pro cuesta $999 / mes + IVA.', guideId: overview.id, quote: '| **Pro**        | $999 / mes + IVA |' },
-      steps: [{ text: 'Confirma el precio vigente en la página de precios de Avoqado.', guideId: overview.id, quote: sentence }],
+      intro: { text: sentence, guideId: overview.id, quote: sentence },
+      steps: [{ text: sentence, guideId: overview.id, quote: sentence }],
     }
     expect(reason(draft, [overview])).toBe('ok')
     const line = numberedGuide(overview.body).lines.indexOf(sentence) + 1
@@ -2351,29 +2343,22 @@ describe('T-F10: the judge reads ONE copy of each guide: as it is, with the numb
     const text = hybridFallback({ reply: 'literal' }, [overview]).compose(null)
     expect(text).toBe(literalSupportAnswer([overview], null))
     expect(text).toContain(SUPPORT_GUIDE_TOO_LONG)
-    expect(text).not.toContain('$999 / mes')
+    expect(text).not.toContain('$999')
   })
 
-  // T-F21 (c06 of b-tf19-r1): the drafter quoted only the price cell, «$999 / mes» (10 characters), and the fixed review stopped it
-  // (review-quote: a quote measures at least 12); the literal of general/overview is its card, without the price. Each price of the
-  // plans table now carries «+ IVA» (founder, 5-nov: «+ IVA» next to what Avoqado sells, never the total), so the cell cited alone
-  // measures 16 and passes. The 12-character rule did not change: the quote of b-tf19-r1 is still rejected.
-  it('c06 (b-tf19-r1): a price cell of the plans table cited alone passes the fixed review; the 10-character quote still does not', () => {
+  // T-F21 (c06 of b-tf19-r1), B4: general/overview no longer writes any plan price (the editor can change them): a draft that
+  // quotes the referral to «Tu plan» passes the fixed review, and a price of a plan is no longer a quote in the guide. The
+  // 12-character rule did not change.
+  it('c06 (b-tf19-r1): the referral to «Tu plan» passes the fixed review; a plan price is not in the guide', () => {
     const overview = real('general/overview')
     const draftWith = (quote: string): SupportDraft => ({
       covered: true,
-      intro: { text: 'El plan Pro cuesta $999 / mes + IVA.', guideId: overview.id, quote },
-      steps: [
-        {
-          text: 'Confirma siempre el precio vigente en la página de precios de Avoqado.',
-          guideId: overview.id,
-          quote: 'Confirma siempre el precio vigente en la página de precios de Avoqado.',
-        },
-      ],
+      intro: { text: 'El precio de tu plan está en Tu plan.', guideId: overview.id, quote },
+      steps: [{ text: 'Revisa Tu plan.', guideId: overview.id, quote: 'El precio vigente de tu plan está en «Tu plan», en Facturación.' }],
     })
-    expect(reason(draftWith('$999 / mes + IVA'), [overview])).toBe('ok')
-    expect(reason(draftWith('$999 / mes'), [overview])).toBe('quote')
-    for (const cell of ['$499 / mes + IVA', '$999 / mes + IVA', '$1,699 / mes + IVA']) expect(overview.body).toContain(`| ${cell} |`)
+    expect(reason(draftWith('El precio vigente de tu plan está en «Tu plan», en Facturación.'), [overview])).toBe('ok')
+    expect(reason(draftWith('$999 / mes + IVA'), [overview])).toBe('quote')
+    expect(reason(draftWith('«Tu plan»'), [overview])).toBe('quote')
   })
 
   // T-F21 (c72 of b-tf19-r1): «no me llegan los pedidos de Uber» is a keyword of the delivery guide, but no line of it said what to
@@ -2715,9 +2700,9 @@ describe('T-F13: no appended line and no partial section: the draft, the whole g
       intro: { text: 'El plan Pro cuesta $999 al mes + IVA.', guideId: overview.id, quote: '| **Pro**        | $999 / mes   |' },
       steps: [
         {
-          text: 'Confirma el precio vigente en la página de precios de Avoqado.',
+          text: 'El precio vigente de tu plan está en «Tu plan», en Facturación.',
           guideId: overview.id,
-          quote: 'Confirma siempre el precio vigente en la página de precios de Avoqado.',
+          quote: 'El precio vigente de tu plan está en «Tu plan», en Facturación.',
         },
       ],
     }

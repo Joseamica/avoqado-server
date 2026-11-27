@@ -4,6 +4,9 @@
  * `tests/integration/support/data/planStatus.integration.test.ts`.
  */
 jest.mock('@/services/dashboard/planState.service', () => ({ getPlanState: jest.fn() }))
+jest.mock('@/services/billing/nombresDeLosPlanes', () => ({
+  nombresDeLosPlanes: jest.fn().mockResolvedValue({ FREE: 'Gratis', PRO: 'Pro', PREMIUM: 'Premium' }),
+}))
 
 import { getPlanState, type PlanOrigin, type PlanState } from '@/services/dashboard/planState.service'
 import { planStatus, renderPlan, withoutPrice } from '@/services/support/data/capabilities/planStatus'
@@ -380,7 +383,8 @@ it('params never refuses: any day is the plan of today', () => {
 it('read asks the panel for the plan of the venue of the scope, without the pause offer and with Stripe bounded', async () => {
   const state = base({}, { currentPeriodEnd: D('2026-12-03') })
   ;(getPlanState as jest.Mock).mockResolvedValueOnce(state)
-  expect(await planStatus.read(scope, {})).toBe(state)
+  // B4: el estado, más el nombre de cada plan de la versión vigente
+  expect(await planStatus.read(scope, {})).toEqual({ ...state, nombres: { FREE: 'Gratis', PRO: 'Pro', PREMIUM: 'Premium' } })
   expect(getPlanState).toHaveBeenCalledWith(scope.venueId, { skipPauseOffer: true, stripeTimeoutMs: 3000 })
 })
 
