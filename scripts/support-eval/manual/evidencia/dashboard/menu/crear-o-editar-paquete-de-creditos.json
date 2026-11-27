@@ -1,7 +1,7 @@
 {
   "pagina": "dashboard/menu/crear-o-editar-paquete-de-creditos",
   "sourceRepo": "avoqado-web-dashboard",
-  "sourceRef": "d883562edd583becbc3b9e0b4d800e6717d0a0d2",
+  "sourceRef": "0910a27a6665667fd0f7001f8b822bf933ff6ef8",
   "version": "main",
   "pasos": [
     {
@@ -43,13 +43,13 @@
     {
       "paso": 1,
       "archivo": "src/locales/es/creditPacks.json",
-      "linea": 105,
+      "linea": 91,
       "cita": "\"create\": \"Crear Paquete\","
     },
     {
       "paso": 2,
       "archivo": "src/pages/CreditPacks/CreditPackForm.tsx",
-      "linea": 330,
+      "linea": 298,
       "cita": "<FormLabel>{t('form.fields.name')}</FormLabel>"
     },
     {
@@ -61,7 +61,7 @@
     {
       "paso": 2,
       "archivo": "src/pages/CreditPacks/CreditPackForm.tsx",
-      "linea": 363,
+      "linea": 331,
       "cita": "<FormLabel>{t('form.fields.price')}</FormLabel>"
     },
     {
@@ -85,193 +85,127 @@
     {
       "paso": 3,
       "archivo": "src/pages/CreditPacks/CreditPackForm.tsx",
-      "linea": 466,
-      "cita": "<h3 className=\"font-medium text-sm\">{t('form.badgeTitle')}</h3>"
-    },
-    {
-      "paso": 3,
-      "archivo": "src/locales/es/creditPacks.json",
-      "linea": 65,
-      "cita": "\"badgeTitle\": \"Destacar este paquete (opcional)\","
-    },
-    {
-      "paso": 3,
-      "archivo": "src/pages/CreditPacks/CreditPackForm.tsx",
-      "linea": 470,
-      "cita": "<Label htmlFor=\"credit-pack-badge-text\">{t('form.fields.badgeText')}</Label>"
-    },
-    {
-      "paso": 3,
-      "archivo": "src/locales/es/creditPacks.json",
-      "linea": 43,
-      "cita": "\"badgeText\": \"Etiqueta (opcional)\""
-    },
-    {
-      "paso": 3,
-      "archivo": "src/pages/CreditPacks/CreditPackForm.tsx",
-      "linea": 115,
-      "cita": "const BADGE_TEXT_MAX = 40"
-    },
-    {
-      "paso": 3,
-      "archivo": "src/pages/CreditPacks/CreditPackForm.tsx",
-      "linea": 474,
-      "cita": "maxLength={BADGE_TEXT_MAX}"
-    },
-    {
-      "paso": 3,
-      "archivo": "src/locales/es/creditPacks.json",
-      "linea": 52,
-      "cita": "\"badgeText\": \"Más popular\""
-    },
-    {
-      "paso": 3,
-      "archivo": "src/pages/CreditPacks/CreditPackForm.tsx",
-      "linea": 483,
-      "cita": "{CREDIT_PACK_BADGE_ICONS.map(name => {"
-    },
-    {
-      "paso": 3,
-      "archivo": "src/types/creditPack.ts",
-      "linea": 13,
-      "cita": "export const CREDIT_PACK_BADGE_ICONS = ['star', 'tag', 'flame', 'heart', 'sparkles', 'trophy'] as const"
-    },
-    {
-      "paso": 3,
-      "archivo": "src/pages/CreditPacks/CreditPackForm.tsx",
-      "linea": 513,
-      "cita": "<span>{t('form.badgePreview')}</span>"
-    },
-    {
-      "paso": 3,
-      "archivo": "src/locales/es/creditPacks.json",
-      "linea": 68,
-      "cita": "\"badgePreview\": \"Vista previa\","
-    },
-    {
-      "paso": 4,
-      "archivo": "src/pages/CreditPacks/CreditPackForm.tsx",
-      "linea": 534,
+      "linea": 437,
       "cita": "<h3 className=\"font-medium text-sm\">{t('form.fields.items')}</h3>"
     },
     {
-      "paso": 4,
+      "paso": 3,
       "archivo": "src/locales/es/creditPacks.json",
       "linea": 38,
       "cita": "\"items\": \"Items del Paquete\","
     },
     {
-      "paso": 4,
+      "paso": 3,
       "archivo": "src/pages/CreditPacks/CreditPackForm.tsx",
-      "linea": 566,
+      "linea": 469,
       "cita": "<FormLabel>{t('form.fields.product')}</FormLabel>"
     },
     {
-      "paso": 4,
+      "paso": 3,
       "archivo": "src/locales/es/creditPacks.json",
       "linea": 40,
       "cita": "\"product\": \"Producto\","
     },
     {
-      "paso": 4,
+      "paso": 3,
       "archivo": "src/pages/CreditPacks/CreditPackForm.tsx",
-      "linea": 594,
+      "linea": 497,
       "cita": "<FormLabel>{t('form.fields.quantity')}</FormLabel>"
     },
     {
-      "paso": 4,
+      "paso": 3,
       "archivo": "src/locales/es/creditPacks.json",
       "linea": 41,
       "cita": "\"quantity\": \"Cantidad\""
     },
     {
-      "paso": 4,
+      "paso": 3,
       "archivo": "src/pages/CreditPacks/CreditPackForm.tsx",
-      "linea": 540,
+      "linea": 443,
       "cita": "onClick={() => append({ productId: '', quantity: 1, unlimited: false })}"
     },
     {
-      "paso": 4,
+      "paso": 3,
       "archivo": "src/locales/es/creditPacks.json",
       "linea": 39,
       "cita": "\"addItem\": \"Agregar Item\","
     },
     {
-      "paso": 4,
+      "paso": 3,
       "archivo": "src/pages/CreditPacks/CreditPackForm.tsx",
-      "linea": 627,
+      "linea": 530,
       "cita": "<FormLabel>{t('form.fields.unlimited')}</FormLabel>"
     },
     {
-      "paso": 4,
+      "paso": 3,
       "archivo": "src/locales/es/creditPacks.json",
       "linea": 42,
       "cita": "\"unlimited\": \"Ilimitado\""
     },
     {
-      "paso": 4,
+      "paso": 3,
       "archivo": "src/pages/CreditPacks/CreditPackForm.tsx",
-      "linea": 628,
+      "linea": 531,
       "cita": "<FormDescription>{t('form.unlimitedHelp')}</FormDescription>"
     },
     {
-      "paso": 4,
+      "paso": 3,
       "archivo": "src/locales/es/creditPacks.json",
-      "linea": 64,
+      "linea": 62,
       "cita": "\"unlimitedHelp\": \"Personal: sólo a nombre de quien lo compra, un lugar por clase\""
     },
     {
-      "paso": 4,
+      "paso": 3,
       "archivo": "src/pages/CreditPacks/CreditPackForm.tsx",
-      "linea": 580,
+      "linea": 483,
       "cita": "{!ilimitado && ("
     },
     {
-      "paso": 4,
+      "paso": 3,
       "archivo": "src/pages/CreditPacks/CreditPackForm.tsx",
-      "linea": 130,
+      "linea": 120,
       "cita": "? { productId: item.productId, unlimited: true }"
     },
     {
-      "paso": 5,
+      "paso": 4,
       "archivo": "src/pages/CreditPacks/CreditPackForm.tsx",
-      "linea": 300,
+      "linea": 266,
       "cita": "{mutation.isPending ? tCommon('saving') : t('actions.save')}"
     },
     {
-      "paso": 5,
+      "paso": 4,
       "archivo": "src/locales/es/creditPacks.json",
-      "linea": 108,
+      "linea": 94,
       "cita": "\"save\": \"Guardar Cambios\","
     },
     {
-      "paso": 5,
+      "paso": 4,
       "archivo": "src/pages/CreditPacks/CreditPackForm.tsx",
-      "linea": 274,
+      "linea": 235,
       "cita": "title: isEditing ? t('toasts.updateSuccess') : t('toasts.createSuccess'),"
     },
     {
-      "paso": 5,
+      "paso": 4,
       "archivo": "src/locales/es/creditPacks.json",
-      "linea": 144,
+      "linea": 130,
       "cita": "\"createSuccess\": \"Paquete de créditos creado exitosamente\","
     },
     {
-      "paso": 6,
+      "paso": 5,
       "archivo": "src/pages/CreditPacks/CreditPacks.tsx",
       "linea": 275,
       "cita": "<MoreHorizontal className=\"h-4 w-4\" />"
     },
     {
-      "paso": 6,
+      "paso": 5,
       "archivo": "src/pages/CreditPacks/CreditPacks.tsx",
       "linea": 280,
       "cita": "<DropdownMenuItem onClick={() => openEdit(row.original.id)} className=\"cursor-pointer\">"
     },
     {
-      "paso": 6,
+      "paso": 5,
       "archivo": "src/locales/es/creditPacks.json",
-      "linea": 106,
+      "linea": 92,
       "cita": "\"edit\": \"Editar\","
     }
   ],
@@ -318,42 +252,42 @@
     {
       "ruta": "Problema: regla del nombre",
       "archivo": "src/pages/CreditPacks/CreditPackForm.tsx",
-      "linea": 327
+      "linea": 295
     },
     {
       "ruta": "Problema: texto del nombre",
       "archivo": "src/locales/es/creditPacks.json",
-      "linea": 55
+      "linea": 53
     },
     {
       "ruta": "Problema: regla del precio",
       "archivo": "src/pages/CreditPacks/CreditPackForm.tsx",
-      "linea": 358
+      "linea": 326
     },
     {
       "ruta": "Problema: texto del precio",
       "archivo": "src/locales/es/creditPacks.json",
-      "linea": 56
+      "linea": 54
     },
     {
       "ruta": "Problema: regla del producto",
       "archivo": "src/pages/CreditPacks/CreditPackForm.tsx",
-      "linea": 563
+      "linea": 466
     },
     {
       "ruta": "Problema: texto del producto",
       "archivo": "src/locales/es/creditPacks.json",
-      "linea": 59
+      "linea": 57
     },
     {
       "ruta": "Problema: el error trae la razón del SERVIDOR",
       "archivo": "src/pages/CreditPacks/CreditPackForm.tsx",
-      "linea": 282
+      "linea": 243
     },
     {
       "ruta": "Problema: texto por omisión",
       "archivo": "src/locales/es/creditPacks.json",
-      "linea": 150
+      "linea": 136
     },
     {
       "ruta": "Problema: título del error",
@@ -368,22 +302,22 @@
     {
       "ruta": "Ilimitado: con un renglón Ilimitado, Días de Validez es obligatorio (regla)",
       "archivo": "src/pages/CreditPacks/CreditPackForm.tsx",
-      "linea": 415
+      "linea": 385
     },
     {
       "ruta": "Ilimitado: texto debajo de Días de Validez",
       "archivo": "src/locales/es/creditPacks.json",
-      "linea": 62
+      "linea": 60
     },
     {
       "ruta": "Ilimitado: el SERVIDOR exige la vigencia al crear",
       "archivo": "avoqado-server/src/services/dashboard/creditPack.dashboard.service.ts",
-      "linea": 114
+      "linea": 106
     },
     {
       "ruta": "Ilimitado: un editor viejo no cambia los productos de un paquete con Ilimitado",
       "archivo": "avoqado-server/src/services/dashboard/creditPack.dashboard.service.ts",
-      "linea": 277
+      "linea": 265
     },
     {
       "ruta": "Ilimitado: compras dicen «Ilimitado · vence el … · usó N»",
@@ -398,17 +332,17 @@
     {
       "ruta": "Ilimitado: texto de compras",
       "archivo": "src/locales/es/creditPacks.json",
-      "linea": 182
+      "linea": 168
     },
     {
       "ruta": "Ilimitado: texto reembolsado",
       "archivo": "src/locales/es/creditPacks.json",
-      "linea": 183
+      "linea": 169
     },
     {
       "ruta": "Ilimitado: ficha de la clienta con el mismo texto",
       "archivo": "src/pages/Customers/CustomerDetail.tsx",
-      "linea": 677
+      "linea": 681
     },
     {
       "ruta": "Ilimitado: faltas en la compra",
@@ -418,7 +352,7 @@
     {
       "ruta": "Ilimitado: texto de faltas",
       "archivo": "src/locales/es/creditPacks.json",
-      "linea": 185
+      "linea": 171
     },
     {
       "ruta": "Ilimitado: sin Ajustar Balance en un Ilimitado",
@@ -428,7 +362,7 @@
     {
       "ruta": "Ilimitado: texto de Ajustar Balance",
       "archivo": "src/locales/es/creditPacks.json",
-      "linea": 111
+      "linea": 97
     },
     {
       "ruta": "Ilimitado: textos del SERVIDOR que ve la clienta o el panel (personal, misma clase, nombre ligado, titular, ajuste, vigencia, panel actualizado)",
@@ -439,46 +373,6 @@
       "ruta": "Ilimitado: «Tu Ilimitado vence el …; esta clase es después.»",
       "archivo": "avoqado-server/src/services/credits/ilimitado.ts",
       "linea": 49
-    },
-    {
-      "ruta": "Destacado: la etiqueta sale arriba del paquete en la página de reservas (texto de ayuda)",
-      "archivo": "src/locales/es/creditPacks.json",
-      "linea": 66
-    },
-    {
-      "ruta": "Destacado: la página de reservas pinta la etiqueta con su ícono arriba del paquete; sin etiqueta no hay destacado",
-      "archivo": "avoqado-booking-widget/src/components/ui/PaqueteExtras.tsx",
-      "linea": 26
-    },
-    {
-      "ruta": "Destacado: los nombres de los seis íconos",
-      "archivo": "src/locales/es/creditPacks.json",
-      "linea": 69
-    },
-    {
-      "ruta": "Destacado: sin etiqueta el ícono no se guarda",
-      "archivo": "src/pages/CreditPacks/CreditPackForm.tsx",
-      "linea": 251
-    },
-    {
-      "ruta": "Destacado: tocar el ícono elegido lo quita; tocar otro lo cambia",
-      "archivo": "src/pages/CreditPacks/CreditPackForm.tsx",
-      "linea": 497
-    },
-    {
-      "ruta": "Destacado: borrar la etiqueta y guardar quita el destacado (texto e ícono)",
-      "archivo": "src/pages/CreditPacks/CreditPackForm.tsx",
-      "linea": 263
-    },
-    {
-      "ruta": "Problema: los íconos se apagan mientras no hay etiqueta",
-      "archivo": "src/pages/CreditPacks/CreditPackForm.tsx",
-      "linea": 494
-    },
-    {
-      "ruta": "Problema: texto «Escribe primero la etiqueta»",
-      "archivo": "src/locales/es/creditPacks.json",
-      "linea": 67
     }
   ],
   "aparato": {

@@ -8,7 +8,7 @@ requiredPermissions:
   - menu:read
   - creditPacks:read
 sourceRepo: avoqado-web-dashboard
-sourceRef: d883562edd583becbc3b9e0b4d800e6717d0a0d2
+sourceRef: 0910a27a6665667fd0f7001f8b822bf933ff6ef8
 keywords:
   - crear paquete de clases
   - paquete de créditos
@@ -19,10 +19,6 @@ keywords:
   - membresía mensual
   - reservar para una amiga con mi ilimitado
   - no puedo cambiar mi nombre
-  - destacar paquete
-  - más popular
-  - etiqueta del paquete
-  - paquete recomendado
 ---
 
 ## Antes de empezar
@@ -33,16 +29,9 @@ keywords:
 
 1. En la barra lateral, abre el menú de tu catálogo (su nombre cambia según tu giro, por ejemplo *Menú* o *Catálogo*), entra a *Paquetes de Créditos* y toca *Crear Paquete*.
 2. Escribe el *Nombre del Paquete* y el *Precio*; si quieres, también *Días de Validez* y *Máximo por Cliente*.
-3. Si quieres destacarlo, en *Destacar este paquete (opcional)* escribe la *Etiqueta (opcional)*, de hasta 40 caracteres (por ejemplo, «Más popular»), y elige un ícono; la *Vista previa* enseña cómo saldrá.
-4. En *Items del Paquete*, elige el *Producto* y escribe la *Cantidad*. Con *Agregar Item* sumas otro.
-5. Toca *Guardar Cambios*: sale «Paquete de créditos creado exitosamente».
-6. Para cambiar uno, en la lista toca ⋯ › *Editar*, haz el cambio y toca *Guardar Cambios*.
-
-## Cómo funciona el destacado
-
-- La etiqueta sale arriba del paquete en tu página de reservas, con el ícono que elegiste: estrella, etiqueta, flama, corazón, destellos o trofeo. Sirve para señalar el paquete recomendado.
-- Es opcional: sin etiqueta, el paquete sale sin destacar. El ícono solo no se guarda; va siempre con su etiqueta.
-- Para cambiar el ícono, toca otro; para quitarlo, tócalo otra vez. Para quitar el destacado, borra la etiqueta y toca *Guardar Cambios*.
+3. En *Items del Paquete*, elige el *Producto* y escribe la *Cantidad*. Con *Agregar Item* sumas otro.
+4. Toca *Guardar Cambios*: sale «Paquete de créditos creado exitosamente».
+5. Para cambiar uno, en la lista toca ⋯ › *Editar*, haz el cambio y toca *Guardar Cambios*.
 
 ## Cómo funciona un paquete Ilimitado
 
@@ -56,7 +45,6 @@ keywords:
 
 ## Problemas frecuentes
 
-- Los íconos del destacado salen apagados y abajo dice «Escribe primero la etiqueta»: escribe la *Etiqueta (opcional)* y se prenden.
 - Debajo del campo sale lo que falta: «El nombre es requerido», «El precio es requerido» o «El producto es requerido».
 - «Un paquete Ilimitado necesita días de vigencia»: sale debajo de *Días de Validez*; escríbelos antes de guardar.
 - «Este paquete tiene un renglón Ilimitado: cambia sus productos desde el panel actualizado.»: el paquete se está editando desde una versión vieja del panel o desde la app del POS. Los productos de un paquete Ilimitado se cambian sólo desde el panel: recárgalo y vuelve a hacer el cambio ahí.
