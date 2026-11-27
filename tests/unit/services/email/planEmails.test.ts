@@ -321,6 +321,24 @@ describe('Subscription lifecycle plan emails', () => {
       expect(spy.mock.calls[5][0].text).toContain('sigues en Inicial.')
     })
 
+    it('B4 (revisión de apps viejas, 27-nov): en inglés, el «Gratis» que mandan los llamadores sin versión del editor se dice «Free»', async () => {
+      // Sin versión, nombresDeLosPlanes() da FREE = 'Gratis' y los 5 llamadores lo pasan como freeName: el correo en inglés decía
+      // «the Gratis plan». En español sigue «Gratis»; un nombre del editor distinto («Inicial») sale tal cual en los dos idiomas.
+      const base = { venueName: 'Bar', billingUrl: 'u', freeName: 'Gratis' }
+      const fin = { ...base, endDate: new Date('2026-12-17T18:00:00Z') }
+      await emailService.sendPlanEndedEmail('a@x.com', { ...base, locale: 'en', kind: 'TRIAL' })
+      await emailService.sendPlanFreeTrialEndingEmail('a@x.com', { ...fin, locale: 'en' })
+      await emailService.sendPlanFreeTrialEndingEmail('a@x.com', { ...fin, locale: 'en', tarjeta: null })
+      for (const [arg] of spy.mock.calls) {
+        expect(`${arg.subject} ${arg.text} ${arg.html}`).not.toContain('Gratis')
+        expect(arg.text).toContain('Free')
+      }
+      await emailService.sendPlanEndedEmail('a@x.com', { ...base, locale: 'es', kind: 'TRIAL' })
+      expect(spy.mock.calls[3][0].text).toContain('sigue funcionando con el plan Gratis')
+      await emailService.sendPlanEndedEmail('a@x.com', { ...base, locale: 'en', kind: 'TRIAL', freeName: 'Inicial' })
+      expect(spy.mock.calls[4][0].text).toContain('keeps working on the Inicial plan')
+    })
+
     it('sin Básico publicado: sin el bloque del Básico, y nunca un precio inventado', async () => {
       await emailService.sendPlanTrialEndsFreeEmail('a@x.com', {
         locale: 'es',
