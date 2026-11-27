@@ -146,7 +146,10 @@ export async function updateVenueSettings(
   // vuelve a validar con el candado del negocio en la misma transacción que escribe (`revalidarMotivosConCandado`): dos administradores a
   // la vez (uno prende, otro quita el último) ya no pueden dejarlo prendido sin lista.
   const tocaMotivos = 'discountReasonRequired' in updates || 'discountReasons' in updates
-  const tocaSalidaOlvidada = 'salidaOlvidadaCorte' in updates || 'salidaOlvidadaEnabled' in updates
+  // Lo que el cierre de una salida olvidada relee bajo el candado de la regla (Codex 26-nov r5 #2: también los turnos rotativos,
+  // que deciden su horario). ponytail: editar el cuadrante de una persona no toma el candado; un cierre que cruce esa edición
+  // queda «Salida olvidada · revisar» y el gerente lo corrige.
+  const tocaSalidaOlvidada = 'salidaOlvidadaCorte' in updates || 'salidaOlvidadaEnabled' in updates || 'rotatingShiftsEnabled' in updates
   if (tocaMotivos) {
     const guardado = await prisma.venueSettings.findUnique({
       where: { venueId },

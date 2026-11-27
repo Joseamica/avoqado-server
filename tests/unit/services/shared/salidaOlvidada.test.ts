@@ -466,6 +466,15 @@ describe('cerrarSalidasOlvidadasDe: candados en orden (Codex 26-nov r4 #4)', () 
     const candados = prismaMock.$queryRaw.mock.calls.map(c => String(c[1])).filter(k => k.startsWith('salida-olvidada:'))
     expect(candados.slice(0, 2)).toEqual(['salida-olvidada:venue-a', 'salida-olvidada:venue-b'])
   })
+
+  it('Codex r5 #3: un turno todavía vigente no toma el candado (una salida normal no hace fila)', async () => {
+    const { cerrarSalidasOlvidadasDe } = jest.requireActual('@/services/shared/salidaOlvidada')
+    prismaMock.timeEntry.findMany.mockResolvedValue([abierta({ clockInTime: mx('2026-11-04T08:00:00') })] as any)
+
+    await cerrarSalidasOlvidadasDe(prismaMock, 'staff-1', mx('2026-11-04T17:00:00'), 'SALIDA')
+
+    expect(prismaMock.$queryRaw.mock.calls.filter(c => String(c[1]).startsWith('salida-olvidada:'))).toHaveLength(0)
+  })
 })
 
 describe('cerrarOlvidadasAntesDeChecar (PAX y POS)', () => {

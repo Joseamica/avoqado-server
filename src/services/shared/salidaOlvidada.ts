@@ -373,7 +373,11 @@ export async function cerrarSalidasOlvidadasDe(
   })
   // Los candados de la regla de TODAS sus sucursales, en orden de id, antes de cerrar (Codex 26-nov r4 #4): dos personas con
   // turnos abiertos en A y B en distinto orden ya no se esperan en círculo. El de cada cierre después es el mismo (re-entrante).
-  for (const venueId of [...new Set(abiertas.map(e => e.venueId))].sort()) await candadoDeLaRegla(db, venueId)
+  // Sólo las sucursales con un turno que ya pasó su límite BASE (r5 #3): una salida normal de un turno vigente no hace fila.
+  const vencidas = abiertas.filter(
+    e => ahora >= limiteDelTurno(e.clockInTime, e.venue.timezone, null, e.venue.settings?.salidaOlvidadaCorte),
+  )
+  for (const venueId of [...new Set(vencidas.map(e => e.venueId))].sort()) await candadoDeLaRegla(db, venueId)
   const cerradas: SalidaOlvidadaCerrada[] = []
   for (const e of abiertas) {
     const c = await cerrarSiOlvidada(db, e, ahora, disparador)
