@@ -9,6 +9,7 @@ jest.mock('google-auth-library', () => ({
   }),
 }))
 
+import logger from '@/config/logger'
 import {
   configDeGoogleParaElPos,
   leerPaseDeAndroid,
@@ -103,6 +104,35 @@ describe('leerPaseDeEscritorio', () => {
   it('sin secreto => 503', async () => {
     delete process.env.GOOGLE_POS_DESKTOP_CLIENT_SECRET
     await expect(leerPaseDeEscritorio(p)).rejects.toMatchObject({ code: 'GOOGLE_DESKTOP_NOT_CONFIGURED', statusCode: 503 })
+  })
+})
+
+describe('registro de rechazos', () => {
+  it('verifyIdToken falla: logger.warn con el mensaje y sin token ni secreto', async () => {
+    const err: any = new Error('Wrong recipient')
+    err.config = { client_secret: 'desk-secret' }
+    verifyIdToken.mockRejectedValue(err)
+    ;(logger.warn as jest.Mock).mockClear()
+    await expect(leerPaseDeAndroid('TOKEN-SECRETO-123')).rejects.toMatchObject(invalido)
+    expect(logger.warn).toHaveBeenCalledTimes(1)
+    const logged = JSON.stringify((logger.warn as jest.Mock).mock.calls[0])
+    expect(logged).toContain('verificacion-fallida')
+    expect(logged).toContain('Wrong recipient')
+    expect(logged).not.toContain('TOKEN-SECRETO-123')
+    expect(logged).not.toContain('desk-secret')
+  })
+  it('nonce desconocido y canje fallido también quedan en el log', async () => {
+    ;(logger.warn as jest.Mock).mockClear()
+    verifyIdToken.mockResolvedValue(payload('ajeno'))
+    await leerPaseDeAndroid('t').catch(() => {})
+    getToken.mockRejectedValue(new Error('invalid_grant'))
+    await leerPaseDeEscritorio({ code: 'CODIGO-X', codeVerifier: 'VERIF-X'.repeat(8), redirectUri: 'http://127.0.0.1:5/cb' }).catch(
+      () => {},
+    )
+    const logged = JSON.stringify((logger.warn as jest.Mock).mock.calls)
+    expect(logged).toContain('nonce-desconocido')
+    expect(logged).toContain('canje-fallido')
+    expect(logged).not.toMatch(/CODIGO-X|VERIF-X/)
   })
 })
 

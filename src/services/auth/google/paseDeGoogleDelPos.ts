@@ -4,6 +4,7 @@
  */
 import { randomBytes } from 'crypto'
 import { OAuth2Client } from 'google-auth-library'
+import logger from '@/config/logger'
 import { ServiceUnavailableError, UnauthorizedError } from '../../../errors/AppError'
 
 export interface UsuarioDeGoogle {
@@ -24,6 +25,11 @@ export function vaciarNoncesSoloPruebas(): void {
   nonces.clear()
 }
 
+// Sólo `error.message` (string): nunca el objeto de error (su `config` trae `client_secret`), ni token, code o verifier.
+const rechazo = (via: 'android' | 'escritorio', motivo: string, e?: unknown) => {
+  logger.warn('Pase de Google del POS rechazado', { via, motivo, error: e instanceof Error ? e.message : undefined })
+  return invalido()
+}
 const invalido = () => new UnauthorizedError('No pudimos confirmar tu cuenta de Google. Vuelve a intentarlo.', 'GOOGLE_TOKEN_INVALID')
 const noDisponible = (code: string) =>
   new ServiceUnavailableError('Entrar con Google no está disponible por ahora. Entra con tu correo y contraseña.', code)
@@ -37,12 +43,13 @@ function emitirNonce(): string {
   return nonce
 }
 
-function gastarNonce(nonce: unknown): boolean {
-  if (typeof nonce !== 'string') return false
+/** null = bueno; si no, el motivo del rechazo. */
+function gastarNonce(nonce: unknown): string | null {
+  if (typeof nonce !== 'string') return 'nonce-ausente'
   const vence = nonces.get(nonce)
-  if (vence === undefined) return false
+  if (vence === undefined) return 'nonce-desconocido'
   nonces.delete(nonce)
-  return vence > Date.now()
+  return vence > Date.now() ? null : 'nonce-vencido'
 }
 
 export function configDeGoogleParaElPos() {
@@ -53,8 +60,8 @@ export function configDeGoogleParaElPos() {
   return { androidAudience, nonce: android ? emitirNonce() : null, desktopClientId, android, windows }
 }
 
-function aUsuario(payload: any): UsuarioDeGoogle {
-  if (!payload?.sub || !payload.email) throw invalido()
+function aUsuario(payload: any, via: 'android' | 'escritorio'): UsuarioDeGoogle {
+  if (!payload?.sub || !payload.email) throw rechazo(via, 'sin-sub-o-email')
   return {
     sub: payload.sub,
     email: payload.email,
@@ -70,11 +77,13 @@ export async function leerPaseDeAndroid(idToken: string): Promise<UsuarioDeGoogl
   let payload: any
   try {
     payload = (await new OAuth2Client().verifyIdToken({ idToken, audience })).getPayload()
-  } catch {
-    throw invalido()
+  } catch (e) {
+    throw rechazo('android', 'verificacion-fallida', e)
   }
-  if (!payload || !gastarNonce(payload.nonce)) throw invalido()
-  return aUsuario(payload)
+  if (!payload) throw rechazo('android', 'sin-payload')
+  const motivo = gastarNonce(payload.nonce)
+  if (motivo) throw rechazo('android', motivo)
+  return aUsuario(payload, 'android')
 }
 
 export async function leerPaseDeEscritorio(p: { code: string; codeVerifier: string; redirectUri: string }): Promise<UsuarioDeGoogle> {
@@ -82,13 +91,19 @@ export async function leerPaseDeEscritorio(p: { code: string; codeVerifier: stri
   const secreto = process.env.GOOGLE_POS_DESKTOP_CLIENT_SECRET
   if (!id || !secreto) throw noDisponible('GOOGLE_DESKTOP_NOT_CONFIGURED')
   let payload: any
+  let idToken: string
+  const client = new OAuth2Client(id, secreto)
   try {
-    const client = new OAuth2Client(id, secreto)
     const { tokens } = await client.getToken({ code: p.code, codeVerifier: p.codeVerifier, redirect_uri: p.redirectUri })
     if (!tokens.id_token) throw new Error('sin id_token')
-    payload = (await client.verifyIdToken({ idToken: tokens.id_token, audience: id })).getPayload()
-  } catch {
-    throw invalido()
+    idToken = tokens.id_token
+  } catch (e) {
+    throw rechazo('escritorio', 'canje-fallido', e)
   }
-  return aUsuario(payload)
+  try {
+    payload = (await client.verifyIdToken({ idToken, audience: id })).getPayload()
+  } catch (e) {
+    throw rechazo('escritorio', 'verificacion-fallida', e)
+  }
+  return aUsuario(payload, 'escritorio')
 }
