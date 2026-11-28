@@ -6,7 +6,7 @@ category: ordenes
 task: cambiar-o-quitar-articulos-del-carrito
 requiredPermissions: []
 sourceRepo: avoqado-android
-sourceRef: 212f9cf4f150b7770cf6e753e5e2dbd78451948f
+sourceRef: 5d68a68ada7362cd3f110a997f1f3bfede7932b4
 keywords:
   - cambiar cantidad
   - quitar producto del carrito
@@ -22,6 +22,10 @@ keywords:
   - el aviso sigue aunque hay existencia
   - no me deja cobrar el vale
   - error en el pago con vales
+  - quitar un producto del vale
+  - se borró todo el vale
+  - quitar el vale completo
+  - quitar vale
 ---
 
 ## Antes de empezar
@@ -39,6 +43,7 @@ En *Cobrar*, con artículos en el carrito. Si la ventana está angosta, toca ant
 ## Problemas frecuentes
 
 - Un artículo de una promoción no se abre: arrástralo hacia la izquierda y toca *Quitar combo* para quitar el combo completo.
+- Un producto que llegó con un vale (con candado) no se abre: para quitarlo, arrástralo hacia la izquierda. Si el vale trae más productos sale «Quitar el vale completo»: quitar uno quita todo el vale. Toca *Quitar vale* para quitarlo, o cierra la ventana para dejarlo; si el cliente sí se lleva alguno, agrégalo a mano. Lo mismo pasa en *Atajos* › *Anular artículos* si marcas sólo una parte de un vale. Un vale de un solo producto se quita sin preguntar. El vale quitado sigue sin cobrar: puedes volver a escanearlo.
 - En un artículo vendido por peso no sale *Cantidad*: quítalo y vuelve a pesarlo.
 - Si aparece «No se puede vaciar», la venta de vales ya tiene un abono: cobra su saldo pendiente para terminarla.
 - Si aparece «El descuento «…» tiene tope de usos y no se puede poner en un vale: emite el vale sin ese descuento.» o «…no se puede usar en una venta con vales: quítalo de ese producto para cobrar.», quita del carrito el producto que lleva ese descuento y agrégalo otra vez sin él: un descuento con tope de usos no entra en una venta con vales.

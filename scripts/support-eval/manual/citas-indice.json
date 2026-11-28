@@ -1694,7 +1694,7 @@
       },
       {
         "pagina": "windows/ordenes/cambiar-o-quitar-articulos-del-carrito",
-        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
+        "sourceRef": "5d68a68ada7362cd3f110a997f1f3bfede7932b4"
       },
       {
         "pagina": "windows/reservas/lista-de-espera",
@@ -2500,7 +2500,7 @@
       },
       {
         "pagina": "android/ordenes/cambiar-o-quitar-articulos-del-carrito",
-        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
+        "sourceRef": "5d68a68ada7362cd3f110a997f1f3bfede7932b4"
       },
       {
         "pagina": "android/tarjetas-de-regalo/vender-y-cobrar-tarjeta-de-regalo",
@@ -2552,7 +2552,7 @@
       },
       {
         "pagina": "windows/ordenes/cambiar-o-quitar-articulos-del-carrito",
-        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
+        "sourceRef": "5d68a68ada7362cd3f110a997f1f3bfede7932b4"
       },
       {
         "pagina": "windows/tarjetas-de-regalo/vender-y-cobrar-tarjeta-de-regalo",
@@ -2900,7 +2900,7 @@
       },
       {
         "pagina": "android/ordenes/cambiar-o-quitar-articulos-del-carrito",
-        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
+        "sourceRef": "5d68a68ada7362cd3f110a997f1f3bfede7932b4"
       },
       {
         "pagina": "windows/clientes/agregar-cliente-a-la-venta",
@@ -2952,7 +2952,7 @@
       },
       {
         "pagina": "windows/ordenes/cambiar-o-quitar-articulos-del-carrito",
-        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
+        "sourceRef": "5d68a68ada7362cd3f110a997f1f3bfede7932b4"
       }
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/pos/presentation/cart/CartViewModel.kt": [
@@ -2973,6 +2973,10 @@
         "sourceRef": "9b6b04105532c39e5e721772090ec66092242c3e"
       },
       {
+        "pagina": "android/ordenes/cambiar-o-quitar-articulos-del-carrito",
+        "sourceRef": "5d68a68ada7362cd3f110a997f1f3bfede7932b4"
+      },
+      {
         "pagina": "windows/cobro/dar-descuento-o-cortesia",
         "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
       },
@@ -2987,6 +2991,10 @@
       {
         "pagina": "windows/ordenes/agregar-productos-a-la-venta",
         "sourceRef": "9b6b04105532c39e5e721772090ec66092242c3e"
+      },
+      {
+        "pagina": "windows/ordenes/cambiar-o-quitar-articulos-del-carrito",
+        "sourceRef": "5d68a68ada7362cd3f110a997f1f3bfede7932b4"
       }
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/pos/presentation/cart/OrderDiscountSheet.kt": [
@@ -3046,7 +3054,7 @@
       },
       {
         "pagina": "android/ordenes/cambiar-o-quitar-articulos-del-carrito",
-        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
+        "sourceRef": "5d68a68ada7362cd3f110a997f1f3bfede7932b4"
       },
       {
         "pagina": "android/tarjetas-de-regalo/prender-tarjetas-de-regalo",
@@ -3102,7 +3110,7 @@
       },
       {
         "pagina": "windows/ordenes/cambiar-o-quitar-articulos-del-carrito",
-        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
+        "sourceRef": "5d68a68ada7362cd3f110a997f1f3bfede7932b4"
       },
       {
         "pagina": "windows/tarjetas-de-regalo/prender-tarjetas-de-regalo",
@@ -3129,6 +3137,10 @@
         "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
       },
       {
+        "pagina": "android/ordenes/cambiar-o-quitar-articulos-del-carrito",
+        "sourceRef": "5d68a68ada7362cd3f110a997f1f3bfede7932b4"
+      },
+      {
         "pagina": "android/tarjetas-de-regalo/prender-tarjetas-de-regalo",
         "sourceRef": "78e5372f37ed7791d86fc1fe621d4a073e5a09ff"
       },
@@ -3143,6 +3155,10 @@
       {
         "pagina": "windows/cobro/dar-descuento-o-cortesia",
         "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
+      },
+      {
+        "pagina": "windows/ordenes/cambiar-o-quitar-articulos-del-carrito",
+        "sourceRef": "5d68a68ada7362cd3f110a997f1f3bfede7932b4"
       },
       {
         "pagina": "windows/tarjetas-de-regalo/prender-tarjetas-de-regalo",
@@ -3198,7 +3214,7 @@
       },
       {
         "pagina": "android/ordenes/cambiar-o-quitar-articulos-del-carrito",
-        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
+        "sourceRef": "5d68a68ada7362cd3f110a997f1f3bfede7932b4"
       },
       {
         "pagina": "windows/cobro/dar-descuento-o-cortesia",
@@ -3214,7 +3230,7 @@
       },
       {
         "pagina": "windows/ordenes/cambiar-o-quitar-articulos-del-carrito",
-        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
+        "sourceRef": "5d68a68ada7362cd3f110a997f1f3bfede7932b4"
       }
     ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/pos/presentation/product/TextosMenuDelAparato.kt": [
@@ -5366,7 +5382,7 @@
       },
       {
         "pagina": "android/ordenes/cambiar-o-quitar-articulos-del-carrito",
-        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
+        "sourceRef": "5d68a68ada7362cd3f110a997f1f3bfede7932b4"
       },
       {
         "pagina": "windows/cobro/dar-descuento-o-cortesia",
@@ -5374,7 +5390,7 @@
       },
       {
         "pagina": "windows/ordenes/cambiar-o-quitar-articulos-del-carrito",
-        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
+        "sourceRef": "5d68a68ada7362cd3f110a997f1f3bfede7932b4"
       }
     ],
     "avoqado-android:avoqado-server/src/services/shared/discount.service.ts": [
@@ -5612,7 +5628,7 @@
       },
       {
         "pagina": "windows/ordenes/cambiar-o-quitar-articulos-del-carrito",
-        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
+        "sourceRef": "5d68a68ada7362cd3f110a997f1f3bfede7932b4"
       }
     ],
     "avoqado-android:desktop/pos/src/main/kotlin/com/avoqado/pos/core/di/DatabaseModule.kt": [
@@ -5722,7 +5738,7 @@
       },
       {
         "pagina": "windows/ordenes/cambiar-o-quitar-articulos-del-carrito",
-        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
+        "sourceRef": "5d68a68ada7362cd3f110a997f1f3bfede7932b4"
       },
       {
         "pagina": "windows/reembolsos/hacer-cambio",
@@ -5786,7 +5802,7 @@
       },
       {
         "pagina": "windows/ordenes/cambiar-o-quitar-articulos-del-carrito",
-        "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f"
+        "sourceRef": "5d68a68ada7362cd3f110a997f1f3bfede7932b4"
       },
       {
         "pagina": "windows/pedidos-en-linea/atender-pedidos-en-linea",
