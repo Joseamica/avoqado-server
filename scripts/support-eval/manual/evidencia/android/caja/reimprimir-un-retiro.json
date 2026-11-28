@@ -1,0 +1,124 @@
+{
+  "pagina": "android/caja/reimprimir-un-retiro",
+  "sourceRepo": "avoqado-android",
+  "sourceRef": "adc29e59deece813637b183210db8f6f5905110f",
+  "version": "2.25.62",
+  "pasos": [
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/navigation/MainTab.kt",
+      "linea": 57,
+      "cita": "label = \"Más\","
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/settings/MoreMenuScreen.kt",
+      "linea": 704,
+      "cita": "label = \"Caja\","
+    },
+    {
+      "paso": 1,
+      "archivo": "app/src/main/java/com/avoqado/pos/cashdrawer/presentation/CashDrawerViewModel.kt",
+      "linea": 55,
+      "cita": "CURRENT(\"Turno en curso\"),"
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/cashdrawer/presentation/CashDrawerScreen.kt",
+      "linea": 1131,
+      "cita": "text = \"Movimientos\","
+    },
+    {
+      "paso": 2,
+      "archivo": "app/src/main/java/com/avoqado/pos/cashdrawer/presentation/CashDrawerScreen.kt",
+      "linea": 1229,
+      "cita": "CashDrawerEventType.PAY_OUT.name -> Triple(\"Egreso\", Error, \"-\")"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/cashdrawer/presentation/CashDrawerScreen.kt",
+      "linea": 1267,
+      "cita": "Icon(imageVector = Icons.Filled.Print, contentDescription = \"Reimprimir retiro\")"
+    },
+    {
+      "paso": 3,
+      "archivo": "app/src/main/java/com/avoqado/pos/cashdrawer/presentation/CashDrawerScreen.kt",
+      "linea": 1173,
+      "cita": "onReimprimir = if (event.type == CashDrawerEventType.PAY_OUT.name) { { onReimprimirRetiro(event) } } else null,"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/cashdrawer/data/RetiroTicketBuilder.kt",
+      "linea": 42,
+      "cita": "if (reimpresion) p.printLine(\"REIMPRESIÓN\")"
+    },
+    {
+      "paso": 4,
+      "archivo": "app/src/main/java/com/avoqado/pos/cashdrawer/presentation/CashDrawerScreen.kt",
+      "linea": 421,
+      "cita": "AvoqadoSuccessToast(message = \"¡Retiro reimpreso!\", onDismiss = { viewModel.descartarRetiroReimpreso() })"
+    }
+  ],
+  "permisos": [
+    {
+      "permiso": "payments:read",
+      "archivo": "avoqado-server/src/routes/mobile.routes.ts",
+      "linea": 3295
+    }
+  ],
+  "plan": [],
+  "sinInternet": [
+    {
+      "afirmacion": "La reimpresión busca el papel guardado en el aparato, sin red",
+      "archivo": "app/src/main/java/com/avoqado/pos/cashdrawer/presentation/CashDrawerViewModel.kt",
+      "linea": 604
+    },
+    {
+      "afirmacion": "Sin papel guardado, se arma con el movimiento de la caja del aparato",
+      "archivo": "app/src/main/java/com/avoqado/pos/cashdrawer/presentation/CashDrawerViewModel.kt",
+      "linea": 605
+    },
+    {
+      "afirmacion": "El papel impreso se guarda 45 días en el aparato",
+      "archivo": "app/src/main/java/com/avoqado/pos/cashdrawer/data/ComprobantesDeRetiroPorImprimir.kt",
+      "linea": 83
+    }
+  ],
+  "rutas": [
+    {
+      "ruta": "Antes: «Caja» sale en Más con canManageCashDrawer",
+      "archivo": "app/src/main/java/com/avoqado/pos/settings/MoreMenuScreen.kt",
+      "linea": 700
+    },
+    {
+      "ruta": "Antes: canManageCashDrawer = cajero, gerente, administrador, dueño (y superadmin)",
+      "archivo": "app/src/main/java/com/avoqado/pos/core/domain/RoleManager.kt",
+      "linea": 329
+    },
+    {
+      "ruta": "Sin «Autorizado por» cuando el aparato no tiene el papel guardado",
+      "archivo": "app/src/main/java/com/avoqado/pos/cashdrawer/data/RetiroTicketBuilder.kt",
+      "linea": 55
+    }
+  ],
+  "aparato": {
+    "estado": "PROBADO",
+    "aparato": "Sunmi D3 del laboratorio del Alien (serial D40625BRJ0469)",
+    "version": "2.25.61-dev (72), copia de QA com.avoqado.pos.reimp compilada en adc29e59 (rama feat/reimprimir-retiro), contra el SERVIDOR local del 3000",
+    "apkSha256": "7c7c6227c76314a8234d852ffef7ac1925def3e6004895001f77ce9ec2117735",
+    "fecha": "2026-11-27",
+    "fotos": [
+      "docs/audit/2026-11-27-reimprimir-retiro/full-testing/fotos/1-movimientos-con-reimprimir.png",
+      "docs/audit/2026-11-27-reimprimir-retiro/full-testing/fotos/2-retiro-reimpreso.png"
+    ],
+    "filasCreadas": [
+      "Caja de prueba cmwzttqw600pkwatnrpe1do64 (fondo $1,000, retiros $300 «Bajada», $150 «SinRed», $100 «Colgado», cerrada en $450, diferencia $0)"
+    ],
+    "nota": "*Más* → *Caja* → *Movimientos*: cada retiro trae el botón de impresora; al tocarlo sale el papel con REIMPRESIÓN por la impresora integrada y «¡Retiro reimpreso!». También sin red, con el servidor colgado y tras una respuesta perdida. Reporte: docs/audit/2026-11-27-reimprimir-retiro/full-testing/report.md"
+  },
+  "codex": {
+    "lote": 2,
+    "ronda": 0,
+    "veredicto": "PENDIENTE"
+  }
+}

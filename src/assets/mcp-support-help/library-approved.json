@@ -1,8 +1,8 @@
 {
   "version": 1,
-  "approvedBy": "jose",
-  "approvedAt": "2026-11-28T03:51:03.712Z",
-  "approvedHash": "8a8173c2535b3b166c7b594a728d857d591635f7e147108975903898624d691f",
+  "approvedBy": "Jose Antonio Amieva",
+  "approvedAt": "2026-11-28T04:25:47.296Z",
+  "approvedHash": "186442cc3bcd2e2607848fc621c0796f26b5ba6435df7bafcf27c896a8569ce3",
   "retired": {},
   "guides": {
     "android/ayuda/ver-version-de-la-app": {
@@ -25,6 +25,12 @@
       "sha256": "af1c997b5bef5d418af9824752e367bb77de07daa5dc67f9142fe3a4a86c35f0",
       "requiredPermissions": [
         "payments:create"
+      ]
+    },
+    "android/caja/reimprimir-un-retiro": {
+      "sha256": "a53a345b2dd8d49c6ad4f0eb761dbf0a9284417a32dde366db2bf733224b40e1",
+      "requiredPermissions": [
+        "payments:read"
       ]
     },
     "android/clientes/agregar-cliente-a-la-venta": {
