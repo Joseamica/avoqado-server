@@ -1,8 +1,8 @@
 {
   "version": 1,
-  "approvedBy": "Jose Antonio Amieva",
-  "approvedAt": "2026-11-27T17:53:02.606Z",
-  "approvedHash": "2b154ead0b0a71af82e00380bfc46f68bf668f43b5f0b0795261cdf5c3abff9d",
+  "approvedBy": null,
+  "approvedAt": null,
+  "approvedHash": null,
   "retired": {},
   "guides": {
     "android/ayuda/ver-version-de-la-app": {
@@ -23,6 +23,12 @@
     },
     "android/caja/registrar-ingreso-de-efectivo": {
       "sha256": "af1c997b5bef5d418af9824752e367bb77de07daa5dc67f9142fe3a4a86c35f0",
+      "requiredPermissions": [
+        "payments:create"
+      ]
+    },
+    "android/caja/reimprimir-un-retiro": {
+      "sha256": "022705c4947437726c2bbf06596ab224fe450f2ff7c79bc5b7892e8c69908192",
       "requiredPermissions": [
         "payments:create"
       ]
