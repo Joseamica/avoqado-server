@@ -27,6 +27,12 @@
         "payments:create"
       ]
     },
+    "android/caja/reimprimir-un-retiro": {
+      "sha256": "a53a345b2dd8d49c6ad4f0eb761dbf0a9284417a32dde366db2bf733224b40e1",
+      "requiredPermissions": [
+        "payments:read"
+      ]
+    },
     "android/clientes/agregar-cliente-a-la-venta": {
       "sha256": "5820fc9384eb1d8c1ccbc440c2d669cf8f568bbac5a67b4232c5f83e5f4f4398",
       "requiredPermissions": [
