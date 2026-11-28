@@ -1,85 +1,85 @@
 {
   "pagina": "android/ordenes/cambiar-o-quitar-articulos-del-carrito",
   "sourceRepo": "avoqado-android",
-  "sourceRef": "212f9cf4f150b7770cf6e753e5e2dbd78451948f",
-  "version": "2.25.52",
+  "sourceRef": "5d68a68ada7362cd3f110a997f1f3bfede7932b4",
+  "version": "2.25.62",
   "pasos": [
     {
       "paso": 1,
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/cart/CartPanelView.kt",
-      "linea": 345,
+      "linea": 348,
       "cita": "onClick = { if (!item.locked && !item.isPromotionLine) onItemTap(item) },"
     },
     {
       "paso": 1,
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
-      "linea": 3315,
+      "linea": 3472,
       "cita": "text = \"Ver carrito\","
     },
     {
       "paso": 2,
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
-      "linea": 2993,
+      "linea": 3150,
       "cita": "text = \"Cantidad\","
     },
     {
       "paso": 2,
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
-      "linea": 3010,
+      "linea": 3167,
       "cita": "onUpdateQuantity(item.quantity - 1)"
     },
     {
       "paso": 2,
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
-      "linea": 3026,
+      "linea": 3183,
       "cita": "onUpdateQuantity(item.quantity + 1)"
     },
     {
       "paso": 3,
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
-      "linea": 3058,
+      "linea": 3215,
       "cita": "text = \"Nota del artículo\","
     },
     {
       "paso": 3,
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/product/ProductDetailPanel.kt",
-      "linea": 868,
+      "linea": 985,
       "cita": "text = \"Guardar nota\","
     },
     {
       "paso": 4,
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
-      "linea": 3134,
+      "linea": 3291,
       "cita": "text = \"Eliminar artículo\","
     },
     {
       "paso": 4,
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/cart/CartPanelView.kt",
-      "linea": 706,
+      "linea": 713,
       "cita": "if (value == SwipeToDismissBoxValue.EndToStart) {"
     },
     {
       "paso": 5,
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/cart/CartPanelView.kt",
-      "linea": 636,
+      "linea": 643,
       "cita": "contentDescription = \"Mas opciones\","
     },
     {
       "paso": 5,
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/cart/CartPanelView.kt",
-      "linea": 1167,
+      "linea": 1191,
       "cita": "title = \"Vaciar carrito\","
     },
     {
       "paso": 5,
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
-      "linea": 2553,
+      "linea": 2700,
       "cita": "title = \"¿Vaciar carrito?\","
     },
     {
       "paso": 5,
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
-      "linea": 2559,
+      "linea": 2706,
       "cita": "PrimaryButton(text = \"Vaciar\", onClick = {"
     }
   ],
@@ -90,27 +90,27 @@
     {
       "ruta": "Problema: una línea de promoción no se abre; se quita deslizando, con el aviso del combo",
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
-      "linea": 1251
+      "linea": 1286
     },
     {
       "ruta": "Problema: el aviso quita el combo completo",
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
-      "linea": 1256
+      "linea": 1291
     },
     {
       "ruta": "Problema: sin «Cantidad» en líneas por peso o de promoción",
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
-      "linea": 2985
+      "linea": 3142
     },
     {
       "ruta": "Si aparece «No se puede vaciar»: venta de vales con abono",
       "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
-      "linea": 2541
+      "linea": 2688
     },
     {
       "ruta": "Si aparece «No se puede vaciar»: su texto (VALES_CON_ABONO)",
       "archivo": "app/src/main/java/com/avoqado/pos/payment/presentation/PaymentFlowViewModel.kt",
-      "linea": 158
+      "linea": 185
     },
     {
       "ruta": "Problema D11 (área): «El descuento «…» tiene tope de usos y no se puede poner en un vale…» (400 AREA_TICKET_DISCOUNT_HAS_LIMIT del SERVIDOR)",
@@ -121,6 +121,51 @@
       "ruta": "Problema D11 (caja): «…no se puede usar en una venta con vales: quítalo de ese producto para cobrar.»",
       "archivo": "avoqado-server/src/services/shared/descuentoConTopeEnVales.ts",
       "linea": 27
+    },
+    {
+      "ruta": "Problema: el renglón de un vale tiene candado y no abre el panel de detalle",
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/cart/CartPanelView.kt",
+      "linea": 348
+    },
+    {
+      "ruta": "Problema: deslizar un renglón de un vale de 2+ productos abre el aviso en vez de quitarlo",
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
+      "linea": 318
+    },
+    {
+      "ruta": "Problema: título del aviso «Quitar el vale completo»",
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
+      "linea": 1307
+    },
+    {
+      "ruta": "Problema: botón «Quitar vale»",
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/CheckoutScreen.kt",
+      "linea": 1312
+    },
+    {
+      "ruta": "Problema: texto del aviso (código del vale)",
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/cart/CartViewModel.kt",
+      "linea": 453
+    },
+    {
+      "ruta": "Problema: texto del aviso (N productos; agrégalo a mano)",
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/cart/CartViewModel.kt",
+      "linea": 454
+    },
+    {
+      "ruta": "Problema: un vale de un solo producto se quita sin preguntar",
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/cart/CartViewModel.kt",
+      "linea": 460
+    },
+    {
+      "ruta": "Problema: Atajos › Anular artículos con parte de un vale marcada avisa antes",
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/ShortcutsGridView.kt",
+      "linea": 1135
+    },
+    {
+      "ruta": "Problema: el atajo se llama «Anular artículos»",
+      "archivo": "app/src/main/java/com/avoqado/pos/pos/presentation/checkout/ShortcutsGridView.kt",
+      "linea": 291
     }
   ],
   "aparato": {

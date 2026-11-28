@@ -1,8 +1,8 @@
 {
   "version": 1,
-  "approvedBy": "jose",
-  "approvedAt": "2026-11-28T03:51:03.712Z",
-  "approvedHash": "8a8173c2535b3b166c7b594a728d857d591635f7e147108975903898624d691f",
+  "approvedBy": null,
+  "approvedAt": null,
+  "approvedHash": null,
   "retired": {},
   "guides": {
     "android/ayuda/ver-version-de-la-app": {
@@ -228,7 +228,7 @@
       ]
     },
     "android/ordenes/cambiar-o-quitar-articulos-del-carrito": {
-      "sha256": "29bfe18b1cc68e1a3dfb78e8c7286ea9afbf73ab821c47ca46ed332f5951cbb6",
+      "sha256": "ae72c44eb5cafadc08efc6fc620134d5bba8ac3cf62bb25f675f56050ed53495",
       "requiredPermissions": []
     },
     "android/personal/cambiar-de-usuario": {
@@ -1531,7 +1531,7 @@
       ]
     },
     "windows/ordenes/cambiar-o-quitar-articulos-del-carrito": {
-      "sha256": "70ba3e9e7e87a2a2fc329796ce8b58e846abd15c4323b0b51ae1eb626c6eeca9",
+      "sha256": "96df1afef10cddf26d638f8aa7d23a6075eb94cfca7e3bd384b9ec7c4a137582",
       "requiredPermissions": []
     },
     "windows/personal/cambiar-de-usuario": {
