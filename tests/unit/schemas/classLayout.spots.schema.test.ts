@@ -62,6 +62,14 @@ const casos: Array<[string, (layoutConfig: object) => Validacion]> = [
 ]
 
 describe.each(casos)('layoutConfig.spots — %s', (_nombre, validar) => {
+  // Revisión de apps viejas antes de publicar (27-nov): con TODAS apagadas la clase salía con cupo y sin lugar que elegir.
+  it('rechaza un mapa con todas las casillas apagadas, con un mensaje que lo dice', () => {
+    const r = validar(mapaDado(s => ({ ...s, label: '', enabled: false })))
+    expect(r.success).toBe(false)
+    if (r.success) return
+    expect(motivosDeZod(r.error.issues)).toContain('El mapa necesita al menos un lugar activo')
+  })
+
   it('acepta el mapa «dado» con las casillas apagadas sin etiqueta', () => {
     const r = validar(mapaDado())
     expect(r.success ? '' : motivosDeZod(r.error.issues)).toBe('')

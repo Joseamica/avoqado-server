@@ -184,23 +184,27 @@ export const ProductSchema = z.object({
  * necesitando su número. Quien reserva sólo acepta ids de casillas prendidas (filtran por `enabled`).
  */
 export const CLASS_LAYOUT_SPOT_SIN_NUMERO = 'Cada lugar activo necesita su número'
+/** Un mapa con TODAS las casillas apagadas dejaba la clase «con cupo» y sin ningún lugar que elegir en la página de reservas. */
+export const CLASS_LAYOUT_SIN_LUGARES = 'El mapa necesita al menos un lugar activo'
 
 export const ClassLayoutConfigSchema = z.object({
   iconType: z.enum(['circle', 'bike', 'mat', 'reformer', 'bed', 'chair', 'generic']),
   rows: z.number().int().min(1).max(20),
   cols: z.number().int().min(1).max(20),
   showInstructor: z.boolean().optional(),
-  spots: z.array(
-    z
-      .object({
-        id: z.string().min(1),
-        row: z.number().int().min(0),
-        col: z.number().int().min(0),
-        label: z.string(),
-        enabled: z.boolean(),
-      })
-      .refine(spot => !spot.enabled || spot.label.length > 0, { message: CLASS_LAYOUT_SPOT_SIN_NUMERO, path: ['label'] }),
-  ),
+  spots: z
+    .array(
+      z
+        .object({
+          id: z.string().min(1),
+          row: z.number().int().min(0),
+          col: z.number().int().min(0),
+          label: z.string(),
+          enabled: z.boolean(),
+        })
+        .refine(spot => !spot.enabled || spot.label.length > 0, { message: CLASS_LAYOUT_SPOT_SIN_NUMERO, path: ['label'] }),
+    )
+    .refine(spots => spots.some(spot => spot.enabled), { message: CLASS_LAYOUT_SIN_LUGARES }),
 })
 
 // Base object — shared between Create and Update (allows .partial())
