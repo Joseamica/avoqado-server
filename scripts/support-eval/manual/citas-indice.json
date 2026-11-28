@@ -139,6 +139,12 @@
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
       }
     ],
+    "avoqado-android:app/src/main/java/com/avoqado/pos/cashdrawer/data/ComprobantesDeRetiroPorImprimir.kt": [
+      {
+        "pagina": "android/caja/reimprimir-un-retiro",
+        "sourceRef": "adc29e59deece813637b183210db8f6f5905110f"
+      }
+    ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/cashdrawer/data/ConteoSospechoso.kt": [
       {
         "pagina": "android/caja/abrir-y-cerrar-caja",
@@ -175,6 +181,12 @@
         "sourceRef": "c07a2bbebf453598963bf96f3208f66193dd5efb"
       }
     ],
+    "avoqado-android:app/src/main/java/com/avoqado/pos/cashdrawer/data/RetiroTicketBuilder.kt": [
+      {
+        "pagina": "android/caja/reimprimir-un-retiro",
+        "sourceRef": "adc29e59deece813637b183210db8f6f5905110f"
+      }
+    ],
     "avoqado-android:app/src/main/java/com/avoqado/pos/cashdrawer/domain/AccesoAlRetiro.kt": [
       {
         "pagina": "windows/maquina-de-efectivo/pagar-te-debemos-de-la-maquina",
@@ -193,6 +205,10 @@
       {
         "pagina": "android/caja/registrar-ingreso-de-efectivo",
         "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+      },
+      {
+        "pagina": "android/caja/reimprimir-un-retiro",
+        "sourceRef": "adc29e59deece813637b183210db8f6f5905110f"
       },
       {
         "pagina": "windows/caja/abrir-y-cerrar-caja",
@@ -223,6 +239,10 @@
       {
         "pagina": "android/caja/registrar-ingreso-de-efectivo",
         "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+      },
+      {
+        "pagina": "android/caja/reimprimir-un-retiro",
+        "sourceRef": "adc29e59deece813637b183210db8f6f5905110f"
       },
       {
         "pagina": "windows/caja/abrir-y-cerrar-caja",
@@ -441,6 +461,10 @@
       {
         "pagina": "android/caja/registrar-ingreso-de-efectivo",
         "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+      },
+      {
+        "pagina": "android/caja/reimprimir-un-retiro",
+        "sourceRef": "adc29e59deece813637b183210db8f6f5905110f"
       },
       {
         "pagina": "android/clientes/agregar-cliente-a-la-venta",
@@ -1689,6 +1713,10 @@
       {
         "pagina": "android/caja/registrar-ingreso-de-efectivo",
         "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+      },
+      {
+        "pagina": "android/caja/reimprimir-un-retiro",
+        "sourceRef": "adc29e59deece813637b183210db8f6f5905110f"
       },
       {
         "pagina": "android/clientes/agregar-cliente-a-una-venta-cobrada",
@@ -3881,6 +3909,10 @@
         "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
       },
       {
+        "pagina": "android/caja/reimprimir-un-retiro",
+        "sourceRef": "adc29e59deece813637b183210db8f6f5905110f"
+      },
+      {
         "pagina": "android/clientes/crear-cliente",
         "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
       },
@@ -4853,6 +4885,10 @@
       {
         "pagina": "android/caja/registrar-ingreso-de-efectivo",
         "sourceRef": "843c15ae06bf68dd0d9c755525a9971e701052b7"
+      },
+      {
+        "pagina": "android/caja/reimprimir-un-retiro",
+        "sourceRef": "adc29e59deece813637b183210db8f6f5905110f"
       },
       {
         "pagina": "android/clientes/agregar-cliente-a-la-venta",

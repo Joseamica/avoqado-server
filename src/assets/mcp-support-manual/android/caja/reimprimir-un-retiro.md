@@ -5,7 +5,7 @@ product: android
 category: caja
 task: reimprimir-un-retiro
 requiredPermissions:
-  - payments:create
+  - payments:read
 money: true
 sourceRepo: avoqado-android
 sourceRef: adc29e59deece813637b183210db8f6f5905110f

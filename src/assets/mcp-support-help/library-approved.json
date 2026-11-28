@@ -28,9 +28,9 @@
       ]
     },
     "android/caja/reimprimir-un-retiro": {
-      "sha256": "022705c4947437726c2bbf06596ab224fe450f2ff7c79bc5b7892e8c69908192",
+      "sha256": "a53a345b2dd8d49c6ad4f0eb761dbf0a9284417a32dde366db2bf733224b40e1",
       "requiredPermissions": [
-        "payments:create"
+        "payments:read"
       ]
     },
     "android/clientes/agregar-cliente-a-la-venta": {
