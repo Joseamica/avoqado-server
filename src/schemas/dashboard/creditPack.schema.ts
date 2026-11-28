@@ -5,55 +5,86 @@ import { rejectBodyCustomerId } from '../common/publicIdentity.schema'
 // DASHBOARD SCHEMAS
 // ==========================================
 
+// Destacado del paquete («Más popular»): etiqueta corta + ícono de una lista fija. Los mismos nombres los dibujan el DASHBOARD y el WIDGET.
+export const CREDIT_PACK_BADGE_ICONS = ['star', 'tag', 'flame', 'heart', 'sparkles', 'trophy'] as const
+
+const badgeTextSchema = z
+  .string()
+  .trim()
+  .max(40, 'La etiqueta es de máximo 40 caracteres')
+  .nullable()
+  .optional()
+  .transform(v => (v === '' ? null : v))
+
+const badgeIconSchema = z
+  .enum(CREDIT_PACK_BADGE_ICONS, { errorMap: () => ({ message: 'Ícono no válido' }) })
+  .nullable()
+  .optional()
+
+// Un ícono sin etiqueta no se puede guardar.
+const iconoSinTexto = (body: { badgeText?: string | null; badgeIcon?: string | null }, ctx: z.RefinementCtx) => {
+  if (body.badgeIcon && !body.badgeText) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['badgeText'], message: 'Escribe la etiqueta del destacado' })
+  }
+}
+
 export const createCreditPackSchema = z.object({
-  body: z.object({
-    name: z.string({ required_error: 'Escribe el nombre' }).min(1, 'El nombre es requerido'),
-    description: z.string().optional(),
-    price: z.number({ required_error: 'Escribe el precio' }).positive('El precio debe ser mayor a 0'),
-    currency: z.string().default('MXN'),
-    validityDays: z.number().int().positive('Los días de vigencia deben ser mayores a 0').optional(),
-    maxPerCustomer: z.number().int().positive('El límite por cliente debe ser mayor a 0').optional(),
-    displayOrder: z.number().int().min(0).optional(),
-    items: z
-      .array(
-        z.object({
-          productId: z.string().min(1, 'El producto es requerido'),
-          // D679: un renglón Ilimitado no trae cantidad (la pone el servidor). Uno normal sin cantidad lo rechaza el servicio.
-          quantity: z.number().int().positive('La cantidad debe ser mayor a 0').optional(),
-          unlimited: z.boolean({ invalid_type_error: 'Ilimitado debe ser sí o no' }).optional(),
-        }),
-        { required_error: 'Agrega al menos un producto al paquete' },
-      )
-      .min(1, 'El paquete debe tener al menos un item'),
-  }),
+  body: z
+    .object({
+      name: z.string({ required_error: 'Escribe el nombre' }).min(1, 'El nombre es requerido'),
+      description: z.string().optional(),
+      price: z.number({ required_error: 'Escribe el precio' }).positive('El precio debe ser mayor a 0'),
+      currency: z.string().default('MXN'),
+      validityDays: z.number().int().positive('Los días de vigencia deben ser mayores a 0').optional(),
+      maxPerCustomer: z.number().int().positive('El límite por cliente debe ser mayor a 0').optional(),
+      displayOrder: z.number().int().min(0).optional(),
+      badgeText: badgeTextSchema,
+      badgeIcon: badgeIconSchema,
+      items: z
+        .array(
+          z.object({
+            productId: z.string().min(1, 'El producto es requerido'),
+            // D679: un renglón Ilimitado no trae cantidad (la pone el servidor). Uno normal sin cantidad lo rechaza el servicio.
+            quantity: z.number().int().positive('La cantidad debe ser mayor a 0').optional(),
+            unlimited: z.boolean({ invalid_type_error: 'Ilimitado debe ser sí o no' }).optional(),
+          }),
+          { required_error: 'Agrega al menos un producto al paquete' },
+        )
+        .min(1, 'El paquete debe tener al menos un item'),
+    })
+    .superRefine(iconoSinTexto),
 })
 
 export const updateCreditPackSchema = z.object({
   params: z.object({
     packId: z.string().min(1),
   }),
-  body: z.object({
-    name: z.string().min(1, 'El nombre es requerido').optional(),
-    description: z.string().nullable().optional(),
-    price: z.number().positive('El precio debe ser mayor a 0').optional(),
-    currency: z.string().optional(),
-    validityDays: z.number().int().positive().nullable().optional(),
-    maxPerCustomer: z.number().int().positive().nullable().optional(),
-    // Interruptor «A la venta» del DASHBOARD (mismo efecto que DELETE al apagar).
-    active: z.boolean().optional(),
-    displayOrder: z.number().int().min(0).optional(),
-    items: z
-      .array(
-        z.object({
-          productId: z.string().min(1, 'El producto es requerido'),
-          // D679: un renglón Ilimitado no trae cantidad (la pone el servidor). Uno normal sin cantidad lo rechaza el servicio.
-          quantity: z.number().int().positive('La cantidad debe ser mayor a 0').optional(),
-          unlimited: z.boolean({ invalid_type_error: 'Ilimitado debe ser sí o no' }).optional(),
-        }),
-      )
-      .min(1, 'El paquete debe tener al menos un item')
-      .optional(),
-  }),
+  body: z
+    .object({
+      name: z.string().min(1, 'El nombre es requerido').optional(),
+      description: z.string().nullable().optional(),
+      price: z.number().positive('El precio debe ser mayor a 0').optional(),
+      currency: z.string().optional(),
+      validityDays: z.number().int().positive().nullable().optional(),
+      maxPerCustomer: z.number().int().positive().nullable().optional(),
+      // Interruptor «A la venta» del DASHBOARD (mismo efecto que DELETE al apagar).
+      active: z.boolean().optional(),
+      displayOrder: z.number().int().min(0).optional(),
+      badgeText: badgeTextSchema,
+      badgeIcon: badgeIconSchema,
+      items: z
+        .array(
+          z.object({
+            productId: z.string().min(1, 'El producto es requerido'),
+            // D679: un renglón Ilimitado no trae cantidad (la pone el servidor). Uno normal sin cantidad lo rechaza el servicio.
+            quantity: z.number().int().positive('La cantidad debe ser mayor a 0').optional(),
+            unlimited: z.boolean({ invalid_type_error: 'Ilimitado debe ser sí o no' }).optional(),
+          }),
+        )
+        .min(1, 'El paquete debe tener al menos un item')
+        .optional(),
+    })
+    .superRefine(iconoSinTexto),
 })
 
 export const packIdParamsSchema = z.object({
@@ -265,6 +296,26 @@ export const customerMyListSchema = z.object({
     .object({
       cursor: z.string().max(80, 'Cursor inválido').optional(),
       limit: z.coerce.number({ invalid_type_error: 'El límite debe ser un número' }).int('El límite debe ser un entero').optional(),
+    })
+    .passthrough(),
+})
+
+/**
+ * «Mis reservas de clase»: las mismas `dateFrom`/`dateTo` que el horario público. Sin `limit`: la página (100) la impone el servidor;
+ * las fechas imposibles, el orden y el tope de 60 días los juzga el servicio (`leerRangoDelHorario`).
+ */
+export const customerClassReservationsSchema = z.object({
+  params: z.object({ venueSlug: z.string().min(1) }),
+  query: z
+    .object({
+      dateFrom: z
+        .string({ required_error: 'Falta la fecha de inicio (dateFrom).', invalid_type_error: 'La fecha de inicio debe ser un texto.' })
+        .regex(/^\d{4}-\d{2}-\d{2}$/, 'La fecha de inicio debe tener el formato AAAA-MM-DD.'),
+      dateTo: z
+        .string({ invalid_type_error: 'La fecha final debe ser un texto.' })
+        .regex(/^\d{4}-\d{2}-\d{2}$/, 'La fecha final debe tener el formato AAAA-MM-DD.')
+        .optional(),
+      cursor: z.string({ invalid_type_error: 'Cursor inválido' }).max(80, 'Cursor inválido').optional(),
     })
     .passthrough(),
 })

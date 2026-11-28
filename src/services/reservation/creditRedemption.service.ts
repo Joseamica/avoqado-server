@@ -135,6 +135,16 @@ export async function requireSessionCustomerForCredits(
   return customer
 }
 
+/** El saldo de un paquete tal como queda DESPUÉS de un canje (lo lee la respuesta de la reserva de clase). */
+export interface SaldoDespuesDelCanje {
+  balanceId: string
+  packName: string
+  remaining: number
+  original: number
+  unlimited: boolean
+  expiresAt: string | null
+}
+
 /** Qué textos ve la clienta: la clase (widget y app de clientes) y la cita hablaban distinto, y se conservan. */
 export type ContextoDeCanje = 'CLASE' | 'CITA'
 
@@ -190,9 +200,9 @@ export async function redeemCreditsForReservation(
     /** Sólo elige los textos. Default `CITA`. */
     contexto?: ContextoDeCanje
   },
-): Promise<{ creditsUsed: number; redeemed: boolean }> {
+): Promise<{ creditsUsed: number; redeemed: boolean; balances: SaldoDespuesDelCanje[] }> {
   if (args.balanceIds.length === 0) {
-    return { creditsUsed: 0, redeemed: false }
+    return { creditsUsed: 0, redeemed: false, balances: [] }
   }
   const textos = TEXTOS[args.contexto ?? 'CITA']
 
@@ -207,6 +217,7 @@ export async function redeemCreditsForReservation(
   let pagoConIlimitado = false
 
   let totalCreditsUsed = 0
+  const saldos: SaldoDespuesDelCanje[] = []
   for (const balanceId of args.balanceIds) {
     const balances = await tx.$queryRaw<
       { id: string; remainingQuantity: number; creditPackPurchaseId: string; productId: string; unlimited: boolean }[]
@@ -296,6 +307,27 @@ export async function redeemCreditsForReservation(
         data: { status: CreditPurchaseStatus.EXHAUSTED },
       })
     }
+
+    // El saldo que queda, leído en esta misma transacción (también 0 con la compra ya EXHAUSTED).
+    const despues = await tx.creditItemBalance.findUnique({
+      where: { id: balanceId },
+      select: {
+        remainingQuantity: true,
+        originalQuantity: true,
+        unlimited: true,
+        creditPackPurchase: { select: { expiresAt: true, creditPack: { select: { name: true } } } },
+      },
+    })
+    if (despues) {
+      saldos.push({
+        balanceId,
+        packName: despues.creditPackPurchase.creditPack.name,
+        remaining: despues.remainingQuantity,
+        original: despues.originalQuantity,
+        unlimited: despues.unlimited,
+        expiresAt: despues.creditPackPurchase.expiresAt ? despues.creditPackPurchase.expiresAt.toISOString() : null,
+      })
+    }
   }
 
   if (pagoConIlimitado) {
@@ -310,5 +342,5 @@ export async function redeemCreditsForReservation(
     `[CREDIT REDEEM] ${totalCreditsUsed} credit(s) redeemed across ${args.balanceIds.length} balance(s) for reservation ${args.confirmationCode}`,
   )
 
-  return { creditsUsed: totalCreditsUsed, redeemed: true }
+  return { creditsUsed: totalCreditsUsed, redeemed: true, balances: saldos }
 }

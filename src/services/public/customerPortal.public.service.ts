@@ -187,21 +187,7 @@ export async function getCustomerPortal(venueId: string, customerId: string, aut
   const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000)
 
   // Sus reservas, y las de invitada con un contacto probado (en su forma probada y, si es el mismo, en la que guarda la ficha).
-  const contactFilter = [
-    { customerId: customer.id },
-    ...contactos.map(c =>
-      c.tipo === 'PHONE'
-        ? {
-            guestPhone: {
-              in: [
-                c.valor,
-                ...(customer.phone && customer.phone !== c.valor && phonesMatch(c.valor, customer.phone) ? [customer.phone] : []),
-              ],
-            },
-          }
-        : { guestEmail: { equals: c.valor, mode: 'insensitive' as const } },
-    ),
-  ]
+  const contactFilter = [{ customerId: customer.id }, ...reservasPorContactoProbado(customer, contactos)]
 
   const [purchases, upcomingReservations, pastReservations] = await Promise.all([
     prisma.creditPackPurchase.findMany({
@@ -346,6 +332,38 @@ export async function getCustomerPortal(venueId: string, customerId: string, aut
     // R7': el aviso firmado que S7 puso en la sesión al entrar; los tokens anteriores no lo traen.
     otraFicha: auth?.otraFicha ?? null,
   }
+}
+
+/**
+ * Las reservas que se encuentran con los contactos que ESTA sesión probó (S7): el teléfono en su forma probada y, si es el mismo
+ * número, en la que guarda la ficha; el correo sin importar mayúsculas. Lo comparten el portal y `filtroDeReservasDeLaClienta`.
+ */
+function reservasPorContactoProbado(customer: { phone: string | null }, contactos: ContactoProbado[]): Prisma.ReservationWhereInput[] {
+  return contactos.map(c =>
+    c.tipo === 'PHONE'
+      ? {
+          guestPhone: {
+            in: [
+              c.valor,
+              ...(customer.phone && customer.phone !== c.valor && phonesMatch(c.valor, customer.phone) ? [customer.phone] : []),
+            ],
+          },
+        }
+      : { guestEmail: { equals: c.valor, mode: 'insensitive' as const } },
+  )
+}
+
+/**
+ * Las reservas de la clienta: las de su ficha, y las de INVITADA (sin ficha) hechas con un contacto que esta sesión probó. A
+ * diferencia del portal, una reserva de OTRA ficha que trae su correo o su teléfono NO sale (ni su `cancelSecret`): el contacto
+ * sólo prueba las reservas que nadie más reclamó. Sin contactos probados, sólo las de su ficha.
+ */
+export function filtroDeReservasDeLaClienta(
+  customer: { id: string; phone: string | null },
+  contactos: ContactoProbado[],
+): Prisma.ReservationWhereInput {
+  const porContacto = reservasPorContactoProbado(customer, contactos)
+  return { OR: [{ customerId: customer.id }, ...(porContacto.length > 0 ? [{ customerId: null, OR: porContacto }] : [])] }
 }
 
 // ---- S13 (P2-6): «Mi cuenta», sus listas y su paginación ----

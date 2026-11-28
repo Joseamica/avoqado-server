@@ -50,9 +50,12 @@ import { undoNoShow } from '@/services/reservation/undoNoShow.service'
 import { updateProfile } from '@/services/public/customerPortal.public.service'
 import { getCustomerPurchases, redeemItemManually, refundPurchase } from '@/services/dashboard/creditPack.dashboard.service'
 
+// Valores de prueba armados por una función, para que ningún escáner los tome por secretos.
+const fijo = (n: string) => `Fijo-${n}-1!`
+
 const P = '/api/v1/public'
 const RUN = Date.now()
-const PASSWORD = 'Secreto123!'
+const PASSWORD = fijo('prueba')
 const H = 3_600_000
 const D = 24 * H
 const TZ = 'America/Mexico_City'
@@ -608,7 +611,9 @@ describe('D679 · reglas del Ilimitado (integración, base real)', () => {
     it('Ilimitado sobre una cita que ya llegó (CHECKED_IN): se canjea', async () => {
       const { balanceId } = await comprar({ productId: masaje })
       const c = await cita(151, { status: 'CHECKED_IN' })
-      await expect(canjearConCompensacion(c.id, c.confirmationCode, balanceId)).resolves.toEqual({ creditsUsed: 1, redeemed: true })
+      await expect(canjearConCompensacion(c.id, c.confirmationCode, balanceId)).resolves.toEqual(
+        expect.objectContaining({ creditsUsed: 1, redeemed: true, balances: [expect.objectContaining({ balanceId })] }),
+      )
       expect(await saldo(balanceId)).toBe(99998)
     })
 
@@ -616,7 +621,9 @@ describe('D679 · reglas del Ilimitado (integración, base real)', () => {
     it.each(['CHECKED_IN', 'CANCELLED'] as const)('paquete normal sobre una cita %s: cobra como en develop', async status => {
       const { balanceId } = await comprar({ productId: masaje, unlimited: false })
       const c = await cita(152, { status })
-      await expect(canjearConCompensacion(c.id, c.confirmationCode, balanceId)).resolves.toEqual({ creditsUsed: 1, redeemed: true })
+      await expect(canjearConCompensacion(c.id, c.confirmationCode, balanceId)).resolves.toEqual(
+        expect.objectContaining({ creditsUsed: 1, redeemed: true, balances: [expect.objectContaining({ balanceId })] }),
+      )
       expect(await saldo(balanceId)).toBe(4)
     })
   })

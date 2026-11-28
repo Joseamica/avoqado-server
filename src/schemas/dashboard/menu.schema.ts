@@ -176,6 +176,33 @@ export const ProductSchema = z.object({
   updatedAt: z.date(),
 })
 
+/**
+ * Mapa de lugares de una clase (tapetes, reformers, bicis). UNA regla para el alta y la edición del producto
+ * (`ProductBodyBase`) y para el asistente de alta (`CreateProductWithInventorySchema`).
+ * Una casilla APAGADA (`enabled: false`) no es un lugar: el editor del panel la manda con `label: ''` y así se acepta
+ * (antes, `min(1)` en todas tumbaba el mapa «dado» con un 400 «No puede quedar vacío»). Una casilla PRENDIDA sigue
+ * necesitando su número. Quien reserva sólo acepta ids de casillas prendidas (filtran por `enabled`).
+ */
+export const CLASS_LAYOUT_SPOT_SIN_NUMERO = 'Cada lugar activo necesita su número'
+
+export const ClassLayoutConfigSchema = z.object({
+  iconType: z.enum(['circle', 'bike', 'mat', 'reformer', 'bed', 'chair', 'generic']),
+  rows: z.number().int().min(1).max(20),
+  cols: z.number().int().min(1).max(20),
+  showInstructor: z.boolean().optional(),
+  spots: z.array(
+    z
+      .object({
+        id: z.string().min(1),
+        row: z.number().int().min(0),
+        col: z.number().int().min(0),
+        label: z.string(),
+        enabled: z.boolean(),
+      })
+      .refine(spot => !spot.enabled || spot.label.length > 0, { message: CLASS_LAYOUT_SPOT_SIN_NUMERO, path: ['label'] }),
+  ),
+})
+
 // Base object — shared between Create and Update (allows .partial())
 export const ProductBodyBase = z.object({
   sku: z.string().trim().regex(SKU_REGEX, SKU_FORMAT_MESSAGE),
@@ -229,24 +256,7 @@ export const ProductBodyBase = z.object({
 
   // Class fields (for CLASS type)
   maxParticipants: z.number().int().min(1).optional().nullable(),
-  layoutConfig: z
-    .object({
-      iconType: z.enum(['circle', 'bike', 'mat', 'reformer', 'bed', 'chair', 'generic']),
-      rows: z.number().int().min(1).max(20),
-      cols: z.number().int().min(1).max(20),
-      showInstructor: z.boolean().optional(),
-      spots: z.array(
-        z.object({
-          id: z.string().min(1),
-          row: z.number().int().min(0),
-          col: z.number().int().min(0),
-          label: z.string().min(1),
-          enabled: z.boolean(),
-        }),
-      ),
-    })
-    .optional()
-    .nullable(),
+  layoutConfig: ClassLayoutConfigSchema.optional().nullable(),
 
   // Event fields (for EVENT type)
   eventDate: z.string().datetime().optional().nullable(),

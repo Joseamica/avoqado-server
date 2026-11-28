@@ -28,6 +28,12 @@ function mkTx(opts: { customerByContact?: any; customerById?: any; purchaseCusto
     },
     creditItemBalance: {
       update: jest.fn(async () => ({})),
+      findUnique: jest.fn(async () => ({
+        remainingQuantity: 4,
+        originalQuantity: 5,
+        unlimited: false,
+        creditPackPurchase: { expiresAt: null, creditPack: { name: 'Paquete' } },
+      })),
       findFirst: jest.fn(async () => ({ id: 'bal-2', remainingQuantity: 4 })), // queda saldo: no se cierra la compra
     },
     creditTransaction: { create: jest.fn(async () => ({})) },
@@ -56,6 +62,7 @@ describe('redeemCreditsForReservation — identidad', () => {
     const r = await redeemCreditsForReservation(tx, { ...base, customerId: 'c_sesion', customerEmail: 'ajeno@x.com' })
 
     expect(r.redeemed).toBe(true)
+    expect(r.balances).toEqual([{ balanceId: 'bal-1', packName: 'Paquete', remaining: 4, original: 5, unlimited: false, expiresAt: null }])
     expect(tx.customer.findFirst).toHaveBeenCalledWith(
       expect.objectContaining({ where: expect.objectContaining({ id: 'c_sesion', venueId: 'v1' }) }),
     )
