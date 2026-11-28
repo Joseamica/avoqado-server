@@ -7409,6 +7409,12 @@
         "sourceRef": "f4e3180b42107eeb9e66a62174fa76fa21ffe9ad"
       }
     ],
+    "avoqado-web-dashboard:avoqado-booking-widget/src/components/ui/PaqueteExtras.tsx": [
+      {
+        "pagina": "dashboard/menu/crear-o-editar-paquete-de-creditos",
+        "sourceRef": "d883562edd583becbc3b9e0b4d800e6717d0a0d2"
+      }
+    ],
     "avoqado-web-dashboard:avoqado-booking-widget/src/order/i18n/es.json": [
       {
         "pagina": "dashboard/pedidos-en-linea/devolver-pedido-pagado-en-linea",
@@ -7626,7 +7632,7 @@
     "avoqado-web-dashboard:avoqado-server/src/routes/dashboard/creditPack.routes.ts": [
       {
         "pagina": "dashboard/menu/crear-o-editar-paquete-de-creditos",
-        "sourceRef": "0910a27a6665667fd0f7001f8b822bf933ff6ef8"
+        "sourceRef": "d883562edd583becbc3b9e0b4d800e6717d0a0d2"
       }
     ],
     "avoqado-web-dashboard:avoqado-server/src/routes/dashboard/financialConnection.routes.ts": [
@@ -7748,7 +7754,7 @@
     "avoqado-web-dashboard:avoqado-server/src/services/credits/ilimitado.ts": [
       {
         "pagina": "dashboard/menu/crear-o-editar-paquete-de-creditos",
-        "sourceRef": "0910a27a6665667fd0f7001f8b822bf933ff6ef8"
+        "sourceRef": "d883562edd583becbc3b9e0b4d800e6717d0a0d2"
       }
     ],
     "avoqado-web-dashboard:avoqado-server/src/services/dashboard/availableBalance.dashboard.service.ts": [
@@ -7766,7 +7772,7 @@
     "avoqado-web-dashboard:avoqado-server/src/services/dashboard/creditPack.dashboard.service.ts": [
       {
         "pagina": "dashboard/menu/crear-o-editar-paquete-de-creditos",
-        "sourceRef": "0910a27a6665667fd0f7001f8b822bf933ff6ef8"
+        "sourceRef": "d883562edd583becbc3b9e0b4d800e6717d0a0d2"
       }
     ],
     "avoqado-web-dashboard:avoqado-server/src/services/dashboard/customer.dashboard.service.ts": [
@@ -8094,7 +8100,7 @@
       },
       {
         "pagina": "dashboard/menu/crear-o-editar-paquete-de-creditos",
-        "sourceRef": "0910a27a6665667fd0f7001f8b822bf933ff6ef8"
+        "sourceRef": "d883562edd583becbc3b9e0b4d800e6717d0a0d2"
       },
       {
         "pagina": "dashboard/menu/crear-o-editar-servicio",
@@ -8248,7 +8254,7 @@
       },
       {
         "pagina": "dashboard/menu/crear-o-editar-paquete-de-creditos",
-        "sourceRef": "0910a27a6665667fd0f7001f8b822bf933ff6ef8"
+        "sourceRef": "d883562edd583becbc3b9e0b4d800e6717d0a0d2"
       },
       {
         "pagina": "dashboard/menu/crear-o-editar-servicio",
@@ -8382,7 +8388,7 @@
       },
       {
         "pagina": "dashboard/menu/crear-o-editar-paquete-de-creditos",
-        "sourceRef": "0910a27a6665667fd0f7001f8b822bf933ff6ef8"
+        "sourceRef": "d883562edd583becbc3b9e0b4d800e6717d0a0d2"
       },
       {
         "pagina": "dashboard/menu/crear-o-editar-servicio",
@@ -8510,7 +8516,7 @@
       },
       {
         "pagina": "dashboard/menu/crear-o-editar-paquete-de-creditos",
-        "sourceRef": "0910a27a6665667fd0f7001f8b822bf933ff6ef8"
+        "sourceRef": "d883562edd583becbc3b9e0b4d800e6717d0a0d2"
       },
       {
         "pagina": "dashboard/menu/crear-o-editar-servicio",
@@ -8540,7 +8546,7 @@
     "avoqado-web-dashboard:src/locales/es/creditPacks.json": [
       {
         "pagina": "dashboard/menu/crear-o-editar-paquete-de-creditos",
-        "sourceRef": "0910a27a6665667fd0f7001f8b822bf933ff6ef8"
+        "sourceRef": "d883562edd583becbc3b9e0b4d800e6717d0a0d2"
       }
     ],
     "avoqado-web-dashboard:src/locales/es/customers.json": [
@@ -8856,7 +8862,7 @@
       },
       {
         "pagina": "dashboard/menu/crear-o-editar-paquete-de-creditos",
-        "sourceRef": "0910a27a6665667fd0f7001f8b822bf933ff6ef8"
+        "sourceRef": "d883562edd583becbc3b9e0b4d800e6717d0a0d2"
       },
       {
         "pagina": "dashboard/pagos/enviar-recibo-por-correo",
@@ -9046,19 +9052,19 @@
     "avoqado-web-dashboard:src/pages/CreditPacks/CreditPackForm.tsx": [
       {
         "pagina": "dashboard/menu/crear-o-editar-paquete-de-creditos",
-        "sourceRef": "0910a27a6665667fd0f7001f8b822bf933ff6ef8"
+        "sourceRef": "d883562edd583becbc3b9e0b4d800e6717d0a0d2"
       }
     ],
     "avoqado-web-dashboard:src/pages/CreditPacks/CreditPackPurchases.tsx": [
       {
         "pagina": "dashboard/menu/crear-o-editar-paquete-de-creditos",
-        "sourceRef": "0910a27a6665667fd0f7001f8b822bf933ff6ef8"
+        "sourceRef": "d883562edd583becbc3b9e0b4d800e6717d0a0d2"
       }
     ],
     "avoqado-web-dashboard:src/pages/CreditPacks/CreditPacks.tsx": [
       {
         "pagina": "dashboard/menu/crear-o-editar-paquete-de-creditos",
-        "sourceRef": "0910a27a6665667fd0f7001f8b822bf933ff6ef8"
+        "sourceRef": "d883562edd583becbc3b9e0b4d800e6717d0a0d2"
       }
     ],
     "avoqado-web-dashboard:src/pages/Customers/CustomerDetail.tsx": [
@@ -9072,7 +9078,7 @@
       },
       {
         "pagina": "dashboard/menu/crear-o-editar-paquete-de-creditos",
-        "sourceRef": "0910a27a6665667fd0f7001f8b822bf933ff6ef8"
+        "sourceRef": "d883562edd583becbc3b9e0b4d800e6717d0a0d2"
       }
     ],
     "avoqado-web-dashboard:src/pages/Customers/CustomerGroups.tsx": [
@@ -9832,7 +9838,7 @@
       },
       {
         "pagina": "dashboard/menu/crear-o-editar-paquete-de-creditos",
-        "sourceRef": "0910a27a6665667fd0f7001f8b822bf933ff6ef8"
+        "sourceRef": "d883562edd583becbc3b9e0b4d800e6717d0a0d2"
       },
       {
         "pagina": "dashboard/menu/crear-o-editar-servicio",
@@ -9945,6 +9951,12 @@
       {
         "pagina": "dashboard/reservaciones/crear-cita",
         "sourceRef": "1fe15c5cd61ffe8386b239114ea6c8eb6f5e006a"
+      }
+    ],
+    "avoqado-web-dashboard:src/types/creditPack.ts": [
+      {
+        "pagina": "dashboard/menu/crear-o-editar-paquete-de-creditos",
+        "sourceRef": "d883562edd583becbc3b9e0b4d800e6717d0a0d2"
       }
     ],
     "avoqado-web-dashboard:src/utils/datetime.ts": [

@@ -1,8 +1,8 @@
 {
   "version": 1,
   "approvedBy": "Jose Antonio Amieva",
-  "approvedAt": "2026-11-28T03:53:18.508Z",
-  "approvedHash": "997145fc539f8aa3addb5b6100ad7bdca9db6902c51812f7941d2e0fc6f7b13e",
+  "approvedAt": "2026-11-28T04:25:47.296Z",
+  "approvedHash": "186442cc3bcd2e2607848fc621c0796f26b5ba6435df7bafcf27c896a8569ce3",
   "retired": {},
   "guides": {
     "android/ayuda/ver-version-de-la-app": {
@@ -758,7 +758,7 @@
       ]
     },
     "dashboard/menu/crear-o-editar-paquete-de-creditos": {
-      "sha256": "70655c5fb4361503f7b3ce1af93e623674ec96807ee028c80520a26bfd6343da",
+      "sha256": "3953bfe2cc24248b2a870b58e316f7e7a358b314be46347ef06d0ffba4f4c8fe",
       "requiredPermissions": [
         "menu:read",
         "creditPacks:read"
