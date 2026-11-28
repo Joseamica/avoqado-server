@@ -352,10 +352,14 @@ describe('🔴 las apps publicadas guardan el precio de una variante (formulario
     ).data
     return data.find((p: any) => p.id === productId)
   }
-  async function guardar(productId: string, body: Record<string, unknown>) {
+  async function guardar(productId: string, body: Record<string, unknown>, headers: Record<string, string> = {}) {
     const res = { status: jest.fn().mockReturnThis(), json: jest.fn() }
     const next = jest.fn()
-    await updateMobile({ params: { venueId: n.venueId, productId }, body, authContext: { userId: n.staffId } } as any, res as any, next)
+    await updateMobile(
+      { params: { venueId: n.venueId, productId }, body, headers, authContext: { userId: n.staffId } } as any,
+      res as any,
+      next,
+    )
     return { res, next }
   }
   const precio = async (id: string) => Number((await prisma.product.findUniqueOrThrow({ where: { id } })).price)
@@ -404,6 +408,25 @@ describe('🔴 las apps publicadas guardan el precio de una variante (formulario
     const guardado = await prisma.product.findUniqueOrThrow({ where: { id: p0.id } })
     expect(guardado.type).toBe(tipo)
     expect(Number(guardado.price)).toBe(250)
+  })
+
+  // Revisión de apps viejas (27-nov): iOS sí conoce CLASS; su «Producto» (REGULAR) es un cambio a propósito.
+  it('iOS (x-device-platform: IOS) sí cambia una clase a REGULAR', async () => {
+    const p0 = await prisma.product.create({
+      data: {
+        venueId: n.venueId,
+        sku: `ECO-IOS-${t()}`,
+        name: 'Clase que deja de serlo',
+        type: 'CLASS',
+        categoryId: n.categoryId,
+        price: 200,
+      } as any,
+      select: { id: true },
+    })
+    const p = await comoLoLeeLaApp(p0.id)
+    const { next } = await guardar(p0.id, cuerpoIos(p, { type: 'REGULAR' }), { 'x-device-platform': 'IOS' })
+    expect(next).not.toHaveBeenCalled()
+    expect((await prisma.product.findUniqueOrThrow({ where: { id: p0.id } })).type).toBe('REGULAR')
   })
 
   it('un producto que ANDROID sí conoce sigue pudiendo cambiar de tipo (REGULAR → FOOD_AND_BEV)', async () => {

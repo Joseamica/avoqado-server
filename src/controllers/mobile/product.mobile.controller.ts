@@ -366,8 +366,10 @@ export async function updateProduct(req: Request, res: Response, next: NextFunct
     // Android maps every type it doesn't know to REGULAR and sends `type` on every save (ArticlesModels.kt `productType`,
     // ArticlesViewModel.updateProduct). On a type Android can't show (CLASS, EVENT, RETAIL, FOOD…) that echo is not a change:
     // drop it, with or without a variant family — otherwise editing a class from the POS turned it «Regular» and it left the
-    // schedule (hz:nube0000:na75cfd0). Changing such a type is done from the dashboard.
-    if (data.type === 'REGULAR' && !ANDROID_KNOWN_PRODUCT_TYPES.includes(existing.type)) delete data.type
+    // schedule (hz:nube0000:na75cfd0). Changing such a type is done from the dashboard. iOS DOES know CLASS and lets
+    // the user pick «Producto» on purpose, so its REGULAR is a real change (it identifies itself with x-device-platform: IOS).
+    const esIos = String(req.headers?.['x-device-platform'] ?? '').toUpperCase() === 'IOS'
+    if (!esIos && data.type === 'REGULAR' && !ANDROID_KNOWN_PRODUCT_TYPES.includes(existing.type)) delete data.type
 
     // Variantes (spec §6): nombre, categoría, foto, tipo e IVA son del padre; la app manda el formulario entero y sólo un
     // cambio REAL responde 409. Una carrera con el agrupado la cierra el trigger (mapeado abajo).
