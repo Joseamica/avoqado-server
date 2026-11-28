@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from 'express'
 import { toPublicBookingPayload } from '@/services/public/publicBookingPayload'
+import { toPublicCancellationPolicy } from '@/services/public/publicCancellationPolicy'
 import * as reservationService from '../../services/dashboard/reservation.dashboard.service'
 import * as availabilityService from '../../services/dashboard/reservationAvailability.service'
 import { countAppointmentOccupancy, effectiveAppointmentPacing } from '../../services/dashboard/reservationAvailability.service'
@@ -40,10 +41,21 @@ import {
   redeemCreditsForReservation,
   requireSessionCustomerForCredits,
   titularDelPase,
+  type SaldoDespuesDelCanje,
 } from '@/services/reservation/creditRedemption.service'
 import { CREDIT_RESERVATION_NOT_ALIVE } from '@/services/credits/ilimitado'
 import { porcentajeDeDevolucion } from '@/services/dashboard/creditPack.public.service'
 import { enqueuePassSessionSync } from '@/services/aggregators/core/sessionSync.service'
+import { leerRangoDelHorario, type MotivoDeRangoInvalido } from '@/services/reservation/rangoDelHorario'
+
+/** Los mensajes de siempre del horario (el widget ya los conoce); «mis reservas de clase» tiene los suyos, en español. */
+const MENSAJE_DE_RANGO_DEL_HORARIO: Record<MotivoDeRangoInvalido, string> = {
+  FORMATO_DESDE: 'dateFrom must be YYYY-MM-DD',
+  FECHA_DESDE: 'dateFrom is not a valid date',
+  FORMATO_HASTA: 'dateTo must be YYYY-MM-DD',
+  FECHA_HASTA: 'dateTo is not a valid date',
+  HASTA_ANTES_DE_DESDE: 'dateTo must be on or after dateFrom',
+}
 
 // ==========================================
 // PUBLIC RESERVATION CONTROLLER (Unauthenticated)
@@ -456,6 +468,8 @@ export async function getVenueInfo(req: Request, res: Response, next: NextFuncti
       // internet cada campo nuevo de la config — así se filtró
       // `customerApprovalNotificationRoles`. Ver `publicBookingPayload.ts`.
       publicBooking: toPublicBookingPayload(settings.publicBooking as Record<string, unknown>),
+      // Lista blanca de 5 llaves (sin cobros por no llegar ni ajustes internos). Ver `publicCancellationPolicy.ts`.
+      cancellationPolicy: toPublicCancellationPolicy(settings.cancellation),
       // Venue-chat availability. `canMessage` is the single gate the booking
       // surfaces use to decide whether to render a "message us" affordance, so
       // a dead-end (no relay + no phone) never shows the customer a button that
@@ -530,35 +544,10 @@ export async function getAvailability(req: Request, res: Response, next: NextFun
       if (flowType !== 'class') {
         throw new BadRequestError('Range mode requires type=class')
       }
-      // YYYY-MM-DD validation — strict to keep the SQL query bounded.
-      const dateRe = /^\d{4}-\d{2}-\d{2}$/
-      if (!dateRe.test(dateFrom)) {
-        throw new BadRequestError('dateFrom must be YYYY-MM-DD')
-      }
-      const fromDate = new Date(`${dateFrom}T00:00:00Z`)
-      if (Number.isNaN(fromDate.getTime())) {
-        throw new BadRequestError('dateFrom is not a valid date')
-      }
-      // Default to +30 days when dateTo missing; cap at +60 days to avoid abuse.
-      let toDate: Date
-      if (dateTo) {
-        if (!dateRe.test(dateTo)) {
-          throw new BadRequestError('dateTo must be YYYY-MM-DD')
-        }
-        toDate = new Date(`${dateTo}T00:00:00Z`)
-        if (Number.isNaN(toDate.getTime())) {
-          throw new BadRequestError('dateTo is not a valid date')
-        }
-      } else {
-        toDate = new Date(fromDate)
-        toDate.setUTCDate(toDate.getUTCDate() + 30)
-      }
-      const maxTo = new Date(fromDate)
-      maxTo.setUTCDate(maxTo.getUTCDate() + 60)
-      if (toDate.getTime() > maxTo.getTime()) toDate = maxTo
-      if (toDate.getTime() < fromDate.getTime()) {
-        throw new BadRequestError('dateTo must be on or after dateFrom')
-      }
+      // YYYY-MM-DD, +30 days when dateTo is missing, capped at +60 days. ONE reader shared with
+      // `/customer/class-reservations`, so a class listed here is listed there with the same dates.
+      const rango = leerRangoDelHorario(dateFrom, dateTo)
+      if (!rango.ok) throw new BadRequestError(MENSAJE_DE_RANGO_DEL_HORARIO[rango.motivo])
 
       const onlinePercent = settings.scheduling?.onlineCapacityPercent ?? 100
       // Skip sessions that are too close to start to satisfy the venue's
@@ -574,7 +563,7 @@ export async function getAvailability(req: Request, res: Response, next: NextFun
       // refuse to book "con tanta anticipacion".
       const maxAdvanceDays = settings.scheduling?.maxAdvanceDays ?? 0
       const latestStart = maxAdvanceDays > 0 ? new Date(Date.now() + maxAdvanceDays * 24 * 60 * 60 * 1000) : null
-      const requestedEnd = new Date(`${toDate.toISOString().slice(0, 10)}T23:59:59.999`)
+      const requestedEnd = rango.hasta
       const effectiveEnd = latestStart && latestStart < requestedEnd ? latestStart : requestedEnd
 
       // Single Prisma query across the whole window — no per-product fan-out.
@@ -586,7 +575,7 @@ export async function getAvailability(req: Request, res: Response, next: NextFun
           status: 'SCHEDULED',
           ...(productId ? { productId } : { product: { type: 'CLASS', active: true } }),
           startsAt: {
-            gte: earliestStart && earliestStart > new Date(`${dateFrom}T00:00:00`) ? earliestStart : new Date(`${dateFrom}T00:00:00`),
+            gte: earliestStart && earliestStart > rango.desde ? earliestStart : rango.desde,
             lte: effectiveEnd,
           },
         },
@@ -645,7 +634,7 @@ export async function getAvailability(req: Request, res: Response, next: NextFun
 
       return res.json({
         dateFrom,
-        dateTo: toDate.toISOString().slice(0, 10),
+        dateTo: rango.dateTo,
         slots,
       })
     }
@@ -1103,6 +1092,8 @@ export async function createReservation(req: Request, res: Response, next: NextF
         depositAmount: reservation.upfrontAmount ?? null,
         creditRedeemed: reservation.creditRedeemed || false,
         creditsUsed: reservation.creditsUsed || 0,
+        // Sólo con canje: el saldo del paquete DESPUÉS de canjear (leído en la misma transacción).
+        ...(reservation.creditBalance ? { creditBalance: reservation.creditBalance } : {}),
         checkoutUrl,
         // owesAtVenue: true means policy was 'required' but the venue has no Stripe
         // configured. The reservation is CONFIRMED, but the customer is expected
@@ -1528,6 +1519,15 @@ export async function getReservation(req: Request, res: Response, next: NextFunc
       .filter((p): p is NonNullable<typeof p> => Boolean(p))
       .map(p => ({ id: p.id, name: p.name, price: p.price != null ? Number(p.price) : null, duration: p.duration ?? null }))
 
+    // Clase: la coach es la de la SESIÓN (la reserva de clase no lleva `assignedStaff`).
+    const classSessionId = (reservation as any).classSessionId as string | null | undefined
+    const claseConCoach = classSessionId
+      ? await prisma.classSession.findUnique({
+          where: { id: classSessionId },
+          select: { assignedStaff: { select: { firstName: true, lastName: true } } },
+        })
+      : null
+
     res.json({
       confirmationCode: reservation.confirmationCode,
       status: reservation.status,
@@ -1600,10 +1600,27 @@ export async function getReservation(req: Request, res: Response, next: NextFunc
         quantity: m.quantity,
         price: Number(m.price),
       })),
+      // Reserva de clase: lo que ve la pantalla «Listo» al volver de Stripe. Los lugares son los GUARDADOS (lo que eligió
+      // la clienta), nunca re-buscados en el mapa vigente. Una cita no trae estos campos.
+      ...(classSessionId
+        ? {
+            className: reservation.product?.name ?? 'Clase',
+            instructorName: instructorName(claseConCoach?.assignedStaff),
+            spotIds: ((reservation as any).spotIds as string[] | undefined) ?? [],
+          }
+        : {}),
     })
   } catch (error) {
     next(error)
   }
+}
+
+function instructorName(staff: { firstName: string | null; lastName: string | null } | null | undefined): string | null {
+  const nombre = [staff?.firstName, staff?.lastName]
+    .map(p => p?.trim())
+    .filter(Boolean)
+    .join(' ')
+  return nombre || null
 }
 
 function isWithinWindow(startsAt: Date, minHoursBefore: number | null): boolean {
@@ -2040,8 +2057,11 @@ async function createClassReservation(
       const effectiveCapacity = Math.floor((session.capacity * onlinePercent) / 100)
 
       if (enrolled + requestedPartySize > effectiveCapacity) {
+        const available = Math.max(0, effectiveCapacity - enrolled)
         throw new ConflictError(
           `No hay suficientes lugares disponibles. Disponibles: ${effectiveCapacity - enrolled}, solicitados: ${requestedPartySize}`,
+          'CLASS_FULL',
+          { available },
         )
       }
 
@@ -2067,7 +2087,9 @@ async function createClassReservation(
         })
         if (takenReservations.length > 0) {
           const takenIds = takenReservations.flatMap(r => r.spotIds).filter(id => requestedSpotIds.includes(id))
-          throw new ConflictError(`Los lugares ${takenIds.join(', ')} ya estan reservados`)
+          throw new ConflictError(`Los lugares ${takenIds.join(', ')} ya estan reservados`, 'SPOTS_TAKEN', {
+            takenSpotIds: [...new Set(takenIds)],
+          })
         }
       }
 
@@ -2142,9 +2164,10 @@ async function createClassReservation(
       // Charges N credits where N = requestedPartySize (one credit per seat).
       let creditRedeemed = false
       let creditsUsed = 0
+      let creditBalance: SaldoDespuesDelCanje | undefined
       if (body.creditItemBalanceId) {
         // Fase 0.B: los créditos son SÓLO del customer de la sesión; sin sesión → 401. Mismo canje que la cita (D679).
-        await redeemCreditsForReservation(tx, {
+        const canje = await redeemCreditsForReservation(tx, {
           venueId,
           reservationId: reservation.id,
           confirmationCode: reservation.confirmationCode,
@@ -2154,6 +2177,7 @@ async function createClassReservation(
           expectedProductIds: [session.productId],
           contexto: 'CLASE',
         })
+        creditBalance = canje.balances?.[0]
 
         creditRedeemed = true
         creditsUsed = requestedPartySize
@@ -2192,7 +2216,7 @@ async function createClassReservation(
       }
       await enqueuePassSessionSync(tx, venueId, body.classSessionId)
 
-      return { ...reservation, creditRedeemed, creditsUsed, requiresUpfrontCash, owesAtVenue, upfrontAmount }
+      return { ...reservation, creditRedeemed, creditsUsed, creditBalance, requiresUpfrontCash, owesAtVenue, upfrontAmount }
     },
     { reintentarInterbloqueo: true, etiqueta: 'createClassReservation' },
   )

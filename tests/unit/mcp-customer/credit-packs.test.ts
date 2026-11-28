@@ -93,6 +93,48 @@ describe('list_credit_packs (read, creditPacks:read)', () => {
     })
   })
 
+  it('reporta el destacado del paquete como badge, o null si no tiene', async () => {
+    mockGetPacks.mockResolvedValueOnce([
+      {
+        id: 'a',
+        name: 'A',
+        price: 1,
+        currency: 'MXN',
+        active: true,
+        _count: { purchases: 0 },
+        items: [],
+        badgeText: 'Más popular',
+        badgeIcon: 'star',
+      },
+      {
+        id: 'b',
+        name: 'B',
+        price: 1,
+        currency: 'MXN',
+        active: true,
+        _count: { purchases: 0 },
+        items: [],
+        badgeText: 'Oferta',
+        badgeIcon: null,
+      },
+      {
+        id: 'c',
+        name: 'C',
+        price: 1,
+        currency: 'MXN',
+        active: true,
+        _count: { purchases: 0 },
+        items: [],
+        badgeText: null,
+        badgeIcon: null,
+      },
+    ])
+    const out = parse(await call('list_credit_packs', { venueId: 'v1' }))
+    expect(out.creditPacks[0].badge).toEqual({ text: 'Más popular', icon: 'star' })
+    expect(out.creditPacks[1].badge).toEqual({ text: 'Oferta', icon: null })
+    expect(out.creditPacks[2].badge).toBeNull()
+  })
+
   it('includeInactive keeps inactive packs', async () => {
     mockGetPacks.mockResolvedValueOnce([
       { id: 'cp2', name: 'Viejo', price: 100, currency: 'MXN', active: false, _count: { purchases: 0 }, items: [] },

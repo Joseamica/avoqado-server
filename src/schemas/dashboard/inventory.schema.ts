@@ -14,7 +14,7 @@ import {
 import { Decimal } from '@prisma/client/runtime/library'
 import { WASTE_REASON_CODES } from '../../services/shared/wasteReasons'
 import { WASTE_KEY_PATTERN } from '../../services/shared/wasteKey'
-import { ProductBodyBase } from './menu.schema'
+import { ClassLayoutConfigSchema, ProductBodyBase } from './menu.schema'
 
 // Some legacy products and raw materials in production use non-cuid-v1 IDs
 // (e.g. "rb44l0fgk30kp0soskrlys5c", "prod_ad_blanq_003", UUIDs). Strict z.cuid()
@@ -959,24 +959,8 @@ export const CreateProductWithInventorySchema = z.object({
       maxParticipants: z.number().int().min(1).optional(),
       // Estación de impresión (ruteo de comandas)
       printStationId: z.string().min(1, 'La estación es requerida').nullable().optional(),
-      layoutConfig: z
-        .object({
-          iconType: z.enum(['circle', 'bike', 'mat', 'reformer', 'bed', 'chair', 'generic']),
-          rows: z.number().int().min(1).max(20),
-          cols: z.number().int().min(1).max(20),
-          showInstructor: z.boolean().optional(),
-          spots: z.array(
-            z.object({
-              id: z.string().min(1),
-              row: z.number().int().min(0),
-              col: z.number().int().min(0),
-              label: z.string().min(1),
-              enabled: z.boolean(),
-            }),
-          ),
-        })
-        .optional()
-        .nullable(),
+      // Misma regla que el alta y la edición: una casilla apagada puede ir sin etiqueta (mapa «dado»).
+      layoutConfig: ClassLayoutConfigSchema.optional().nullable(),
     }),
     inventory: z.object({
       useInventory: z.boolean(),

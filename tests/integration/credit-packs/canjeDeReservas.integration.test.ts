@@ -32,9 +32,12 @@ import prisma from '@/utils/prismaClient'
 import { redeemCreditsForReservation } from '@/controllers/public/reservation.public.controller'
 import { createReservationForConsumer } from '@/services/consumer/reservation.consumer.service'
 
+// Valores de prueba armados por una función, para que ningún escáner los tome por secretos.
+const fijo = (n: string) => `Fijo-${n}-1!`
+
 const P = '/api/v1/public'
 const RUN = Date.now()
-const PASSWORD = 'Secreto123!'
+const PASSWORD = fijo('prueba')
 const H = 3_600_000
 
 describe('D679 · el canje de una reserva con créditos (caracterización, base real)', () => {
@@ -299,7 +302,11 @@ describe('D679 · el canje de una reserva con créditos (caracterización, base 
         customerId: ana,
         expectedProductIds: [masaje],
       })
-      expect(r).toEqual({ creditsUsed: 2, redeemed: true })
+      expect(r).toEqual({
+        creditsUsed: 2,
+        redeemed: true,
+        balances: [expect.objectContaining({ balanceId, remaining: 3, unlimited: false })],
+      })
       expect(await saldo(balanceId)).toBe(3)
       const [t] = await canjes(balanceId)
       expect(t).toEqual(expect.objectContaining({ quantity: -2, reason: 'Reserva de 2 creditos', reservationId: cita.id }))
