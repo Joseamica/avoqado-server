@@ -1,8 +1,8 @@
 {
   "version": 1,
-  "approvedBy": null,
-  "approvedAt": null,
-  "approvedHash": null,
+  "approvedBy": "jose",
+  "approvedAt": "2026-11-28T03:51:03.712Z",
+  "approvedHash": "8a8173c2535b3b166c7b594a728d857d591635f7e147108975903898624d691f",
   "retired": {},
   "guides": {
     "android/ayuda/ver-version-de-la-app": {
