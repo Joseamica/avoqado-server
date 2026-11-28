@@ -364,8 +364,10 @@ export async function updateProduct(req: Request, res: Response, next: NextFunct
     if (data.cost !== undefined && data.cost !== null) data.cost = parseFloat(String(data.cost))
 
     // Android maps every type it doesn't know to REGULAR and sends `type` on every save (ArticlesModels.kt `productType`,
-    // ArticlesViewModel.updateProduct). On a variant of an inherited type (RETAIL, FOOD…) that echo is not a change: drop it.
-    if (existing.productGroupId && data.type === 'REGULAR' && !ANDROID_KNOWN_PRODUCT_TYPES.includes(existing.type)) delete data.type
+    // ArticlesViewModel.updateProduct). On a type Android can't show (CLASS, EVENT, RETAIL, FOOD…) that echo is not a change:
+    // drop it, with or without a variant family — otherwise editing a class from the POS turned it «Regular» and it left the
+    // schedule (hz:nube0000:na75cfd0). Changing such a type is done from the dashboard.
+    if (data.type === 'REGULAR' && !ANDROID_KNOWN_PRODUCT_TYPES.includes(existing.type)) delete data.type
 
     // Variantes (spec §6): nombre, categoría, foto, tipo e IVA son del padre; la app manda el formulario entero y sólo un
     // cambio REAL responde 409. Una carrera con el agrupado la cierra el trigger (mapeado abajo).

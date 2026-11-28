@@ -364,6 +364,15 @@ describe('Credit Pack Dashboard Service', () => {
       )
     })
 
+    it('hz:nube0000:na8d234c: Stripe se llama con tope de 5 s y sin reintentos (un Stripe lento no detiene el guardado)', async () => {
+      prismaMock.product.findMany.mockResolvedValue([{ id: 'product-123' }, { id: 'product-456' }])
+      prismaMock.creditPack.create.mockResolvedValue(createMockPack())
+      await createCreditPack('venue-123', createData)
+      const opciones = { timeout: 5000, maxNetworkRetries: 0 }
+      expect(mockStripeInstance.products.create).toHaveBeenCalledWith(expect.anything(), opciones)
+      expect(mockStripeInstance.prices.create).toHaveBeenCalledWith(expect.anything(), opciones)
+    })
+
     it('should handle Stripe failure gracefully (create pack without stripe IDs)', async () => {
       // Make the Stripe product creation fail
       mockStripeInstance.products.create.mockRejectedValueOnce(new Error('Stripe API error'))
@@ -517,15 +526,18 @@ describe('Credit Pack Dashboard Service', () => {
       await updateCreditPack('venue-123', 'pack-123', { price: 750 })
 
       // The service creates a new Stripe price
-      expect(mockStripeInstance.prices.create).toHaveBeenCalledWith({
-        product: 'prod_test',
-        unit_amount: 75000,
-        currency: 'mxn',
-        metadata: { type: 'credit_pack', venueId: 'venue-123' },
-      })
+      expect(mockStripeInstance.prices.create).toHaveBeenCalledWith(
+        {
+          product: 'prod_test',
+          unit_amount: 75000,
+          currency: 'mxn',
+          metadata: { type: 'credit_pack', venueId: 'venue-123' },
+        },
+        { timeout: 5000, maxNetworkRetries: 0 },
+      )
 
       // The service archives the old price
-      expect(mockStripeInstance.prices.update).toHaveBeenCalledWith('price_old', { active: false })
+      expect(mockStripeInstance.prices.update).toHaveBeenCalledWith('price_old', { active: false }, { timeout: 5000, maxNetworkRetries: 0 })
     })
 
     it('cambiar el producto: el renglón viejo sale (sus saldos vendidos sólo pierden el enlace) y entra el nuevo', async () => {

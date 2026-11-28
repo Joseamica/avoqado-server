@@ -41,6 +41,14 @@ function renglonResuelto(pedido: RenglonPedido, actual: { unlimited: boolean } |
  * with Stripe's own 401 instead of a synchronous constructor throw.
  */
 let stripeInstance: Stripe | null = null
+
+/**
+ * hz:nube0000:na8d234c: el producto y el precio de Stripe del paquete son de adorno (nadie los lee para cobrar) y el
+ * paquete se guarda igual sin ellos. Sin tope, un Stripe lento hacía esperar al guardado hasta 80 s por intento: el POS
+ * cortaba a los 30 s con «No se pudo guardar», el paquete sí quedaba y el reintento lo duplicaba. Con 5 s y sin
+ * reintentos, crear o editar espera a lo más ~10 s.
+ */
+export const STRIPE_DEL_PAQUETE: Stripe.RequestOptions = { timeout: 5_000, maxNetworkRetries: 0 }
 function getStripe(): Stripe {
   if (stripeInstance) return stripeInstance
   const key = process.env.STRIPE_SECRET_KEY || 'sk_test_placeholder'
@@ -139,17 +147,23 @@ export async function createCreditPack(
   if (!(await omitirPorDemo('producto de Stripe del paquete', null, venueId)))
     try {
       const stripe = getStripe()
-      const stripeProduct = await stripe.products.create({
-        name: data.name,
-        metadata: { type: 'credit_pack', venueId },
-      })
+      const stripeProduct = await stripe.products.create(
+        {
+          name: data.name,
+          metadata: { type: 'credit_pack', venueId },
+        },
+        STRIPE_DEL_PAQUETE,
+      )
 
-      const stripePrice = await stripe.prices.create({
-        product: stripeProduct.id,
-        unit_amount: Math.round(data.price * 100),
-        currency: (data.currency || 'MXN').toLowerCase(),
-        metadata: { type: 'credit_pack', venueId },
-      })
+      const stripePrice = await stripe.prices.create(
+        {
+          product: stripeProduct.id,
+          unit_amount: Math.round(data.price * 100),
+          currency: (data.currency || 'MXN').toLowerCase(),
+          metadata: { type: 'credit_pack', venueId },
+        },
+        STRIPE_DEL_PAQUETE,
+      )
 
       stripeProductId = stripeProduct.id
       stripePriceId = stripePrice.id
@@ -227,17 +241,20 @@ export async function updateCreditPack(
   if (data.price !== undefined && Number(existing.price) !== data.price && existing.stripeProductId) {
     try {
       const stripe = getStripe()
-      const newPrice = await stripe.prices.create({
-        product: existing.stripeProductId,
-        unit_amount: Math.round(data.price * 100),
-        currency: (data.currency || 'MXN').toLowerCase(),
-        metadata: { type: 'credit_pack', venueId },
-      })
+      const newPrice = await stripe.prices.create(
+        {
+          product: existing.stripeProductId,
+          unit_amount: Math.round(data.price * 100),
+          currency: (data.currency || 'MXN').toLowerCase(),
+          metadata: { type: 'credit_pack', venueId },
+        },
+        STRIPE_DEL_PAQUETE,
+      )
       stripePriceId = newPrice.id
 
       // Archive old price
       if (existing.stripePriceId) {
-        await stripe.prices.update(existing.stripePriceId, { active: false })
+        await stripe.prices.update(existing.stripePriceId, { active: false }, STRIPE_DEL_PAQUETE)
       }
     } catch (error) {
       logger.warn('⚠️ [CREDIT PACK] Failed to update Stripe price', {
