@@ -383,6 +383,46 @@ describe('🔴 las apps publicadas guardan el precio de una variante (formulario
     expect(await precio(comida)).toBe(antes)
   })
 
+  // hz:nube0000:na75cfd0: una CLASE sin familia que se edita desde ANDROID (que no conoce CLASS y manda REGULAR) seguía
+  // volviéndose «Regular» y dejaba de salir en el horario. El eco se ignora también sin familia.
+  it.each(['CLASS', 'EVENT', 'RETAIL'])('Android cambia el precio de un %s sin familia → el tipo no cambia', async tipo => {
+    const p0 = await prisma.product.create({
+      data: {
+        venueId: n.venueId,
+        sku: `ECO-${tipo}-${t()}`,
+        name: `Producto ${tipo}`,
+        type: tipo as any,
+        categoryId: n.categoryId,
+        price: 200,
+      } as any,
+      select: { id: true },
+    })
+    const p = await comoLoLeeLaApp(p0.id)
+    const { res, next } = await guardar(p0.id, cuerpoAndroid(p, { price: 250 }))
+    expect(next).not.toHaveBeenCalled()
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ success: true }))
+    const guardado = await prisma.product.findUniqueOrThrow({ where: { id: p0.id } })
+    expect(guardado.type).toBe(tipo)
+    expect(Number(guardado.price)).toBe(250)
+  })
+
+  it('un producto que ANDROID sí conoce sigue pudiendo cambiar de tipo (REGULAR → FOOD_AND_BEV)', async () => {
+    const p0 = await prisma.product.create({
+      data: {
+        venueId: n.venueId,
+        sku: `ECO-REG-${t()}`,
+        name: 'Producto regular',
+        type: 'REGULAR',
+        categoryId: n.categoryId,
+        price: 50,
+      } as any,
+      select: { id: true },
+    })
+    const p = await comoLoLeeLaApp(p0.id)
+    await guardar(p0.id, cuerpoAndroid(p, { type: 'FOOD_AND_BEV' }))
+    expect((await prisma.product.findUniqueOrThrow({ where: { id: p0.id } })).type).toBe('FOOD_AND_BEV')
+  })
+
   it('un cambio REAL de tipo en la variante sigue dando 409 (FOOD → FOOD_AND_BEV)', async () => {
     const p = await comoLoLeeLaApp(comida)
     const { next } = await guardar(comida, cuerpoAndroid(p, { type: 'FOOD_AND_BEV' }))
